@@ -244,14 +244,25 @@ async def send_broadcast(context: ContextTypes.DEFAULT_TYPE, text: str):
             success += 1
         except:
             failed += 1
-        if i % 10 == 0 or i == total:
-            await status.edit_text(f"📢 در حال پخش...
+
+if i % 10 == 0 or i == total:
+    await status.edit_text(
+        f"""📢 در حال پخش...
+
 ✅ موفق: {success}
 ❌ شکست: {failed}
-{i}/{total}")
-        await asyncio.sleep(0.2)
-    await status.edit_text(f"✅ پخش تمام شد!
-موفق: {success} | شکست: {failed}")
+
+{i}/{total}"""
+    )
+
+await asyncio.sleep(0.2)
+
+await status.edit_text(
+    f"""✅ پخش تمام شد!
+
+موفق: {success}
+شکست: {failed}"""
+)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
