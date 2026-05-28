@@ -1,4 +1,4 @@
-python-telegram-bot~=20.8
+python-telegram-bot==20.8
 jdatetime==4.1.1
 pytz==2024.1
 aiofiles==23.2.1
