@@ -236,33 +236,41 @@ async def send_with_banner(msg, text: str, section_key: str, reply_markup=None):
 async def send_broadcast(context: ContextTypes.DEFAULT_TYPE, text: str):
     users = await get_all_users()
     total = len(users)
-    success = failed = 0
-    status = await context.bot.send_message(ADMIN_ID, f"📢 شروع پخش به {total} کاربر...")
+
+    success = 0
+    failed = 0
+
+    status = await context.bot.send_message(
+        ADMIN_ID,
+        f"📢 شروع پخش به {total} کاربر..."
+    )
+
     for i, uid in enumerate(users, 1):
         try:
             await context.bot.send_message(uid, text)
             success += 1
-        except:
+
+        except TelegramError:
             failed += 1
 
-if i % 10 == 0 or i == total:
-    await status.edit_text(
-        f"""📢 در حال پخش...
+        if i % 10 == 0 or i == total:
+            await status.edit_text(
+                f"""📢 در حال پخش...
 
 ✅ موفق: {success}
 ❌ شکست: {failed}
 
 {i}/{total}"""
-    )
+            )
 
-await asyncio.sleep(0.2)
+        await asyncio.sleep(0.2)
 
-await status.edit_text(
-    f"""✅ پخش تمام شد!
+    await status.edit_text(
+        f"""✅ پخش تمام شد!
 
 موفق: {success}
 شکست: {failed}"""
-)
+    )
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
