@@ -236,41 +236,22 @@ async def send_with_banner(msg, text: str, section_key: str, reply_markup=None):
 async def send_broadcast(context: ContextTypes.DEFAULT_TYPE, text: str):
     users = await get_all_users()
     total = len(users)
-
-    success = 0
-    failed = 0
-
-    status = await context.bot.send_message(
-        ADMIN_ID,
-        f"📢 شروع پخش به {total} کاربر..."
-    )
-
+    success = failed = 0
+    status = await context.bot.send_message(ADMIN_ID, f"📢 شروع پخش به {total} کاربر...")
     for i, uid in enumerate(users, 1):
         try:
             await context.bot.send_message(uid, text)
             success += 1
-
-        except TelegramError:
+        except:
             failed += 1
-
         if i % 10 == 0 or i == total:
-            await status.edit_text(
-                f"""📢 در حال پخش...
-
+            await status.edit_text(f"📢 در حال پخش...
 ✅ موفق: {success}
 ❌ شکست: {failed}
-
-{i}/{total}"""
-            )
-
+{i}/{total}")
         await asyncio.sleep(0.2)
-
-    await status.edit_text(
-        f"""✅ پخش تمام شد!
-
-موفق: {success}
-شکست: {failed}"""
-    )
+    await status.edit_text(f"✅ پخش تمام شد!
+موفق: {success} | شکست: {failed}")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -297,15 +278,9 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "dash":
         t = await total_users()
         d = await today_users()
-        await query.message.edit_text(
-    box(
-        "داشبورد",
-        f"""👥 کل کاربران: {t}
-📅 امروز: {d}"""
-    ),
-    reply_markup=admin_menu()
-)
-    
+        await query.message.edit_text(box("داشبورد", f"👥 کل کاربران: {t}
+📅 امروز: {d}"), reply_markup=admin_menu())
+
     elif data == "users":
         async with db.execute("SELECT user_id, first_name, last_seen FROM users ORDER BY last_seen DESC LIMIT 15") as c:
             rows = await c.fetchall()
