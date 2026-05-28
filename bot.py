@@ -140,7 +140,7 @@ async def total_users():
         return (await c.fetchone())[0]
 
 async def today_users():
-    async with db.execute("SELECT COUNT(*) FROM users WHERE DATE(last_seen)=DATE("now")") as c:
+    async with db.execute("SELECT COUNT(*) FROM users WHERE DATE(last_seen)=DATE('now')") as c:
         return (await c.fetchone())[0]
 
 WINDOW, LIMIT, BLOCK = 10, 7, 60
