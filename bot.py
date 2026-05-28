@@ -297,15 +297,14 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "dash":
         t = await total_users()
         d = await today_users()
-
         await query.message.edit_text(
-            box(
-                "داشبورد",
-                f"""👥 کل کاربران: {t}
-    📅 امروز: {d}"""
-            ),
-            reply_markup=admin_menu()
-        )
+    box(
+        "داشبورد",
+        f"""👥 کل کاربران: {t}
+📅 امروز: {d}"""
+    ),
+    reply_markup=admin_menu()
+)
     
     elif data == "users":
         async with db.execute("SELECT user_id, first_name, last_seen FROM users ORDER BY last_seen DESC LIMIT 15") as c:
