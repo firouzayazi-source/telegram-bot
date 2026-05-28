@@ -1,0 +1,5 @@
+[phases.install]
+cmds = ["pip install python-telegram-bot aiosqlite jdatetime pytz aiofiles"]
+
+[start]
+cmd = "python bot.py"
