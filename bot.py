@@ -695,8 +695,7 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data.startswith("cdel_"):
         cid = data[5:]
-        global contacts
-        contacts = [x for x in contacts if x["id"] != cid]
+        contacts[:] = [x for x in contacts if x["id"] != cid]
         await save_contacts()
         await query.answer("🗑 حذف شد.", show_alert=True)
         await query.message.edit_text("📞 مدیریت روش‌های تماس\n──────────────", reply_markup=contacts_list_keyboard())
@@ -783,7 +782,6 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # TEXT HANDLER
 # ======================================
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global responses, contacts
     user = update.effective_user
     text = update.message.text.strip()
     await save_user(user)
@@ -871,6 +869,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "type":  ctype,
                 "value": text,
             })
+            
             await save_contacts()
             await update.message.reply_text("✅ روش تماس جدید اضافه شد.", reply_markup=main_menu())
             return
