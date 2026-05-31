@@ -428,12 +428,18 @@ def workhours_day_keyboard(day_key: str):
 
 # ── تماس کاربر ──
 def contact_user_keyboard():
+    if not contacts:
+        return None
     btns = []
     row  = []
     for i, c in enumerate(contacts):
-        row.append(InlineKeyboardButton(f"{c['icon']} {c['title']}", url=make_contact_link(c)))
+        link = make_contact_link(c)
+        if not link:
+            continue
+        row.append(InlineKeyboardButton(f"{c['icon']} {c['title']}", url=link))
         if len(row) == 2 or i == len(contacts) - 1:
-            btns.append(row)
+            if row:
+                btns.append(row)
             row = []
     return InlineKeyboardMarkup(btns) if btns else None
 
@@ -907,13 +913,11 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for k, v in MENU_ITEMS.items():
         if text == v:
             if k == "4":
-                support_text = box(v, responses.get(k, "تنظیم نشده"))
-                open_msg     = workhours.get("msg_open", "✅ فروشگاه باز است")
-                closed_msg   = workhours.get("msg_closed", "🕐 فروشگاه بسته است")
-                status_line  = open_msg if is_open_now() else closed_msg
-                full_text    = f"{status_line}\n\n{support_text}"
-                kb           = contact_user_keyboard()
-                b            = get_banner(k)
+                status_line = workhours.get("msg_open", "✅ فروشگاه باز است") if is_open_now() else workhours.get("msg_closed", "🕐 فروشگاه بسته است")
+                content     = responses.get(k, "")
+                full_text   = f"{status_line}\n\n{box(v, content)}" if content and content != "تنظیم نشده" else status_line
+                kb          = contact_user_keyboard()
+                b           = get_banner(k)
                 if b.get("active") and b.get("file_id"):
                     try:
                         await update.message.reply_photo(photo=b["file_id"], caption=full_text, reply_markup=kb)
