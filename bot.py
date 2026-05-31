@@ -1,5 +1,37 @@
 import os
-ers.db"
+import json
+import time
+import asyncio
+import logging
+import aiosqlite
+import jdatetime
+import pytz
+from datetime import datetime
+from collections import defaultdict, deque
+import aiofiles
+
+from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, MessageHandler,
+    CallbackQueryHandler, ContextTypes, filters
+)
+
+# ======================================
+# DISABLE PROXY
+# ======================================
+os.environ.pop("HTTP_PROXY", None)
+os.environ.pop("HTTPS_PROXY", None)
+os.environ.pop("ALL_PROXY", None)
+os.environ["NO_PROXY"] = "*"
+
+# ======================================
+# CONFIG
+# ======================================
+TOKEN = os.getenv("BOT_TOKEN", "8792062012:AAGXforSa1IY45AuC-yOHs2PsdzudvtdD44")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "638469407"))
+
+DATA_FILE      = "data.json"
+DB_FILE        = "users.db"
 BANNER_FILE    = "banner.json"
 CONTACTS_FILE  = "contacts.json"
 WORKHOURS_FILE = "workhours.json"
