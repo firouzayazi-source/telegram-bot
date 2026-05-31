@@ -113,17 +113,20 @@ def get_banner(key: str) -> dict:
         banners[key] = {"file_id": None, "active": False}
     return banners[key]
 
-def make_contact_link(c: dict) -> str:
+def make_contact_link(c: dict):
+    """فقط لینک https برمیگردونه - tel: در تلگرام کار نمیکنه"""
     t = c.get("type", "")
     v = c.get("value", "")
     if t == "phone":
-        return f"tel:{v}"
+        return None
     elif t == "whatsapp":
         num = v.replace("+", "").replace("00", "", 1)
         return f"https://wa.me/{num}"
     elif t == "telegram":
         return f"https://t.me/{v.lstrip('@')}"
-    return v
+    elif t == "url":
+        return v
+    return None
 
 def is_open_now() -> bool:
     if not workhours.get("enabled", True):
@@ -428,20 +431,27 @@ def workhours_day_keyboard(day_key: str):
 
 # ── تماس کاربر ──
 def contact_user_keyboard():
+    """دکمه‌های لینک‌دار (واتساپ، تلگرام، url) — تلفن‌ها توی متن پیام میان"""
     if not contacts:
         return None
     btns = []
     row  = []
-    for i, c in enumerate(contacts):
+    link_contacts = [c for c in contacts if make_contact_link(c)]
+    for i, c in enumerate(link_contacts):
         link = make_contact_link(c)
-        if not link:
-            continue
         row.append(InlineKeyboardButton(f"{c['icon']} {c['title']}", url=link))
-        if len(row) == 2 or i == len(contacts) - 1:
+        if len(row) == 2 or i == len(link_contacts) - 1:
             if row:
                 btns.append(row)
             row = []
     return InlineKeyboardMarkup(btns) if btns else None
+
+def phone_lines() -> str:
+    phones = [c for c in contacts if c.get("type") == "phone"]
+    if not phones:
+        return ""
+    lines = "\n".join([f"{c['icon']} {c['title']}: {c['value']}" for c in phones])
+    return f"\n\n📞 تماس مستقیم:\n{lines}"
 
 # ======================================
 # SEND WITH BANNER
@@ -915,7 +925,9 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if k == "4":
                 status_line = workhours.get("msg_open", "✅ فروشگاه باز است") if is_open_now() else workhours.get("msg_closed", "🕐 فروشگاه بسته است")
                 content     = responses.get(k, "")
-                full_text   = f"{status_line}\n\n{box(v, content)}" if content and content != "تنظیم نشده" else status_line
+                phones      = phone_lines()
+                main_text   = box(v, content) if content and content != "تنظیم نشده" else ""
+                full_text   = status_line + (f"\n\n{main_text}" if main_text else "") + phones
                 kb          = contact_user_keyboard()
                 b           = get_banner(k)
                 if b.get("active") and b.get("file_id"):
