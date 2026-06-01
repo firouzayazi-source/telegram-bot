@@ -28,6 +28,7 @@ DB_FILE        = "users.db"
 BANNER_FILE    = "banner.json"
 WORKHOURS_FILE = "workhours.json"
 BUTTONS_FILE   = "buttons.json"
+SETTINGS_FILE  = "settings.json"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -42,7 +43,7 @@ def gregorian_now():
     return datetime.now(IRAN_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
 # ======================================
-# MENU — برای گزینه جدید فقط اینجا اضافه کن
+# MENU
 # ======================================
 MENU_ITEMS = {
     "1": "🌐 شبکه‌های اجتماعی",
@@ -60,6 +61,11 @@ SECTION_NAMES = {
     "5": "📍 آدرس فروشگاه",
 }
 
+DAY_NAMES = {
+    "0":"شنبه","1":"یکشنبه","2":"دوشنبه",
+    "3":"سه‌شنبه","4":"چهارشنبه","5":"پنجشنبه","6":"جمعه"
+}
+
 # ======================================
 # GLOBALS
 # ======================================
@@ -67,20 +73,28 @@ responses = None
 banners   = {}
 workhours = {}
 buttons   = {}
+settings  = {}   # تنظیمات کلی — فعال/غیرفعال قابلیت‌ها
 
 DEFAULT_WORKHOURS = {
     "enabled": True,
     "schedule": {
-        "0": {"open": True,  "shifts": [{"from": "11:00", "to": "14:00"}, {"from": "17:00", "to": "23:00"}]},
-        "1": {"open": True,  "shifts": [{"from": "11:00", "to": "14:00"}, {"from": "17:00", "to": "23:00"}]},
-        "2": {"open": True,  "shifts": [{"from": "11:00", "to": "14:00"}, {"from": "17:00", "to": "23:00"}]},
-        "3": {"open": True,  "shifts": [{"from": "11:00", "to": "14:00"}, {"from": "17:00", "to": "23:00"}]},
-        "4": {"open": True,  "shifts": [{"from": "11:00", "to": "14:00"}, {"from": "17:00", "to": "23:00"}]},
-        "5": {"open": True,  "shifts": [{"from": "11:00", "to": "14:00"}, {"from": "17:00", "to": "23:00"}]},
-        "6": {"open": True,  "shifts": [{"from": "17:00", "to": "23:00"}]},
+        "0": {"open": True,  "shifts": [{"from":"11:00","to":"14:00"},{"from":"17:00","to":"23:00"}]},
+        "1": {"open": True,  "shifts": [{"from":"11:00","to":"14:00"},{"from":"17:00","to":"23:00"}]},
+        "2": {"open": True,  "shifts": [{"from":"11:00","to":"14:00"},{"from":"17:00","to":"23:00"}]},
+        "3": {"open": True,  "shifts": [{"from":"11:00","to":"14:00"},{"from":"17:00","to":"23:00"}]},
+        "4": {"open": True,  "shifts": [{"from":"11:00","to":"14:00"},{"from":"17:00","to":"23:00"}]},
+        "5": {"open": True,  "shifts": [{"from":"11:00","to":"14:00"},{"from":"17:00","to":"23:00"}]},
+        "6": {"open": True,  "shifts": [{"from":"17:00","to":"23:00"}]},
     },
     "msg_open":   "✅ فروشگاه استوک لند الان باز است!\nخوش آمدید 🛍",
     "msg_closed": "🕐 فروشگاه الان تعطیل است.\n\n⏰ ساعات کاری:\nشنبه تا پنجشنبه: ۱۱-۱۴ و ۱۷-۲۳\nجمعه: ۱۷-۲۳",
+}
+
+DEFAULT_SETTINGS = {
+    "show_status_in_welcome": True,   # نمایش وضعیت فروشگاه در خوش‌آمدگویی
+    "show_status_in_support": True,   # نمایش وضعیت فروشگاه در پشتیبانی
+    "notify_new_user":        False,  # اعلان عضو جدید به ادمین
+    "store_open":             True,   # باز/بسته دستی فروشگاه (اوررایدِ ساعت کاری)
 }
 
 # ======================================
@@ -96,8 +110,13 @@ def get_section_buttons(key):
         buttons[key] = {"enabled": True, "items": []}
     return buttons[key]
 
+def get_setting(key):
+    return settings.get(key, DEFAULT_SETTINGS.get(key))
+
 def is_open_now():
-    if not workhours.get("enabled", True): return False
+    """باز بودن فروشگاه با در نظر گرفتن همه تنظیمات"""
+    if not get_setting("store_open"):        return False
+    if not workhours.get("enabled", True):   return True   # اگه ساعت کاری غیرفعاله → همیشه باز
     now     = datetime.now(IRAN_TZ)
     j_now   = jdatetime.datetime.fromgregorian(datetime=now)
     day     = workhours.get("schedule", {}).get(str(j_now.weekday()), {})
@@ -107,10 +126,15 @@ def is_open_now():
         if shift["from"] <= now_str <= shift["to"]: return True
     return False
 
+def store_status_line():
+    """خط وضعیت فروشگاه برای نمایش به کاربر"""
+    if not workhours.get("enabled", True) and get_setting("store_open"):
+        return None   # اگه ساعت کاری غیرفعاله چیزی نشون نده
+    return workhours.get("msg_open","✅ باز") if is_open_now() else workhours.get("msg_closed","🕐 بسته")
+
 def workhours_summary():
-    day_names = {"0":"شنبه","1":"یکشنبه","2":"دوشنبه","3":"سه‌شنبه","4":"چهارشنبه","5":"پنجشنبه","6":"جمعه"}
     lines = []
-    for k, name in day_names.items():
+    for k, name in DAY_NAMES.items():
         day = workhours.get("schedule", {}).get(k, {})
         if not day.get("open"):
             lines.append(f"• {name}: تعطیل")
@@ -119,19 +143,28 @@ def workhours_summary():
             lines.append(f"• {name}: {shifts}")
     return "\n".join(lines)
 
+def progress_bar(value, total, length=10):
+    if total == 0: return "░" * length
+    filled = int(length * value / total)
+    return "▓" * filled + "░" * (length - filled)
+
 def box(title, text):
     return f"📌 {title}\n──────────────\n{text}\n──────────────\n🕒 {shamsi_now()}"
 
-def section_status(key):
-    """خلاصه وضعیت یه بخش برای نمایش در لیست"""
+def section_page_text(key):
+    name    = SECTION_NAMES.get(key, key)
     content = responses.get(key, "") if responses else ""
     b       = get_banner(key)
     sec     = get_section_buttons(key)
-    has_text   = "✅" if content and content not in ("تنظیم نشده", "") else "❌"
-    has_banner = "🖼✅" if b.get("active") and b.get("file_id") else ("🖼❌" if b.get("file_id") else "🖼➕")
+    has_text   = "✅ تنظیم شده"  if content and content not in ("تنظیم نشده","") else "❌ تنظیم نشده"
+    has_banner = "✅ فعال"        if b.get("active") and b.get("file_id") else ("⏸ غیرفعال" if b.get("file_id") else "➕ ندارد")
     btn_count  = len(sec.get("items", []))
-    btn_en     = "✅" if sec.get("enabled") else "❌"
-    return f"متن:{has_text} | بنر:{has_banner} | دکمه:{btn_count}{btn_en}"
+    btn_en     = "✅ فعال"        if sec.get("enabled") else "❌ غیرفعال"
+    return (f"📋 بخش: {name}\n──────────────\n"
+            f"✏️ متن: {has_text}\n"
+            f"🖼 بنر: {has_banner}\n"
+            f"🔘 دکمه‌ها: {btn_count} عدد — {btn_en}\n"
+            f"──────────────")
 
 # ======================================
 # LOAD / SAVE
@@ -139,7 +172,7 @@ def section_status(key):
 async def load_data():
     global responses
     try:
-        async with aiofiles.open(DATA_FILE, "r", encoding="utf-8") as f:
+        async with aiofiles.open(DATA_FILE,"r",encoding="utf-8") as f:
             responses = json.loads(await f.read())
     except Exception:
         responses = MENU_ITEMS.copy()
@@ -147,7 +180,7 @@ async def load_data():
 
 async def save_data():
     try:
-        async with aiofiles.open(DATA_FILE, "w", encoding="utf-8") as f:
+        async with aiofiles.open(DATA_FILE,"w",encoding="utf-8") as f:
             await f.write(json.dumps(responses, ensure_ascii=False, indent=4))
     except Exception as e:
         logger.error(f"save_data: {e}")
@@ -155,7 +188,7 @@ async def save_data():
 async def load_banners():
     global banners
     try:
-        async with aiofiles.open(BANNER_FILE, "r", encoding="utf-8") as f:
+        async with aiofiles.open(BANNER_FILE,"r",encoding="utf-8") as f:
             data = json.loads(await f.read())
             if isinstance(data, dict): banners = data
     except Exception:
@@ -166,7 +199,7 @@ async def load_banners():
 
 async def save_banners():
     try:
-        async with aiofiles.open(BANNER_FILE, "w", encoding="utf-8") as f:
+        async with aiofiles.open(BANNER_FILE,"w",encoding="utf-8") as f:
             await f.write(json.dumps(banners, ensure_ascii=False, indent=4))
     except Exception as e:
         logger.error(f"save_banners: {e}")
@@ -174,7 +207,7 @@ async def save_banners():
 async def load_workhours():
     global workhours
     try:
-        async with aiofiles.open(WORKHOURS_FILE, "r", encoding="utf-8") as f:
+        async with aiofiles.open(WORKHOURS_FILE,"r",encoding="utf-8") as f:
             workhours = json.loads(await f.read())
     except Exception:
         workhours = DEFAULT_WORKHOURS.copy()
@@ -182,7 +215,7 @@ async def load_workhours():
 
 async def save_workhours():
     try:
-        async with aiofiles.open(WORKHOURS_FILE, "w", encoding="utf-8") as f:
+        async with aiofiles.open(WORKHOURS_FILE,"w",encoding="utf-8") as f:
             await f.write(json.dumps(workhours, ensure_ascii=False, indent=4))
     except Exception as e:
         logger.error(f"save_workhours: {e}")
@@ -190,7 +223,7 @@ async def save_workhours():
 async def load_buttons():
     global buttons
     try:
-        async with aiofiles.open(BUTTONS_FILE, "r", encoding="utf-8") as f:
+        async with aiofiles.open(BUTTONS_FILE,"r",encoding="utf-8") as f:
             buttons = json.loads(await f.read())
     except Exception:
         buttons = {}
@@ -200,10 +233,26 @@ async def load_buttons():
 
 async def save_buttons():
     try:
-        async with aiofiles.open(BUTTONS_FILE, "w", encoding="utf-8") as f:
+        async with aiofiles.open(BUTTONS_FILE,"w",encoding="utf-8") as f:
             await f.write(json.dumps(buttons, ensure_ascii=False, indent=4))
     except Exception as e:
         logger.error(f"save_buttons: {e}")
+
+async def load_settings():
+    global settings
+    try:
+        async with aiofiles.open(SETTINGS_FILE,"r",encoding="utf-8") as f:
+            settings = json.loads(await f.read())
+    except Exception:
+        settings = DEFAULT_SETTINGS.copy()
+        await save_settings()
+
+async def save_settings():
+    try:
+        async with aiofiles.open(SETTINGS_FILE,"w",encoding="utf-8") as f:
+            await f.write(json.dumps(settings, ensure_ascii=False, indent=4))
+    except Exception as e:
+        logger.error(f"save_settings: {e}")
 
 # ======================================
 # DATABASE
@@ -216,18 +265,23 @@ async def init_db():
     await db.execute("PRAGMA journal_mode=WAL")
     await db.execute("""CREATE TABLE IF NOT EXISTS users (
         user_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT,
-        joined_at TEXT, last_seen TEXT)""")
+        joined_at TEXT, last_seen TEXT, is_blocked INTEGER DEFAULT 0)""")
     await db.execute("""CREATE TABLE IF NOT EXISTS logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER,
         action TEXT, created_at TEXT)""")
     await db.execute("CREATE INDEX IF NOT EXISTS idx_lastseen ON users(last_seen)")
+    # اضافه کردن ستون is_blocked اگه نبود
+    try:
+        await db.execute("ALTER TABLE users ADD COLUMN is_blocked INTEGER DEFAULT 0")
+    except Exception:
+        pass
     await db.commit()
 
 async def save_user(user):
     now = gregorian_now()
-    await db.execute("INSERT OR IGNORE INTO users VALUES (?,?,?,?,?)",
+    await db.execute("INSERT OR IGNORE INTO users VALUES (?,?,?,?,?,0)",
         (user.id, user.username or "", user.first_name or "", now, now))
-    await db.execute("UPDATE users SET username=?, first_name=?, last_seen=? WHERE user_id=?",
+    await db.execute("UPDATE users SET username=?,first_name=?,last_seen=? WHERE user_id=?",
         (user.username or "", user.first_name or "", now, user.id))
     await db.commit()
 
@@ -237,8 +291,45 @@ async def log_event(user_id, action):
     await db.commit()
 
 async def get_all_users():
-    async with db.execute("SELECT user_id FROM users") as c:
+    async with db.execute("SELECT user_id FROM users WHERE is_blocked=0") as c:
         return [r[0] for r in await c.fetchall()]
+
+async def is_blocked(user_id):
+    async with db.execute("SELECT is_blocked FROM users WHERE user_id=?", (user_id,)) as c:
+        row = await c.fetchone()
+        return bool(row and row[0])
+
+async def block_user(user_id):
+    await db.execute("UPDATE users SET is_blocked=1 WHERE user_id=?", (user_id,))
+    await db.commit()
+
+async def unblock_user(user_id):
+    await db.execute("UPDATE users SET is_blocked=0 WHERE user_id=?", (user_id,))
+    await db.commit()
+
+async def search_users(query):
+    q = f"%{query}%"
+    async with db.execute(
+        "SELECT user_id,first_name,username,last_seen,is_blocked FROM users "
+        "WHERE first_name LIKE ? OR username LIKE ? OR CAST(user_id AS TEXT) LIKE ? "
+        "ORDER BY last_seen DESC LIMIT 15", (q,q,q)
+    ) as c:
+        return await c.fetchall()
+
+async def get_users_page(offset=0, limit=15, filter_type="all"):
+    if filter_type == "today":
+        q = "WHERE DATE(last_seen)=DATE('now','localtime')"
+    elif filter_type == "week":
+        q = "WHERE last_seen>=datetime('now','-7 days','localtime')"
+    elif filter_type == "blocked":
+        q = "WHERE is_blocked=1"
+    else:
+        q = ""
+    async with db.execute(
+        f"SELECT user_id,first_name,username,last_seen,is_blocked FROM users {q} "
+        f"ORDER BY last_seen DESC LIMIT {limit} OFFSET {offset}"
+    ) as c:
+        return await c.fetchall()
 
 async def total_users():
     async with db.execute("SELECT COUNT(*) FROM users") as c:
@@ -260,26 +351,31 @@ async def new_today():
     async with db.execute("SELECT COUNT(*) FROM users WHERE DATE(joined_at)=DATE('now','localtime')") as c:
         return (await c.fetchone())[0]
 
+async def blocked_count():
+    async with db.execute("SELECT COUNT(*) FROM users WHERE is_blocked=1") as c:
+        return (await c.fetchone())[0]
+
 # ======================================
 # ANTI-SPAM
 # ======================================
 WINDOW, LIMIT, BLOCK = 10, 7, 60
 spam    = defaultdict(lambda: deque(maxlen=LIMIT))
-blocked = {}
+blocked_cache = {}
 
 async def anti_spam(user_id):
     if user_id == ADMIN_ID: return True
+    if await is_blocked(user_id): return False
     now = time.time()
-    if user_id in blocked and blocked[user_id] > now: return False
+    if user_id in blocked_cache and blocked_cache[user_id] > now: return False
     q = spam[user_id]
     q.append(now)
     if len(q) >= LIMIT and (now - q[0]) <= WINDOW:
-        blocked[user_id] = now + BLOCK
+        blocked_cache[user_id] = now + BLOCK
         return False
     return True
 
 # ======================================
-# KEYBOARDS
+# KEYBOARDS — ادمین
 # ======================================
 def main_menu():
     keys = list(MENU_ITEMS.keys())
@@ -291,14 +387,20 @@ def main_menu():
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 def admin_menu():
+    op     = get_setting("store_open")
+    wh_en  = workhours.get("enabled", True)
+    st_icon = "🟢" if (op and is_open_now()) else "🔴"
+    toggle  = f"{st_icon} بستن فروشگاه" if (op and is_open_now()) else f"{st_icon} باز کردن فروشگاه"
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊 داشبورد",        callback_data="dash")],
-        [InlineKeyboardButton("👤 کاربران",         callback_data="users")],
+        [InlineKeyboardButton("📊 داشبورد",        callback_data="dash"),
+         InlineKeyboardButton("👥 کاربران",         callback_data="users_menu")],
         [InlineKeyboardButton("📋 مدیریت بخش‌ها",  callback_data="sections")],
-        [InlineKeyboardButton("🕐 ساعت کاری",      callback_data="workhours_menu")],
+        [InlineKeyboardButton("🕐 ساعت کاری",      callback_data="workhours_menu"),
+         InlineKeyboardButton("⚙️ تنظیمات",        callback_data="settings_menu")],
         [InlineKeyboardButton("📢 پخش همگانی",     callback_data="broadcast")],
-        [InlineKeyboardButton("💾 بک‌آپ",          callback_data="backup")],
-        [InlineKeyboardButton("📈 لاگ‌ها",         callback_data="logs")],
+        [InlineKeyboardButton("💾 بک‌آپ",          callback_data="backup"),
+         InlineKeyboardButton("📈 لاگ‌ها",         callback_data="logs")],
+        [InlineKeyboardButton(toggle,              callback_data="quick_toggle")],
     ])
 
 def back_admin():
@@ -307,52 +409,85 @@ def back_admin():
 def admin_cancel_menu():
     return ReplyKeyboardMarkup([["❌ لغو عملیات"]], resize_keyboard=True)
 
-# ── لیست بخش‌ها ──
+# ── کاربران ──
+def users_menu_kb(offset=0, filter_type="all"):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("👥 همه",    callback_data="ulist_all_0"),
+         InlineKeyboardButton("📅 امروز", callback_data="ulist_today_0")],
+        [InlineKeyboardButton("📆 هفته",  callback_data="ulist_week_0"),
+         InlineKeyboardButton("🚫 بلاک",  callback_data="ulist_blocked_0")],
+        [InlineKeyboardButton("🔍 جستجو", callback_data="users_search")],
+        [InlineKeyboardButton("🔙 برگشت", callback_data="back_to_admin")],
+    ])
+
+def users_list_kb(rows, offset, filter_type, total):
+    btns = []
+    for r in rows:
+        bl   = "🚫" if r[4] else ""
+        name = r[1] or "—"
+        btns.append([InlineKeyboardButton(
+            f"{bl} {name} | {r[0]}", callback_data=f"uview_{r[0]}")])
+    nav = []
+    if offset > 0:
+        nav.append(InlineKeyboardButton("◀️ قبلی", callback_data=f"ulist_{filter_type}_{offset-15}"))
+    if offset + 15 < total:
+        nav.append(InlineKeyboardButton("▶️ بعدی", callback_data=f"ulist_{filter_type}_{offset+15}"))
+    if nav: btns.append(nav)
+    btns.append([InlineKeyboardButton("🔙 برگشت", callback_data="users_menu")])
+    return InlineKeyboardMarkup(btns)
+
+def user_detail_kb(user_id, is_bl):
+    action = "✅ رفع بلاک" if is_bl else "🚫 بلاک کردن"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(action, callback_data=f"utoggle_{user_id}")],
+        [InlineKeyboardButton("🔙 برگشت", callback_data="users_menu")],
+    ])
+
+# ── بخش‌ها ──
 def sections_list_kb():
     btns = []
     for key, name in SECTION_NAMES.items():
-        st = section_status(key)
-        btns.append([InlineKeyboardButton(f"{name}", callback_data=f"sec_{key}")])
-        btns.append([InlineKeyboardButton(f"  {st}", callback_data=f"sec_{key}")])
+        content    = responses.get(key, "") if responses else ""
+        b          = get_banner(key)
+        sec        = get_section_buttons(key)
+        txt_icon   = "✅" if content and content not in ("تنظیم نشده","") else "➕"
+        ban_icon   = "🖼" if b.get("active") and b.get("file_id") else "○"
+        btn_icon   = f"🔘{len(sec.get('items',[]))}" if sec.get("enabled") else "○"
+        btns.append([InlineKeyboardButton(
+            f"{name}  {txt_icon} {ban_icon} {btn_icon}",
+            callback_data=f"sec_{key}")])
     btns.append([InlineKeyboardButton("🔙 برگشت", callback_data="back_to_admin")])
     return InlineKeyboardMarkup(btns)
 
-# ── صفحه یه بخش ──
 def section_kb(key):
-    name = SECTION_NAMES.get(key, key)
-    b    = get_banner(key)
-    sec  = get_section_buttons(key)
+    b   = get_banner(key)
+    sec = get_section_buttons(key)
+    ban_st = "🖼✅" if b.get("active") and b.get("file_id") else ("🖼⏸" if b.get("file_id") else "🖼➕")
+    btn_st = f"🔘✅ ({len(sec.get('items',[]))})" if sec.get("enabled") else f"🔘❌ ({len(sec.get('items',[]))})"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✏️ ویرایش متن",  callback_data=f"sec_text_{key}")],
+        [InlineKeyboardButton(f"{ban_st} بنر",   callback_data=f"sec_banner_{key}")],
+        [InlineKeyboardButton(f"{btn_st} دکمه‌ها", callback_data=f"sec_btns_{key}")],
+        [InlineKeyboardButton("🔙 برگشت",        callback_data="sections")],
+    ])
 
-    # وضعیت‌ها
-    banner_st  = "🖼 فعال ✅"   if b.get("active") and b.get("file_id") else ("🖼 غیرفعال ❌" if b.get("file_id") else "🖼 ندارد ➕")
-    btn_st     = f"🔘 دکمه‌ها {'✅' if sec.get('enabled') else '❌'} ({len(sec.get('items',[]))} عدد)"
-
-    btns = [
-        [InlineKeyboardButton("✏️ ویرایش متن",     callback_data=f"sec_text_{key}")],
-        [InlineKeyboardButton(f"{banner_st}",       callback_data=f"sec_banner_{key}")],
-        [InlineKeyboardButton(f"{btn_st}",          callback_data=f"sec_btns_{key}")],
-        [InlineKeyboardButton("🔙 برگشت",          callback_data="sections")],
-    ]
-    return InlineKeyboardMarkup(btns)
-
-# ── بنر یه بخش ──
 def banner_kb(key):
     b      = get_banner(key)
     toggle = "🔴 غیرفعال کردن" if b.get("active") else "🟢 فعال کردن"
-    btns   = [[InlineKeyboardButton("📤 آپلود / تغییر عکس", callback_data=f"ban_up_{key}")],
-               [InlineKeyboardButton(toggle,                  callback_data=f"ban_tg_{key}")]]
+    btns   = [
+        [InlineKeyboardButton("📤 آپلود / تغییر", callback_data=f"ban_up_{key}")],
+        [InlineKeyboardButton(toggle,             callback_data=f"ban_tg_{key}")],
+    ]
     if b.get("file_id"):
         btns.append([InlineKeyboardButton("🗑 حذف بنر", callback_data=f"ban_dl_{key}")])
-    btns.append([InlineKeyboardButton("🔙 برگشت",     callback_data=f"sec_{key}")])
+    btns.append([InlineKeyboardButton("🔙 برگشت", callback_data=f"sec_{key}")])
     return InlineKeyboardMarkup(btns)
 
-# ── دکمه‌های یه بخش (ادمین) ──
 def section_btns_kb(key):
     sec    = get_section_buttons(key)
-    items  = sec.get("items", [])
-    toggle = "🔴 غیرفعال کردن همه" if sec.get("enabled") else "🟢 فعال کردن همه"
+    toggle = "🔴 غیرفعال همه" if sec.get("enabled") else "🟢 فعال همه"
     btns   = [[InlineKeyboardButton(toggle, callback_data=f"btn_tg_{key}")]]
-    for item in items:
+    for item in sec.get("items", []):
         btns.append([
             InlineKeyboardButton(f"🔗 {item['title']}", callback_data=f"btn_edt_{key}_{item['id']}"),
             InlineKeyboardButton("🗑",                  callback_data=f"btn_del_{key}_{item['id']}"),
@@ -363,11 +498,10 @@ def section_btns_kb(key):
 
 # ── ساعت کاری ──
 def workhours_kb():
-    day_names = {"0":"شنبه","1":"یکشنبه","2":"دوشنبه","3":"سه‌شنبه","4":"چهارشنبه","5":"پنجشنبه","6":"جمعه"}
     en     = workhours.get("enabled", True)
-    toggle = "🔴 غیرفعال کردن" if en else "🟢 فعال کردن"
+    toggle = "🔴 غیرفعال کردن ساعت کاری" if en else "🟢 فعال کردن ساعت کاری"
     btns   = [[InlineKeyboardButton(toggle, callback_data="wh_toggle")]]
-    for k, name in day_names.items():
+    for k, name in DAY_NAMES.items():
         day = workhours.get("schedule", {}).get(k, {})
         st  = "✅" if day.get("open") else "❌"
         btns.append([InlineKeyboardButton(f"{st} {name}", callback_data=f"wh_day_{k}")])
@@ -385,7 +519,20 @@ def workhours_day_kb(day_key):
         [InlineKeyboardButton("🔙 برگشت",          callback_data="workhours_menu")],
     ])
 
-# ── کاربر: دکمه‌های یه بخش ──
+# ── تنظیمات ──
+def settings_kb():
+    def tog(key): return "✅" if get_setting(key) else "❌"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"{tog('show_status_in_welcome')} وضعیت در خوش‌آمدگویی",
+                              callback_data="stg_show_status_in_welcome")],
+        [InlineKeyboardButton(f"{tog('show_status_in_support')} وضعیت در پشتیبانی",
+                              callback_data="stg_show_status_in_support")],
+        [InlineKeyboardButton(f"{tog('notify_new_user')} اعلان عضو جدید",
+                              callback_data="stg_notify_new_user")],
+        [InlineKeyboardButton("🔙 برگشت", callback_data="back_to_admin")],
+    ])
+
+# ── کاربر: دکمه‌های بخش ──
 def user_section_kb(key):
     sec = get_section_buttons(key)
     if not sec.get("enabled", True): return None
@@ -415,7 +562,7 @@ async def send_with_banner(msg, text, key, reply_markup=None):
             await msg.reply_photo(photo=b["file_id"], caption=text, reply_markup=reply_markup)
             return
         except Exception as e:
-            logger.error(f"banner send [{key}]: {e}")
+            logger.error(f"banner [{key}]: {e}")
     await msg.reply_text(text, reply_markup=reply_markup)
 
 # ======================================
@@ -449,47 +596,44 @@ async def send_backup(bot):
         (BANNER_FILE,    f"backup_banner_{now}.json"),
         (WORKHOURS_FILE, f"backup_workhours_{now}.json"),
         (BUTTONS_FILE,   f"backup_buttons_{now}.json"),
+        (SETTINGS_FILE,  f"backup_settings_{now}.json"),
     ]
     await bot.send_message(ADMIN_ID, f"💾 بک‌آپ — {shamsi_now()}")
     for filepath, filename in files:
         try:
-            async with aiofiles.open(filepath, "rb") as f:
+            async with aiofiles.open(filepath,"rb") as f:
                 content = await f.read()
             await bot.send_document(ADMIN_ID, document=content, filename=filename)
         except Exception as e:
             logger.error(f"backup {filepath}: {e}")
 
 # ======================================
-# SECTION PAGE TEXT
-# ======================================
-def section_page_text(key):
-    name    = SECTION_NAMES.get(key, key)
-    content = responses.get(key, "") if responses else ""
-    b       = get_banner(key)
-    sec     = get_section_buttons(key)
-
-    has_text   = "✅ تنظیم شده" if content and content not in ("تنظیم نشده","") else "❌ تنظیم نشده"
-    has_banner = "✅ فعال" if b.get("active") and b.get("file_id") else ("⏸ غیرفعال" if b.get("file_id") else "➕ ندارد")
-    btn_count  = len(sec.get("items", []))
-    btn_en     = "✅ فعال" if sec.get("enabled") else "❌ غیرفعال"
-
-    return (
-        f"📋 بخش: {name}\n"
-        f"──────────────\n"
-        f"✏️ متن: {has_text}\n"
-        f"🖼 بنر: {has_banner}\n"
-        f"🔘 دکمه‌ها: {btn_count} عدد — {btn_en}\n"
-        f"──────────────"
-    )
-
-# ======================================
 # HANDLERS
 # ======================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    is_new = False
+    async with db.execute("SELECT user_id FROM users WHERE user_id=?", (user.id,)) as c:
+        is_new = (await c.fetchone()) is None
     await save_user(user)
     await log_event(user.id, "start")
+
+    if get_setting("notify_new_user") and is_new:
+        try:
+            await context.bot.send_message(
+                ADMIN_ID,
+                f"🆕 کاربر جدید!\n👤 {user.first_name or '—'}\n"
+                f"{'@'+user.username if user.username else '—'}\n🆔 {user.id}"
+            )
+        except Exception: pass
+
     welcome_text = responses.get("welcome", "✨ خوش آمدید به ربات استوک لند")
+
+    # نمایش وضعیت فروشگاه در خوش‌آمدگویی
+    if get_setting("show_status_in_welcome") and workhours.get("enabled", True):
+        st = store_status_line()
+        if st: welcome_text = f"{st}\n\n{welcome_text}"
+
     kb = user_section_kb("welcome")
     await send_with_banner(update.message, welcome_text, "welcome", reply_markup=kb or main_menu())
 
@@ -511,25 +655,43 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "back_to_admin":
         await query.message.edit_text("👑 پنل مدیریت", reply_markup=admin_menu())
 
+    # ── دکمه سریع باز/بسته ──
+    elif data == "quick_toggle":
+        settings["store_open"] = not get_setting("store_open")
+        await save_settings()
+        st = "🟢 فروشگاه باز شد" if settings["store_open"] else "🔴 فروشگاه بسته شد"
+        await query.answer(st, show_alert=True)
+        await query.message.edit_text("👑 پنل مدیریت", reply_markup=admin_menu())
+
     # ── داشبورد ──
     elif data == "dash":
-        t,d,w,m,nt = (await total_users(), await today_users(), await week_users(),
-                      await month_users(), await new_today())
-        op = "✅ باز" if is_open_now() else "🔴 بسته"
-        await query.message.edit_text(
-            box("داشبورد",
-                f"👥 کل کاربران: {t}\n🆕 عضو امروز: {nt}\n📅 فعال امروز: {d}\n"
-                f"📆 فعال هفته: {w}\n🗓 فعال ماه: {m}\n🏪 وضعیت: {op}"),
-            reply_markup=admin_menu())
-
-    # ── کاربران ──
-    elif data == "users":
-        async with db.execute(
-            "SELECT user_id,first_name,username,last_seen FROM users ORDER BY last_seen DESC LIMIT 20"
-        ) as c:
-            rows = await c.fetchall()
-        lines = [f"• {r[1]} {'@'+r[2] if r[2] else '—'} | {r[0]}" for r in rows]
-        await query.message.edit_text("👤 کاربران اخیر:\n\n" + "\n".join(lines), reply_markup=back_admin())
+        t  = await total_users()
+        d  = await today_users()
+        w  = await week_users()
+        m  = await month_users()
+        nt = await new_today()
+        bl = await blocked_count()
+        op = "🟢 باز" if is_open_now() else "🔴 بسته"
+        bar_d = progress_bar(d, t)
+        bar_w = progress_bar(w, t)
+        bar_m = progress_bar(m, t)
+        text = (
+            f"📊 داشبورد — {shamsi_now()}\n"
+            f"══════════════\n"
+            f"👥 کل کاربران: {t}\n"
+            f"🚫 بلاک شده: {bl}\n"
+            f"══════════════\n"
+            f"🆕 عضو امروز: {nt}\n"
+            f"📅 فعال امروز: {d}\n"
+            f"  {bar_d}\n"
+            f"📆 فعال هفته: {w}\n"
+            f"  {bar_w}\n"
+            f"🗓 فعال ماه: {m}\n"
+            f"  {bar_m}\n"
+            f"══════════════\n"
+            f"🏪 وضعیت: {op}"
+        )
+        await query.message.edit_text(text, reply_markup=admin_menu())
 
     # ── لاگ‌ها ──
     elif data == "logs":
@@ -554,41 +716,108 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.edit_text("✅ بک‌آپ ارسال شد.", reply_markup=back_admin())
 
     # ══════════════════════════════════
-    # مدیریت بخش‌ها — لیست
+    # کاربران
+    # ══════════════════════════════════
+    elif data == "users_menu":
+        t  = await total_users()
+        bl = await blocked_count()
+        await query.message.edit_text(
+            f"👥 مدیریت کاربران\n──────────────\n"
+            f"کل: {t} | بلاک: {bl}",
+            reply_markup=users_menu_kb())
+
+    elif data == "users_search":
+        context.user_data["mode"] = "users_search"
+        await query.message.reply_text("🔍 نام، آیدی یا یوزرنیم را بنویسید:", reply_markup=admin_cancel_menu())
+
+    elif data.startswith("ulist_"):
+        parts       = data.split("_")
+        filter_type = parts[1]
+        offset      = int(parts[2])
+        async with db.execute("SELECT COUNT(*) FROM users" + (
+            " WHERE DATE(last_seen)=DATE('now','localtime')" if filter_type=="today" else
+            " WHERE last_seen>=datetime('now','-7 days','localtime')" if filter_type=="week" else
+            " WHERE is_blocked=1" if filter_type=="blocked" else ""
+        )) as c:
+            total = (await c.fetchone())[0]
+        rows = await get_users_page(offset, 15, filter_type)
+        filter_label = {"all":"همه","today":"امروز","week":"هفته","blocked":"بلاک"}.get(filter_type,"")
+        await query.message.edit_text(
+            f"👥 کاربران — {filter_label}\nنمایش {offset+1} تا {min(offset+15,total)} از {total}:",
+            reply_markup=users_list_kb(rows, offset, filter_type, total))
+
+    elif data.startswith("uview_"):
+        uid = int(data[6:])
+        async with db.execute(
+            "SELECT user_id,first_name,username,joined_at,last_seen,is_blocked FROM users WHERE user_id=?",
+            (uid,)
+        ) as c:
+            row = await c.fetchone()
+        if not row:
+            await query.answer("کاربر یافت نشد!", show_alert=True); return
+        bl_st = "🚫 بلاک شده" if row[5] else "✅ فعال"
+        text  = (f"👤 کاربر:\n──────────────\n"
+                 f"نام: {row[1] or '—'}\n"
+                 f"یوزرنیم: {'@'+row[2] if row[2] else '—'}\n"
+                 f"آیدی: {row[0]}\n"
+                 f"عضویت: {row[3]}\n"
+                 f"آخرین فعالیت: {row[4]}\n"
+                 f"وضعیت: {bl_st}")
+        await query.message.edit_text(text, reply_markup=user_detail_kb(uid, bool(row[5])))
+
+    elif data.startswith("utoggle_"):
+        uid = int(data[8:])
+        async with db.execute("SELECT is_blocked FROM users WHERE user_id=?", (uid,)) as c:
+            row = await c.fetchone()
+        if not row: return
+        if row[0]:
+            await unblock_user(uid)
+            await query.answer("✅ رفع بلاک شد", show_alert=True)
+        else:
+            await block_user(uid)
+            await query.answer("🚫 بلاک شد", show_alert=True)
+        async with db.execute(
+            "SELECT user_id,first_name,username,joined_at,last_seen,is_blocked FROM users WHERE user_id=?",
+            (uid,)
+        ) as c:
+            row = await c.fetchone()
+        bl_st = "🚫 بلاک شده" if row[5] else "✅ فعال"
+        text  = (f"👤 کاربر:\n──────────────\n"
+                 f"نام: {row[1] or '—'}\n"
+                 f"آیدی: {row[0]}\n"
+                 f"وضعیت: {bl_st}")
+        await query.message.edit_text(text, reply_markup=user_detail_kb(uid, bool(row[5])))
+
+    # ══════════════════════════════════
+    # بخش‌ها
     # ══════════════════════════════════
     elif data == "sections":
-        await query.message.edit_text(
-            "📋 مدیریت بخش‌ها\nروی هر بخش بزنید:",
-            reply_markup=sections_list_kb())
+        await query.message.edit_text("📋 مدیریت بخش‌ها:", reply_markup=sections_list_kb())
 
-    # ── صفحه یه بخش ──
     elif data.startswith("sec_") and not any(data.startswith(p) for p in
             ["sec_text_","sec_banner_","sec_btns_"]):
         key = data[4:]
         await query.message.edit_text(section_page_text(key), reply_markup=section_kb(key))
 
-    # ── ویرایش متن ──
     elif data.startswith("sec_text_"):
         key = data[9:]
-        context.user_data.update({"mode": "edit_text", "edit_key": key})
-        current = responses.get(key, "تنظیم نشده")
+        context.user_data.update({"mode":"edit_text","edit_key":key})
         await query.message.reply_text(
-            f"✏️ متن فعلی:\n\n{current}\n\nمتن جدید را ارسال کنید:",
+            f"✏️ متن فعلی:\n\n{responses.get(key,'تنظیم نشده')}\n\nمتن جدید:",
             reply_markup=admin_cancel_menu())
 
-    # ── مدیریت بنر ──
     elif data.startswith("sec_banner_"):
         key = data[11:]
         b   = get_banner(key)
         has = "✅ آپلود شده" if b.get("file_id") else "❌ ندارد"
         st  = "✅ فعال" if b.get("active") else "❌ غیرفعال"
         await query.message.edit_text(
-            f"🖼 بنر بخش: {SECTION_NAMES.get(key,key)}\nعکس: {has}\nوضعیت: {st}",
+            f"🖼 بنر: {SECTION_NAMES.get(key,key)}\nعکس: {has}\nوضعیت: {st}",
             reply_markup=banner_kb(key))
 
     elif data.startswith("ban_up_"):
         key = data[7:]
-        context.user_data.update({"mode": "banner_upload", "banner_key": key})
+        context.user_data.update({"mode":"banner_upload","banner_key":key})
         await query.message.reply_text(
             f"📤 عکس بنر «{SECTION_NAMES.get(key,key)}» را ارسال کنید:",
             reply_markup=admin_cancel_menu())
@@ -601,9 +830,8 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         b["active"] = not b.get("active", False)
         await save_banners()
         await query.answer("✅ فعال" if b["active"] else "❌ غیرفعال", show_alert=True)
-        st = "✅ فعال" if b["active"] else "❌ غیرفعال"
         await query.message.edit_text(
-            f"🖼 بنر: {SECTION_NAMES.get(key,key)}\nعکس: ✅\nوضعیت: {st}",
+            f"🖼 بنر: {SECTION_NAMES.get(key,key)}\nعکس: ✅\nوضعیت: {'✅ فعال' if b['active'] else '❌ غیرفعال'}",
             reply_markup=banner_kb(key))
 
     elif data.startswith("ban_dl_"):
@@ -615,14 +843,12 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🖼 بنر: {SECTION_NAMES.get(key,key)}\nعکس: ❌\nوضعیت: ❌",
             reply_markup=banner_kb(key))
 
-    # ── مدیریت دکمه‌های بخش ──
     elif data.startswith("sec_btns_"):
         key = data[9:]
         sec = get_section_buttons(key)
         en  = "✅ فعال" if sec.get("enabled") else "❌ غیرفعال"
         await query.message.edit_text(
-            f"🔘 دکمه‌های بخش: {SECTION_NAMES.get(key,key)}\n"
-            f"وضعیت: {en} | تعداد: {len(sec.get('items',[]))}",
+            f"🔘 دکمه‌های: {SECTION_NAMES.get(key,key)}\nوضعیت: {en} | تعداد: {len(sec.get('items',[]))}",
             reply_markup=section_btns_kb(key))
 
     elif data.startswith("btn_tg_"):
@@ -631,40 +857,54 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sec["enabled"] = not sec.get("enabled", True)
         await save_buttons()
         await query.answer("✅ فعال" if sec["enabled"] else "❌ غیرفعال", show_alert=True)
-        en = "✅ فعال" if sec["enabled"] else "❌ غیرفعال"
         await query.message.edit_text(
-            f"🔘 دکمه‌های: {SECTION_NAMES.get(key,key)}\nوضعیت: {en}",
+            f"🔘 دکمه‌های: {SECTION_NAMES.get(key,key)}\nوضعیت: {'✅ فعال' if sec['enabled'] else '❌ غیرفعال'}",
             reply_markup=section_btns_kb(key))
 
     elif data.startswith("btn_add_"):
         key = data[8:]
-        context.user_data.update({"mode": "btn_add_title", "btn_key": key})
+        context.user_data.update({"mode":"btn_add_title","btn_key":key})
         await query.message.reply_text(
             f"➕ دکمه جدید برای «{SECTION_NAMES.get(key,key)}»\n\nعنوان دکمه:",
             reply_markup=admin_cancel_menu())
 
     elif data.startswith("btn_edt_"):
-        parts = data[8:].split("_", 1)
+        parts = data[8:].split("_",1)
         key, bid = parts[0], parts[1]
         sec  = get_section_buttons(key)
-        item = next((x for x in sec.get("items",[]) if x["id"] == bid), None)
-        if not item:
-            await query.answer("یافت نشد!", show_alert=True); return
-        context.user_data.update({"mode": "btn_edit_title", "btn_key": key, "btn_id": bid})
+        item = next((x for x in sec.get("items",[]) if x["id"]==bid), None)
+        if not item: await query.answer("یافت نشد!", show_alert=True); return
+        context.user_data.update({"mode":"btn_edit_title","btn_key":key,"btn_id":bid})
         await query.message.reply_text(
             f"✏️ ویرایش «{item['title']}»\n\nعنوان جدید (یا . بدون تغییر):",
             reply_markup=admin_cancel_menu())
 
     elif data.startswith("btn_del_"):
-        parts = data[8:].split("_", 1)
+        parts = data[8:].split("_",1)
         key, bid = parts[0], parts[1]
         sec = get_section_buttons(key)
-        sec["items"] = [x for x in sec.get("items",[]) if x["id"] != bid]
+        sec["items"] = [x for x in sec.get("items",[]) if x["id"]!=bid]
         await save_buttons()
         await query.answer("🗑 حذف شد.", show_alert=True)
         await query.message.edit_text(
             f"🔘 دکمه‌های: {SECTION_NAMES.get(key,key)}",
             reply_markup=section_btns_kb(key))
+
+    # ══════════════════════════════════
+    # تنظیمات
+    # ══════════════════════════════════
+    elif data == "settings_menu":
+        await query.message.edit_text("⚙️ تنظیمات ربات:", reply_markup=settings_kb())
+
+    elif data.startswith("stg_"):
+        key = data[4:]
+        if key in settings:
+            settings[key] = not settings[key]
+        else:
+            settings[key] = not DEFAULT_SETTINGS.get(key, False)
+        await save_settings()
+        await query.answer("✅ ذخیره شد", show_alert=True)
+        await query.message.edit_text("⚙️ تنظیمات ربات:", reply_markup=settings_kb())
 
     # ══════════════════════════════════
     # ساعت کاری
@@ -683,12 +923,11 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🕐 ساعت کاری\n{workhours_summary()}", reply_markup=workhours_kb())
 
     elif data.startswith("wh_day_"):
-        day_key   = data[7:]
-        day_names = {"0":"شنبه","1":"یکشنبه","2":"دوشنبه","3":"سه‌شنبه","4":"چهارشنبه","5":"پنجشنبه","6":"جمعه"}
-        day       = workhours["schedule"].get(day_key, {"open":False,"shifts":[]})
-        shifts_t  = "\n".join([f"  • {s['from']} تا {s['to']}" for s in day.get("shifts",[])]) or "  ندارد"
+        day_key  = data[7:]
+        day      = workhours["schedule"].get(day_key, {"open":False,"shifts":[]})
+        shifts_t = "\n".join([f"  • {s['from']} تا {s['to']}" for s in day.get("shifts",[])]) or "  ندارد"
         await query.message.edit_text(
-            f"🕐 {day_names.get(day_key,day_key)}\n"
+            f"🕐 {DAY_NAMES.get(day_key,day_key)}\n"
             f"وضعیت: {'✅ باز' if day.get('open') else '❌ تعطیل'}\n"
             f"ساعت‌ها:\n{shifts_t}",
             reply_markup=workhours_day_kb(day_key))
@@ -705,24 +944,22 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=workhours_day_kb(day_key))
 
     elif data.startswith("wh_shifts_"):
-        day_key   = data[10:]
-        day_names = {"0":"شنبه","1":"یکشنبه","2":"دوشنبه","3":"سه‌شنبه","4":"چهارشنبه","5":"پنجشنبه","6":"جمعه"}
-        context.user_data.update({"mode": "wh_set_shifts", "wh_day": day_key})
+        day_key = data[10:]
+        context.user_data.update({"mode":"wh_set_shifts","wh_day":day_key})
         await query.message.reply_text(
-            f"🕐 ساعت‌های {day_names.get(day_key,day_key)}:\n"
-            f"فرمت: HH:MM-HH:MM\nمثال: 11:00-14:00,17:00-23:00",
+            f"🕐 ساعت‌های {DAY_NAMES.get(day_key,day_key)}:\nفرمت: HH:MM-HH:MM\nمثال: 11:00-14:00,17:00-23:00",
             reply_markup=admin_cancel_menu())
 
     elif data == "wh_msg_open":
         context.user_data["mode"] = "wh_set_msg_open"
         await query.message.reply_text(
-            f"✏️ پیام باز بودن فعلی:\n\n{workhours.get('msg_open','')}\n\nپیام جدید:",
+            f"✏️ پیام باز بودن:\n\n{workhours.get('msg_open','')}\n\nپیام جدید:",
             reply_markup=admin_cancel_menu())
 
     elif data == "wh_msg_closed":
         context.user_data["mode"] = "wh_set_msg_closed"
         await query.message.reply_text(
-            f"✏️ پیام بسته بودن فعلی:\n\n{workhours.get('msg_closed','')}\n\nپیام جدید:",
+            f"✏️ پیام بسته بودن:\n\n{workhours.get('msg_closed','')}\n\nپیام جدید:",
             reply_markup=admin_cancel_menu())
 
 # ======================================
@@ -745,24 +982,30 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if user.id == ADMIN_ID:
 
-        # ── ویرایش متن بخش ──
         if mode == "edit_text":
             key = context.user_data.pop("edit_key", None)
             context.user_data.pop("mode", None)
-            if key:
-                responses[key] = text
-                await save_data()
+            if key: responses[key] = text; await save_data()
             await update.message.reply_text("✅ متن ذخیره شد.", reply_markup=main_menu()); return
 
-        # ── پخش ──
         if mode == "broadcast":
             context.user_data.pop("mode", None)
             await update.message.reply_text("📤 در حال ارسال...")
             await send_broadcast(context, text); return
 
-        # ── دکمه‌ها: اضافه کردن ──
+        if mode == "users_search":
+            context.user_data.pop("mode", None)
+            rows = await search_users(text)
+            if not rows:
+                await update.message.reply_text("❌ کاربری یافت نشد.", reply_markup=main_menu()); return
+            lines = []
+            for r in rows:
+                bl = "🚫" if r[4] else ""
+                lines.append(f"{bl} {r[1] or '—'} | {r[0]} | {'@'+r[2] if r[2] else '—'}")
+            await update.message.reply_text("🔍 نتایج جستجو:\n\n" + "\n".join(lines), reply_markup=main_menu()); return
+
         if mode == "btn_add_title":
-            context.user_data.update({"btn_title": text, "mode": "btn_add_url"})
+            context.user_data.update({"btn_title":text,"mode":"btn_add_url"})
             await update.message.reply_text("🔗 لینک دکمه (https://...):", reply_markup=admin_cancel_menu()); return
 
         if mode == "btn_add_url":
@@ -771,14 +1014,12 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.pop("mode", None)
             url   = text if text.startswith("http") else f"https://{text}"
             sec   = get_section_buttons(key)
-            sec["items"].append({"id": f"b{int(time.time())}", "title": title, "url": url})
+            sec["items"].append({"id":f"b{int(time.time())}","title":title,"url":url})
             await save_buttons()
             await update.message.reply_text(f"✅ دکمه «{title}» اضافه شد.", reply_markup=main_menu()); return
 
-        # ── دکمه‌ها: ویرایش ──
         if mode == "btn_edit_title":
-            new_title = None if text == "." else text
-            context.user_data.update({"btn_new_title": new_title, "mode": "btn_edit_url"})
+            context.user_data.update({"btn_new_title": None if text=="." else text, "mode":"btn_edit_url"})
             await update.message.reply_text("🔗 لینک جدید (یا . بدون تغییر):", reply_markup=admin_cancel_menu()); return
 
         if mode == "btn_edit_url":
@@ -787,14 +1028,13 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             new_title = context.user_data.pop("btn_new_title", None)
             context.user_data.pop("mode", None)
             sec = get_section_buttons(key)
-            for item in sec.get("items", []):
+            for item in sec.get("items",[]):
                 if item["id"] == bid:
                     if new_title: item["title"] = new_title
                     if text != ".": item["url"] = text if text.startswith("http") else f"https://{text}"
             await save_buttons()
             await update.message.reply_text("✅ دکمه ویرایش شد.", reply_markup=main_menu()); return
 
-        # ── ساعت کاری ──
         if mode == "wh_set_shifts":
             day_key = context.user_data.pop("wh_day", None)
             context.user_data.pop("mode", None)
@@ -802,7 +1042,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 shifts = []
                 for part in text.split(","):
                     fr, to = part.strip().split("-")
-                    shifts.append({"from": fr.strip(), "to": to.strip()})
+                    shifts.append({"from":fr.strip(),"to":to.strip()})
                 workhours["schedule"][day_key]["shifts"] = shifts
                 await save_workhours()
                 await update.message.reply_text("✅ ساعت‌ها ذخیره شد.", reply_markup=main_menu())
@@ -826,9 +1066,9 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for k, v in MENU_ITEMS.items():
         if text == v:
             content = responses.get(k, "تنظیم نشده")
-            if k == "4":
-                status   = workhours.get("msg_open","✅ باز") if is_open_now() else workhours.get("msg_closed","🕐 بسته")
-                full     = f"{status}\n\n{box(v, content)}"
+            if k == "4" and get_setting("show_status_in_support") and workhours.get("enabled", True):
+                st   = store_status_line()
+                full = f"{st}\n\n{box(v,content)}" if st else box(v, content)
             else:
                 full = box(v, content)
             kb = user_section_kb(k)
@@ -873,6 +1113,7 @@ async def post_init(app):
     await load_banners()
     await load_workhours()
     await load_buttons()
+    await load_settings()
     logger.info("✅ ربات راه‌اندازی شد")
 
 def main():
