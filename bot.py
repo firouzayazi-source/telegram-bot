@@ -36,9 +36,29 @@ logger = logging.getLogger(__name__)
 
 IRAN_TZ = pytz.timezone("Asia/Tehran")
 
+def to_fa(text):
+    """تبدیل اعداد انگلیسی به فارسی"""
+    fa_map = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
+    return str(text).translate(fa_map)
+
+MONTH_NAMES_FA = {
+    1:"فروردین",2:"اردیبهشت",3:"خرداد",4:"تیر",
+    5:"مرداد",6:"شهریور",7:"مهر",8:"آبان",
+    9:"آذر",10:"دی",11:"بهمن",12:"اسفند"
+}
+
 def shamsi_now():
-    now = datetime.now(IRAN_TZ)
-    return jdatetime.datetime.fromgregorian(datetime=now).strftime("%Y/%m/%d - %H:%M")
+    now   = datetime.now(IRAN_TZ)
+    j     = jdatetime.datetime.fromgregorian(datetime=now)
+    month = MONTH_NAMES_FA.get(j.month, "")
+    day   = to_fa(j.day)
+    year  = to_fa(j.year)
+    hhmm  = to_fa(now.strftime("%H:%M"))
+    return f"{day} {month} {year} — {hhmm}"
+
+def fmt_time(t):
+    """فرمت ساعت با اعداد فارسی"""
+    return to_fa(t)
 
 def gregorian_now():
     return datetime.now(IRAN_TZ).strftime("%Y-%m-%d %H:%M:%S")
@@ -153,7 +173,7 @@ def is_open_now():
     return False
 
 def today_workhours_text():
-    """متن ساعت کاری امروز به فارسی"""
+    """بلوک گرافیکی ساعت کاری امروز"""
     if not workhours.get("enabled", True):
         return None
     now    = datetime.now(IRAN_TZ)
@@ -161,37 +181,56 @@ def today_workhours_text():
     wd     = str(j_now.weekday())
     day    = workhours.get("schedule", {}).get(wd, {})
     name   = DAY_NAMES.get(wd, "")
-    status = workhours.get("msg_open","✅ الان باز است") if is_open_now() else workhours.get("msg_closed","🔴 الان بسته است")
+    opened = is_open_now()
+    status = workhours.get("msg_open","✅ هم‌اکنون باز است") if opened else workhours.get("msg_closed","🔴 هم‌اکنون بسته است")
+    shift_icons_open   = ["☀️","🌙","🌃","🕯"]
+    shift_icons_closed = ["⚫️","⚫️","⚫️","⚫️"]
+
+    lines = ["━━━━━━━━━━━━━━━", f"🏪 وضعیت فروشگاه", f"📅 امروز {name}",""]
 
     if not day.get("open"):
-        return f"🕐 امروز {name}: تعطیل\n{status}"
+        lines.append("❌ امروز تعطیل است")
+    else:
+        shifts = day.get("shifts", [])
+        icons  = shift_icons_open if opened else shift_icons_closed
+        shift_labels = ["شیفت اول","شیفت دوم","شیفت سوم","شیفت چهارم"]
+        for i, s in enumerate(shifts):
+            icon  = icons[i] if i < len(icons) else "🕐"
+            label = shift_labels[i] if i < len(shift_labels) else f"شیفت {to_fa(i+1)}"
+            fr    = fmt_time(s["from"])
+            to_t  = fmt_time(s["to"])
+            lines.append(f"{icon} {label}   {fr} — {to_t}")
 
-    shifts = day.get("shifts", [])
-    shifts_text = "  و  ".join([f"{s['from']} تا {s['to']}" for s in shifts])
-    return f"🕐 امروز {name}: {shifts_text}\n{status}"
+    lines.append("")
+    lines.append(status)
+    lines.append("━━━━━━━━━━━━━━━")
+    return "\n".join(lines)
 
 def build_message(title, content, section_key):
-    """ساختن پیام کامل با footer و ساعت کاری"""
-    footer = f"\n🕒 {shamsi_now()}" if get_setting("show_datetime_footer") else ""
+    """ساختن پیام کامل با footer گرافیکی و ساعت کاری"""
     wh_text = today_workhours_text() if get_section_wh(section_key) else None
+    footer  = f"⏱ {shamsi_now()}" if get_setting("show_datetime_footer") else ""
 
     lines = [f"📌 {title}", "──────────────", content, "──────────────"]
     if wh_text:
+        lines.append("")
         lines.append(wh_text)
-        lines.append("──────────────")
-    lines.append(footer.strip() if footer.strip() else "")
-    return "\n".join([l for l in lines if l != ""])
+    if footer:
+        lines.append("")
+        lines.append(f"─────────────────")
+        lines.append(footer)
+    return "\n".join([l for l in lines if l is not None])
 
 def workhours_full_summary():
-    """جدول کامل ساعت کاری"""
+    """جدول کامل ساعت کاری با اعداد فارسی"""
     lines = []
     for k, name in DAY_NAMES.items():
         day = workhours.get("schedule", {}).get(k, {})
         if not day.get("open"):
-            lines.append(f"• {name}: تعطیل")
+            lines.append(f"❌ {name}: تعطیل")
         else:
-            shifts = "  و  ".join([f"{s['from']} تا {s['to']}" for s in day.get("shifts", [])])
-            lines.append(f"• {name}: {shifts}")
+            shifts = "  و  ".join([f"{fmt_time(s['from'])} تا {fmt_time(s['to'])}" for s in day.get("shifts", [])])
+            lines.append(f"✅ {name}: {shifts}")
     return "\n".join(lines)
 
 def progress_bar(value, total, length=8):
@@ -1105,17 +1144,16 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── منوی کاربر ──
     if text == "🕐 ساعت کاری":
         await record_stat("workhours_page")
-        now    = datetime.now(IRAN_TZ)
-        j_now  = jdatetime.datetime.fromgregorian(datetime=now)
-        today  = DAY_NAMES.get(str(j_now.weekday()), "")
-        st     = "🟢 الان باز است" if is_open_now() else "🔴 الان بسته است"
-        footer = f"\n🕒 {shamsi_now()}" if get_setting("show_datetime_footer") else ""
+        footer = f"\n─────────────────\n⏱ {shamsi_now()}" if get_setting("show_datetime_footer") else ""
         if not workhours.get("enabled", True):
             await update.message.reply_text(f"🕐 ساعت کاری\n──────────────\nساعت کاری تنظیم نشده{footer}", reply_markup=main_menu()); return
+        wh_block = today_workhours_text() or ""
         full = (
-            f"🕐 ساعت کاری استوک لند\n──────────────\n"
-            f"{workhours_full_summary()}\n──────────────\n"
-            f"📅 امروز {today}\n{st}{footer}"
+            f"🕐 ساعت کاری استوک لند\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"{workhours_full_summary()}\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"{wh_block}{footer}"
         )
         await update.message.reply_text(full, reply_markup=main_menu()); return
 
