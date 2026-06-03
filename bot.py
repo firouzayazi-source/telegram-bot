@@ -493,6 +493,26 @@ async def send_backup(bot):
             await bot.send_document(ADMIN_ID,document=content,filename=f"backup_{label}_{now}.{ext}")
         except Exception as e: logger.error(f"backup {fp}: {e}")
 
+async def _handle_start_chat(query, context: ContextTypes.DEFAULT_TYPE):
+    """شروع چت از طرف کاربر"""
+    user=query.from_user
+    if user.id in active_chats and active_chats[user.id]:
+        await query.message.reply_text("💬 یک چت از قبل برای شما فعال است.\nپیام بفرستید یا دکمه پایین را بزنید:",
+            reply_markup=ReplyKeyboardMarkup([["❌ پایان چت"]],resize_keyboard=True)); return
+    active_chats[user.id]=True
+    # اطلاع به ادمین
+    try:
+        await context.bot.send_message(ADMIN_ID,
+            f"🟢 چت جدید شروع شد!\n👤 {user.first_name or '—'} | {'@'+user.username if user.username else str(user.id)}\n🆔 {user.id}\n──────────────\nبرای پاسخ از پنل > چت‌های فعال انتخاب کنید.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(f"💬 پاسخ به {user.first_name or user.id}",callback_data=f"chat_select_{user.id}")],
+                [InlineKeyboardButton("❌ پایان چت",callback_data=f"end_chat_{user.id}")],
+            ]))
+    except Exception as e: logger.error(f"start_chat notify: {e}")
+    await query.message.reply_text(
+        "💬 چت شما شروع شد!\nپیام خود را بنویسید.\n\nبرای پایان دکمه زیر را بزنید:",
+        reply_markup=ReplyKeyboardMarkup([["❌ پایان چت"]],resize_keyboard=True))
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user=update.effective_user; is_new=False
     async with db.execute("SELECT user_id FROM users WHERE user_id=?",(user.id,)) as c: is_new=(await c.fetchone()) is None
@@ -509,10 +529,44 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id!=ADMIN_ID: return await update.message.reply_text("⛔ دسترسی ندارید")
     await update.message.reply_text("👑 پنل مدیریت",reply_markup=admin_menu())
 
+USER_CALLBACKS = {"start_chat","catalog_back"}
+
 async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query=update.callback_query; await query.answer()
-    if query.from_user.id!=ADMIN_ID: return
     data=query.data
+    uid=query.from_user.id
+
+    # callbacks کاربر
+    if uid!=ADMIN_ID:
+        if data=="start_chat":
+            await _handle_start_chat(query, context)
+        elif data=="catalog_back":
+            cats=await get_categories()
+            if not cats:
+                await query.message.edit_text("📭 محصولی موجود نیست.")
+                return
+            await query.message.edit_text("🛍 کاتالوگ استوک لند\nدسته‌بندی را انتخاب کنید:",reply_markup=catalog_categories_kb(cats))
+        elif data.startswith("cat_"):
+            cat_id=int(data[4:])
+            async with db.execute("SELECT id,name,icon FROM categories WHERE id=? AND is_active=1",(cat_id,)) as c2:
+                cat=await c2.fetchone()
+            if not cat: return
+            products=await get_products(cat_id)
+            if not products:
+                await query.message.edit_text("📭 محصولی موجود نیست.",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 برگشت",callback_data="catalog_back")]])); return
+            await query.message.edit_text(f"🛍 {cat[2]} {cat[1]}\n{len(products)} محصول:",reply_markup=catalog_products_kb(products,cat_id))
+        elif data.startswith("prd_"):
+            pid=int(data[4:]); p=await get_product(pid)
+            if not p: return
+            ft=f"\n─────────────────\n⏱ {shamsi_now()}" if get_setting("show_datetime_footer") else ""
+            text=f"📱 {p[1]}\n💰 قیمت: {p[2]}"
+            if p[3]: text+=f"\n\n📝 {p[3]}"
+            text+=ft; kb=product_kb(p)
+            if p[4]:
+                try: await query.message.reply_photo(photo=p[4],caption=text,reply_markup=kb); return
+                except: pass
+            await query.message.reply_text(text,reply_markup=kb)
+        return
 
     if data=="back_to_admin": await query.message.edit_text("👑 پنل مدیریت",reply_markup=admin_menu())
     elif data=="quick_toggle":
@@ -557,10 +611,13 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         async with db.execute("SELECT first_name,username FROM users WHERE user_id=?",(uid,)) as c2:
             row=await c2.fetchone()
         name=row[0] if row else "—"; uname=f"@{row[1]}" if row and row[1] else str(uid)
+        # ذخیره chat_target برای ادمین
+        context.user_data["chat_target"]=uid
         await query.message.edit_text(
-            f"💬 چت با {name} ({uname})\n🆔 {uid}\n──────────────\nهر پیامی بفرستید به این کاربر می‌رسد.\nیا /to_{uid} بنویسید.",
+            f"💬 چت با {name} ({uname})\n🆔 {uid}\n──────────────\n✅ حالا هر پیامی بنویسید مستقیم به این کاربر می‌رسد.",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("❌ پایان چت",callback_data=f"end_chat_{uid}")],
+                [InlineKeyboardButton("🔚 پایان چت",callback_data=f"end_chat_{uid}")],
+                [InlineKeyboardButton("🚫 توقف پاسخ‌دهی",callback_data="clear_chat_target")],
                 [InlineKeyboardButton("🔙 برگشت",callback_data="active_chats_list")],
             ]))
 
@@ -755,16 +812,24 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "💬 چت شما شروع شد!\nپیام خود را بنویسید.\nبرای پایان دکمه زیر را بزنید:",
             reply_markup=ReplyKeyboardMarkup([["❌ پایان چت"]],resize_keyboard=True)); return
 
+    elif data=="clear_chat_target":
+        context.user_data.pop("chat_target",None)
+        await query.answer("✅ پاسخ‌دهی متوقف شد.",show_alert=True)
+        await query.message.edit_text("👑 پنل مدیریت",reply_markup=admin_menu())
+
     elif data.startswith("end_chat_"):
         uid=int(data[9:])
         active_chats.pop(uid,None)
+        # پاک کردن chat_target ادمین اگه همین کاربر بود
+        if context.user_data.get("chat_target")==uid:
+            context.user_data.pop("chat_target",None)
         await query.answer("✅ چت پایان یافت.",show_alert=True)
-        try: await context.bot.send_message(uid,"🔴 پشتیبانی چت را پایان داد.",reply_markup=ReplyKeyboardMarkup([["❌ لغو"]],resize_keyboard=True))
-        except: pass
         try:
-            from telegram import ReplyKeyboardRemove
-            await context.bot.send_message(uid,"می‌توانید دوباره از بخش پشتیبانی چت جدید شروع کنید.",reply_markup=ReplyKeyboardMarkup([["📞 پشتیبانی"]],resize_keyboard=True))
+            await context.bot.send_message(uid,
+                "🔴 پشتیبانی چت را پایان داد.\nمی‌توانید دوباره از بخش پشتیبانی چت جدید شروع کنید.",
+                reply_markup=main_menu())
         except: pass
+        await query.message.edit_text("👑 پنل مدیریت",reply_markup=admin_menu())
 
     elif data=="workhours_menu":
         en="✅ فعال" if workhours.get("enabled") else "❌ غیرفعال"
@@ -904,53 +969,21 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await db.execute("UPDATE products SET site_url=? WHERE id=?",(None if text=="." else text,pid)); await db.commit()
             await update.message.reply_text("✅ ذخیره شد.",reply_markup=main_menu()); return
 
-        # ── پاسخ ادمین به چت فعال ──
-        # اگه ادمین /to_ID بنویسه یا اگه فقط یه چت فعال باشه
-        target_uid = None
-        if text.startswith("/to_"):
-            try: target_uid=int(text.split("_")[1])
-            except: pass
-        elif len(active_chats)==1:
-            target_uid=list(active_chats.keys())[0]
-        elif update.message.reply_to_message:
-            rt=update.message.reply_to_message.text or ""
-            for line in rt.split("\n"):
-                if "🆔" in line:
-                    try: target_uid=int(line.replace("🆔","").strip()); break
-                    except: pass
-
-        if target_uid and target_uid in active_chats:
+        # ── پاسخ ادمین به چت ──
+        # فقط وقتی ادمین یه کاربر رو از پنل انتخاب کرده (chat_target در user_data)
+        chat_target = context.user_data.get("chat_target")
+        if chat_target and chat_target in active_chats:
             ft=f"\n─────────────────\n⏱ {shamsi_now()}" if get_setting("show_datetime_footer") else ""
             try:
-                await context.bot.send_message(target_uid,f"📩 پشتیبانی:\n──────────────\n{text}{ft}")
-                await update.message.reply_text(f"✅ پیام به کاربر {target_uid} ارسال شد.")
+                await context.bot.send_message(chat_target,f"📩 پشتیبانی:\n──────────────\n{text}{ft}")
+                async with db.execute("SELECT first_name FROM users WHERE user_id=?",(chat_target,)) as cx:
+                    row=await cx.fetchone()
+                name=row[0] if row else chat_target
+                await update.message.reply_text(f"✅ پیام به {name} ارسال شد.")
             except Exception as e: logger.error(f"chat reply: {e}"); await update.message.reply_text("❌ ارسال ناموفق.")
             return
-        elif update.message.reply_to_message:
-            rt=update.message.reply_to_message.text or ""
-            if "🆔" in rt:
-                for line in rt.split("\n"):
-                    if "🆔" in line:
-                        try:
-                            uid=int(line.replace("🆔","").strip())
-                            ft=f"\n─────────────────\n⏱ {shamsi_now()}" if get_setting("show_datetime_footer") else ""
-                            await context.bot.send_message(uid,f"📩 پاسخ پشتیبانی:\n──────────────\n{text}{ft}")
-                            await update.message.reply_text("✅ پاسخ ارسال شد.")
-                        except Exception as e: logger.error(f"reply: {e}"); await update.message.reply_text("❌ ارسال ناموفق.")
-                        break
-                return
 
-    # ── تیکت کاربر ──
-    if mode=="ticket_wait":
-        context.user_data.pop("mode",None)
-        await db.execute("INSERT INTO tickets (user_id,username,first_name,message,msg_id,status,created_at) VALUES (?,?,?,?,?,?,?)",
-            (user.id,user.username or "",user.first_name or "",text,update.message.message_id,"open",gregorian_now()))
-        await db.commit()
-        try:
-            await context.bot.send_message(ADMIN_ID,
-                f"📨 تیکت جدید!\n👤 {user.first_name or '—'} | {'@'+user.username if user.username else '—'}\n🆔 {user.id}\n──────────────\n📝 {text}\n──────────────\nبرای پاسخ، reply کنید.")
-        except Exception as e: logger.error(f"ticket: {e}")
-        await update.message.reply_text("✅ پیام شما ارسال شد!\nپشتیبانی به زودی پاسخ می‌دهد.",reply_markup=main_menu()); return
+
 
     # ── منوی کاربر ──
     if text=="🕐 ساعت کاری":
@@ -967,9 +1000,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ft=f"\n─────────────────\n⏱ {shamsi_now()}" if get_setting("show_datetime_footer") else ""
         await update.message.reply_text(f"🛍 کاتالوگ استوک لند\n──────────────\nدسته‌بندی را انتخاب کنید:{ft}",reply_markup=catalog_categories_kb(cats)); return
 
-    if text=="💬 گفتگو با پشتیبانی":
-        await record_stat("ticket"); context.user_data["mode"]="ticket_wait"
-        await update.message.reply_text("💬 پیام خود را بنویسید:\nپشتیبانی به زودی پاسخ می‌دهد.",reply_markup=admin_cancel_menu()); return
+
 
     for k,v in MENU_ITEMS.items():
         if text==v:
