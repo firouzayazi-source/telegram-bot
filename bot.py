@@ -1520,8 +1520,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("❌ ارسال ناموفق.")
             return
 
-        # admin falls through to user menu
-        return
+        # admin falls through to user menu (intentional — no return)
 
     # ════ USER — active chat ════
     if active_chats.get(user.id):
