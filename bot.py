@@ -522,6 +522,16 @@ def catalog_subcats_kb(subcats, back_cb):
     btns.append([InlineKeyboardButton("🔙 برگشت", callback_data=back_cb)])
     return InlineKeyboardMarkup(btns)
 
+def catalog_mixed_kb(subcats, products, back_cb):
+    """نمایش ترکیبی: زیردسته‌ها + محصولات همان سطح"""
+    btns = []
+    for s in subcats:
+        btns.append([InlineKeyboardButton(f"📁 {s[2]} {s[1]}", callback_data=f"cat_{s[0]}")])
+    for p in products:
+        btns.append([InlineKeyboardButton(f"📱 {p[1]}", callback_data=f"prd_{p[0]}")])
+    btns.append([InlineKeyboardButton("🔙 برگشت", callback_data=back_cb)])
+    return InlineKeyboardMarkup(btns)
+
 def catalog_products_kb(products, back_cb):
     btns = [[InlineKeyboardButton(f"📱 {p[1]}", callback_data=f"prd_{p[0]}")] for p in products]
     btns.append([InlineKeyboardButton("🔙 برگشت", callback_data=back_cb)])
@@ -737,12 +747,18 @@ def request_detail_kb(rid, status):
     btns.append([InlineKeyboardButton("🔙 برگشت", callback_data="admin_requests")])
     return InlineKeyboardMarkup(btns)
 
-def active_chats_kb():
+def active_chats_kb(user_info: dict = None):
+    """user_info: {uid: (first_name, username)} برای نمایش نام"""
     if not active_chats:
         return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 برگشت", callback_data="back_to_admin")]])
     btns = []
     for uid in active_chats:
-        btns.append([InlineKeyboardButton(f"💬 کاربر {uid}", callback_data=f"chat_select_{uid}")])
+        if user_info and uid in user_info:
+            fn, un = user_info[uid]
+            label = f"💬 {fn or '—'} {'@'+un if un else str(uid)}"
+        else:
+            label = f"💬 کاربر {uid}"
+        btns.append([InlineKeyboardButton(label, callback_data=f"chat_select_{uid}")])
     btns.append([InlineKeyboardButton("🔙 برگشت", callback_data="back_to_admin")])
     return InlineKeyboardMarkup(btns)
 
@@ -832,25 +848,31 @@ async def handle_user_callback(query, context: ContextTypes.DEFAULT_TYPE):
     if data == "start_chat":
         if active_chats.get(user.id):
             await query.message.reply_text(
-                "💬 یک چت از قبل برای شما فعال است.\nپیام بفرستید یا چت را پایان دهید.",
+                "💬 یک چت از قبل برای شما فعال است.\nپیام بفرستید یا دکمه پایان را بزنید:",
                 reply_markup=chat_menu())
             return
-        await open_chat(user.id)
+        # باز کردن چت در DB
         try:
-            async with db.execute("SELECT first_name,username FROM users WHERE user_id=?", (user.id,)) as c:
-                row = await c.fetchone()
-            name  = row[0] if row else user.first_name or "—"
-            uname = f"@{row[1]}" if row and row[1] else str(user.id)
+            await open_chat(user.id)
+        except Exception as e:
+            logger.error(f"open_chat error uid={user.id}: {e}")
+            await query.message.reply_text("❌ خطا در شروع چت. لطفاً دوباره امتحان کنید.")
+            return
+        # اطلاع به ادمین — با اطلاعات از شیء user (نه DB)
+        name  = user.first_name or "—"
+        uname = f"@{user.username}" if user.username else str(user.id)
+        try:
             await context.bot.send_message(
                 ADMIN_ID,
-                f"🟢 چت جدید!\n👤 {name} | {uname}\n🆔 {user.id}\n──────────────\nبرای پاسخ از «💬 چت‌های فعال» انتخاب کنید.",
+                f"🟢 چت جدید!\n👤 {name} | {uname}\n🆔 {user.id}\n──────────────\nبرای پاسخ از پنل > چت‌های فعال انتخاب کنید.",
                 reply_markup=InlineKeyboardMarkup([[
                     InlineKeyboardButton(f"💬 پاسخ به {name}", callback_data=f"chat_select_{user.id}")
                 ]]))
         except Exception as e:
-            logger.error(f"start_chat notify: {e}")
+            logger.error(f"chat admin notify error: {e}")
+        # پیام تأیید به کاربر
         await query.message.reply_text(
-            "💬 چت شما شروع شد!\nپیام خود را بنویسید.\nبرای پایان دکمه زیر را بزنید:",
+            f"💬 چت شما شروع شد!\nپیام خود را بنویسید.\nبرای پایان دکمه زیر را بزنید:",
             reply_markup=chat_menu())
         return
 
@@ -878,18 +900,28 @@ async def handle_user_callback(query, context: ContextTypes.DEFAULT_TYPE):
         if not cat: return
         parent_id = cat[4]
         back_cb   = "catalog_back" if parent_id is None else f"cat_{parent_id}"
-        if await has_subcategories(cat_id):
-            subcats = await get_categories(active_only=True, parent_id=cat_id)
+        subcats  = await get_categories(active_only=True, parent_id=cat_id)
+        products = await get_products(cat_id)
+        if not subcats and not products:
             await query.message.edit_text(
-                f"🛍 {cat[2]} {cat[1]}\nدسته‌بندی را انتخاب کنید:",
+                f"📭 {cat[2]} {cat[1]}\nمحصولی موجود نیست.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 برگشت", callback_data=back_cb)
+                ]]))
+            return
+        if subcats and products:
+            # هم زیردسته هم محصول دارد — نمایش ترکیبی
+            total = len(subcats) + len(products)
+            await query.message.edit_text(
+                f"🛍 {cat[2]} {cat[1]}\n{to_fa(len(subcats))} دسته  |  {to_fa(len(products))} محصول:",
+                reply_markup=catalog_mixed_kb(subcats, products, back_cb))
+        elif subcats:
+            # فقط زیردسته
+            await query.message.edit_text(
+                f"📁 {cat[2]} {cat[1]}\nدسته‌بندی را انتخاب کنید:",
                 reply_markup=catalog_subcats_kb(subcats, back_cb))
         else:
-            products = await get_products(cat_id)
-            if not products:
-                await query.message.edit_text(
-                    "📭 محصولی در این دسته موجود نیست.",
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 برگشت", callback_data=back_cb)]]))
-                return
+            # فقط محصول
             await query.message.edit_text(
                 f"🛍 {cat[2]} {cat[1]}\n{to_fa(len(products))} محصول:",
                 reply_markup=catalog_products_kb(products, back_cb))
@@ -932,7 +964,14 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # route non-admin callbacks
     if uid != ADMIN_ID:
-        await handle_user_callback(query, context)
+        try:
+            await handle_user_callback(query, context)
+        except Exception as e:
+            logger.error(f"user_callback error uid={uid} data={data}: {e}", exc_info=True)
+            try:
+                await query.message.reply_text("❌ خطایی رخ داد. دوباره امتحان کنید.")
+            except Exception:
+                pass
         return
 
     # ════ ADMIN CALLBACKS ════
@@ -1257,9 +1296,19 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ── چت ادمین ──
     elif data == "active_chats_list":
+        user_info = {}
+        if active_chats:
+            ids = list(active_chats.keys())
+            placeholders = ",".join("?" * len(ids))
+            async with db.execute(
+                f"SELECT user_id,first_name,username FROM users WHERE user_id IN ({placeholders})",
+                ids
+            ) as cur:
+                for row in await cur.fetchall():
+                    user_info[row[0]] = (row[1], row[2])
         await query.message.edit_text(
             f"💬 چت‌های فعال ({to_fa(len(active_chats))}):",
-            reply_markup=active_chats_kb())
+            reply_markup=active_chats_kb(user_info))
 
     elif data.startswith("chat_select_"):
         cuid = int(data[12:])
