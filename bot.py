@@ -683,7 +683,6 @@ async def user_cb(query,ctx):
                 return
             except Exception as e:
                 logger.error(f"prd photo {pid}: {e}")
-                # عکس منقضی شده یا خطا — بدون عکس نمایش بده
         await query.message.reply_text(text,reply_markup=kb); return
 
     # ── درخواست خرید ──
@@ -965,12 +964,9 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             url=text if text.startswith("http") else f"https://{text}"
             sec=get_sec_btns(key)
             sec["items"].append({"id":f"b{int(time.time())}","title":title,"url":url})
-            # اگه هنوز فعال نشده، به‌صورت خودکار فعال کن
             if not sec.get("enabled"): sec["enabled"]=True
             await save_buttons()
-            await update.message.reply_text(
-                f"\u2705 \u00ab{title}\u00bb \u0627\u0636\u0627\u0641\u0647 \u0634\u062f.\n\U0001f518 \u062f\u06a9\u0645\u0647\u200c\u0647\u0627 \u0641\u0639\u0627\u0644 \u0647\u0633\u062a\u0646\u062f.",
-                reply_markup=sec_btns_kb(key)); return
+            await update.message.reply_text(f"\u2705 \u00ab{title}\u00bb \u0627\u0636\u0627\u0641\u0647 \u0634\u062f.",reply_markup=sec_btns_kb(key)); return
         if mode=="btn_ed_t":
             ctx.user_data.update({"btn_new_t":None if text=="." else text,"mode":"btn_ed_u"}); await update.message.reply_text("\U0001f517 \u0644\u06cc\u0646\u06a9 \u062c\u062f\u06cc\u062f (\u06cc\u0627 . \u0628\u062f\u0648\u0646 \u062a\u063a\u06cc\u06cc\u0631):",reply_markup=cancel_menu()); return
         if mode=="btn_ed_u":
@@ -1034,8 +1030,7 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             pid=ctx.user_data.pop("edit_pid",None); ctx.user_data.pop("mode",None)
             await db.execute("UPDATE products SET site_url=? WHERE id=?",(None if text=="." else text,pid)); await db.commit()
             await update.message.reply_text("\u2705",reply_markup=main_menu()); return
-    # ════ ADMIN active chat reply ════
-    if user.id==ADMIN_ID:
+        # پاسخ ادمین به چت
         chat_target=ctx.user_data.get("chat_target")
         if chat_target and chat_target in active_chats:
             ft=f"\n\u2500"*17+f"\n\u23f1 {shamsi_now()}" if get_setting("show_datetime_footer") else""
