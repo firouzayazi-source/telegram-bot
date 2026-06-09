@@ -256,8 +256,9 @@ async def blk_count():   return await _cnt("SELECT COUNT(*) FROM users WHERE is_
 
 # ── catalog db ────────────────────────────────────
 async def get_root_cats(active_only=True):
-    w="AND is_active=1" if active_only else ""
-    async with db.execute(f"SELECT id,name,icon,parent_id,is_active FROM categories WHERE parent_id IS NULL {w} ORDER BY id") as c: return await c.fetchall()
+    # دسته‌های اصلی همیشه نمایش داده می‌شن
+    async with db.execute(f"SELECT id,name,icon,parent_id,is_active FROM categories WHERE parent_id IS NULL ORDER BY id") as c: 
+        return await c.fetchall()
 
 async def get_subcats(parent_id, active_only=True):
     # زیردسته‌ها همیشه نمایش داده می‌شن، فقط محصولات فیلتر می‌شن
