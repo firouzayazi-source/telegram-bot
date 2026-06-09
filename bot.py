@@ -1191,7 +1191,58 @@ async def post_init(app):
     await load_stats(); await load_active_chats()
     logger.info("\u2705 \u0631\u0628\u0627\u062a \u0631\u0627\u0647\u200c\u0627\u0646\u062f\u0627\u0632\u06cc \u0634\u062f")
 
+
+async def cmd_debug(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID: return
+    
+    msg = "🔍 **دیباگ کامل کاتالوگ:**\n\n"
+    
+    # 1. دسته‌های اصلی
+    async with db.execute("SELECT id, name, is_active FROM categories WHERE parent_id IS NULL") as c:
+        roots = await c.fetchall()
+    msg += f"**دسته‌های اصلی:** {len(roots)}\n"
+    for r in roots:
+        msg += f"  🗂 {r[1]} (id:{r[0]}) - {'✅' if r[2] else '❌'}\n"
+    
+    # 2. زیردسته‌ها
+    async with db.execute("SELECT id, name, parent_id, is_active FROM categories WHERE parent_id IS NOT NULL") as c:
+        subs = await c.fetchall()
+    msg += f"\n**زیردسته‌ها:** {len(subs)}\n"
+    for s in subs:
+        msg += f"  📁 {s[1]} (id:{s[0]}, parent:{s[2]}) - {'✅' if s[3] else '❌'}\n"
+    
+    # 3. محصولات
+    async with db.execute("SELECT id, name, category_id, is_active FROM products") as c:
+        products = await c.fetchall()
+    msg += f"\n**همه محصولات:** {len(products)}\n"
+    for p in products:
+        msg += f"  📦 {p[1]} (id:{p[0]}, cat:{p[2]}) - {'✅' if p[3] else '❌'}\n"
+    
+    # 4. محصولات فعال
+    async with db.execute("SELECT COUNT(*) FROM products WHERE is_active=1") as c:
+        active_count = (await c.fetchone())[0]
+    msg += f"\n**محصولات فعال:** {active_count}\n"
+    
+    # 5. بررسی ارتباط
+    msg += f"\n**بررسی ارتباط محصول با زیردسته:**\n"
+    async with db.execute("""
+        SELECT p.id, p.name, p.category_id, c.id, c.name 
+        FROM products p 
+        LEFT JOIN categories c ON p.category_id = c.id
+        WHERE p.is_active = 1
+    """) as c:
+        valid = await c.fetchall()
+    if valid:
+        for v in valid:
+            msg += f"  ✅ {v[1]} → زیردسته: {v[4] if v[4] else '❌ ندارد!'}\n"
+    else:
+        msg += "  ❌ هیچ محصول فعالی به زیردسته متصل نیست!\n"
+    
+    await update.message.reply_text(msg)
+
+
 def main():
+    app.add_handler(CommandHandler("debug", cmd_debug))
     app=ApplicationBuilder().token(TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start",cmd_start))
     app.add_handler(CommandHandler("admin",cmd_admin))
