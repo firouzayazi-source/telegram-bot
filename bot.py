@@ -725,68 +725,6 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
 
     # ════ ADMIN ════
     if data=="back_to_admin": await safe_edit(query.message,"\U0001f451 \u067e\u0646\u0644 \u0645\u062f\u06cc\u0631\u06cc\u062a",reply_markup=admin_menu())
-
-    elif data.startswith("chat_sel_"):
-    uid = int(data.split("_")[-1])
-
-    ctx.user_data["chat_target"] = uid
-
-    async with db.execute(
-        "SELECT first_name FROM users WHERE user_id=?",
-        (uid,)
-    ) as c:
-        row = await c.fetchone()
-
-    name = row[0] if row else str(uid)
-
-    await query.message.edit_text(
-        f"💬 چت با {name}\n\nهر پیامی ارسال کنید برای کاربر فرستاده می‌شود.",
-        reply_markup=chat_admin_kb(uid, name)
-    )
-
-elif data.startswith("chat_end_"):
-    uid = int(data.split("_")[-1])
-
-    await close_chat(uid)
-
-    if ctx.user_data.get("chat_target") == uid:
-        ctx.user_data.pop("chat_target", None)
-
-    try:
-        await ctx.bot.send_message(
-            uid,
-            "🔴 گفتگو توسط پشتیبانی بسته شد."
-        )
-    except:
-        pass
-
-    await query.message.edit_text(
-        "✅ چت بسته شد.",
-        reply_markup=await chats_kb()
-    )
-
-    
-
-elif data.startswith("chat_end_"):
-    uid = int(data.split("_")[2])
-
-    await close_chat(uid)
-
-    if ctx.user_data.get("chat_target") == uid:
-        ctx.user_data.pop("chat_target", None)
-
-    try:
-        await ctx.bot.send_message(
-            uid,
-            "🔴 گفتگو توسط پشتیبانی بسته شد."
-        )
-    except:
-        pass
-
-    await query.message.edit_text(
-        "✅ چت بسته شد.",
-        reply_markup=await chats_kb()
-    )  
     elif data=="quick_toggle":
         settings["store_open"]=not get_setting("store_open"); await save_settings()
         await query.answer("\U0001f7e2 \u0628\u0627\u0632 \u0634\u062f" if settings["store_open"] else"\U0001f534 \u0628\u0633\u062a\u0647 \u0634\u062f",show_alert=True)
