@@ -9,8 +9,8 @@ from telegram.ext import (ApplicationBuilder, CommandHandler, MessageHandler,
 os.environ.pop("HTTP_PROXY", None); os.environ.pop("HTTPS_PROXY", None)
 os.environ.pop("ALL_PROXY", None); os.environ["NO_PROXY"] = "*"
 
-TOKEN = os.environ["BOT_TOKEN"].strip()
-ADMIN_ID = int(os.environ["ADMIN_ID"].strip())
+TOKEN    = os.getenv("BOT_TOKEN", "8792062012:AAGXforSa1IY45AuC-yOHs2PsdzudvtdD44")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "638469407"))
 DATA_FILE = "data.json"; DB_FILE = "users.db"; BANNER_FILE = "banner.json"
 WORKHOURS_FILE = "workhours.json"; BUTTONS_FILE = "buttons.json"
 SETTINGS_FILE = "settings.json"; STATS_FILE = "stats.json"
@@ -541,8 +541,8 @@ async def chats_kb():
 def chat_admin_kb(uid,name):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(f"\U0001f51a \u067e\u0627\u06cc\u0627\u0646 \u0686\u062a \u0628\u0627 {name}",callback_data=f"chat_end_{uid}")],
-        [InlineKeyboardButton("\U0001f6ab \u0628\u0644\u0627\u06a9 \u06a9\u0627\u0631\u0628\u0631",callback_data=f"chat_block_{uid}")],
         [InlineKeyboardButton("\U0001f514 \u062a\u0648\u0642\u0641 \u067e\u0627\u0633\u062e\u062f\u0647\u06cc",callback_data="chat_clear")],
+        [InlineKeyboardButton("\U0001f6ab \u0628\u0644\u0627\u06a9 \u06a9\u0627\u0631\u0628\u0631",callback_data=f"chat_block_{uid}")],
         [InlineKeyboardButton("\U0001f519",callback_data="chats_list")]])
 
 # ════════════════════════════════════════════════
@@ -628,9 +628,8 @@ async def user_cb(query,ctx):
         await query.message.reply_text(
             "\U0001f4ac \u0686\u062a \u0628\u0627 \u067e\u0634\u062a\u06cc\u0628\u0627\u0646\u06cc \u0634\u0631\u0648\u0639 \u0634\u062f!\n"
             "\u2500"*14+"\n"
-            "\u2709\ufe0f \u067e\u06cc\u0627\u0645 \u062e\u0648\u062f \u0631\u0627 \u0628\u0646\u0648\u06cc\u0633\u06cc\u062f.\n"
-            "\U0001f4f7 \u0639\u06a9\u0633 \u0647\u0645 \u0645\u06cc\u200c\u062a\u0648\u0627\u0646\u06cc\u062f \u0627\u0631\u0633\u0627\u0644 \u06a9\u0646\u06cc\u062f.\n"
-            "\u274c \u0628\u0631\u0627\u06cc \u067e\u0627\u06cc\u0627\u0646 \u062f\u0627\u062f\u0646 \u062f\u06a9\u0645\u0647 \"\u067e\u0627\u06cc\u0627\u0646 \u0686\u062a\" \u0631\u0627 \u0628\u0632\u0646\u06cc\u062f.",
+            "\u2709\ufe0f \u067e\u06cc\u0627\u0645 \u062e\u0648\u062f \u0631\u0627 \u0628\u0646\u0648\u06cc\u0633\u06cc\u062f \u2014 \u0639\u06a9\u0633 \u0647\u0645 \u0645\u06cc\u200c\u062a\u0648\u0627\u0646\u06cc\u062f \u0627\u0631\u0633\u0627\u0644 \u06a9\u0646\u06cc\u062f.\n"
+            "\u274c \u0628\u0631\u0627\u06cc \u067e\u0627\u06cc\u0627\u0646 \u062f\u0627\u062f\u0646 \u062f\u06a9\u0645\u0647 '\u067e\u0627\u06cc\u0627\u0646 \u0686\u062a' \u0631\u0627 \u0628\u0632\u0646\u06cc\u062f.",
             reply_markup=chat_menu()); return
 
     # ── کاتالوگ root ──
@@ -882,13 +881,8 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         ctx.user_data["chat_target"]=cuid
         await query.message.edit_text(f"\U0001f4ac \u0686\u062a \u0628\u0627 {name} ({uname})\n\U0001f194 {cuid}\n\u2500"*14+"\n\u2705 \u0647\u0631 \u067e\u06cc\u0627\u0645\u06cc \u0628\u0646\u0648\u06cc\u0633\u06cc\u062f \u0645\u0633\u062a\u0642\u06cc\u0645 \u0628\u0647 \u06a9\u0627\u0631\u0628\u0631 \u0645\u06cc\u200c\u0631\u0633\u062f.",reply_markup=chat_admin_kb(cuid,name))
     elif data=="chat_clear":
-        cuid_c=ctx.user_data.pop("chat_target",None)
-        if cuid_c and cuid_c in active_chats:
-            await close_chat(cuid_c)
-            try: await ctx.bot.send_message(cuid_c,"\U0001f514 \u067e\u0634\u062a\u06cc\u0628\u0627\u0646\u06cc \u062a\u0648\u0642\u0641 \u067e\u0627\u0633\u062e\u062f\u0647\u06cc \u0631\u0627 \u0645\u062a\u0648\u0642\u0641 \u06a9\u0631\u062f.\n\u0645\u06cc\u200c\u062a\u0648\u0627\u0646\u06cc\u062f \u062f\u0648\u0628\u0627\u0631\u0647 \u0627\u0632 \u0628\u062e\u0634 \u067e\u0634\u062a\u06cc\u0628\u0627\u0646\u06cc \u0634\u0631\u0648\u0639 \u06a9\u0646\u06cc\u062f.",reply_markup=main_menu())
-            except: pass
-        await query.answer("\u2705 \u062a\u0648\u0642\u0641 \u067e\u0627\u0633\u062e\u062f\u0647\u06cc",show_alert=True)
-        await safe_edit(query.message,"\U0001f451 \u067e\u0646\u0644 \u0645\u062f\u06cc\u0631\u06cc\u062a",reply_markup=admin_menu())
+        ctx.user_data.pop("chat_target",None); await query.answer("\u2705 \u062a\u0648\u0642\u0641 \u067e\u0627\u0633\u062e\u062f\u0647\u06cc",show_alert=True)
+        await query.message.edit_text("\U0001f451 \u067e\u0646\u0644 \u0645\u062f\u06cc\u0631\u06cc\u062a",reply_markup=admin_menu())
     elif data.startswith("chat_end_"):
         cuid=int(data[9:]); await close_chat(cuid)
         if ctx.user_data.get("chat_target")==cuid: ctx.user_data.pop("chat_target",None)
@@ -971,17 +965,6 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
 
     # ════ ADMIN ════
     if user.id==ADMIN_ID:
-        # پاسخ به چت — باید اول چک بشه
-        chat_target=ctx.user_data.get("chat_target")
-        if chat_target and chat_target in active_chats and not mode:
-            ft=f"\n\u2500"*17+f"\n\u23f1 {shamsi_now()}" if get_setting("show_datetime_footer") else""
-            try:
-                await ctx.bot.send_message(chat_target,f"\U0001f4e9 \u067e\u0634\u062a\u06cc\u0628\u0627\u0646\u06cc:\n\u2500"*14+f"\n{text}{ft}")
-                async with db.execute("SELECT first_name FROM users WHERE user_id=?",(chat_target,)) as c:
-                    row=await c.fetchone()
-                await update.message.reply_text(f"\u2705 \u067e\u06cc\u0627\u0645 \u0628\u0647 {row[0] if row else chat_target} \u0627\u0631\u0633\u0627\u0644 \u0634\u062f.")
-            except Exception as e: logger.error(f"chat reply: {e}"); await update.message.reply_text("\u274c \u0627\u0631\u0633\u0627\u0644 \u0646\u0627\u0645\u0648\u0641\u0642.")
-            return
         if mode=="edit_text":
             key=ctx.user_data.pop("edit_key",None); ctx.user_data.pop("mode",None)
             if key: responses[key]=text; await save_data()
@@ -1067,7 +1050,18 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             pid=ctx.user_data.pop("edit_pid",None); ctx.user_data.pop("mode",None)
             await db.execute("UPDATE products SET site_url=? WHERE id=?",(None if text=="." else text,pid)); await db.commit()
             await update.message.reply_text("\u2705",reply_markup=main_menu()); return
-        # ادمین می‌تونه از منو استفاده کنه
+        # پاسخ ادمین به چت
+        chat_target=ctx.user_data.get("chat_target")
+        if chat_target and chat_target in active_chats:
+            ft=f"\n\u2500"*17+f"\n\u23f1 {shamsi_now()}" if get_setting("show_datetime_footer") else""
+            try:
+                await ctx.bot.send_message(chat_target,f"\U0001f4e9 \u067e\u0634\u062a\u06cc\u0628\u0627\u0646\u06cc:\n\u2500"*14+f"\n{text}{ft}")
+                async with db.execute("SELECT first_name FROM users WHERE user_id=?",(chat_target,)) as c:
+                    row=await c.fetchone()
+                await update.message.reply_text(f"\u2705 \u067e\u06cc\u0627\u0645 \u0628\u0647 {row[0] if row else chat_target} \u0627\u0631\u0633\u0627\u0644 \u0634\u062f.")
+            except Exception as e: logger.error(f"chat reply: {e}"); await update.message.reply_text("\u274c \u0627\u0631\u0633\u0627\u0644 \u0646\u0627\u0645\u0648\u0641\u0642.")
+            return
+        # ادمین می‌تونه از منو هم استفاده کنه — fall through
 
     # ════ USER active chat ════
     if user.id!=ADMIN_ID and active_chats.get(user.id):
@@ -1076,11 +1070,10 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             try: await ctx.bot.send_message(ADMIN_ID,f"\U0001f534 {user.first_name or user.id} \u0686\u062a \u0631\u0627 \u067e\u0627\u06cc\u0627\u0646 \u062f\u0627\u062f.\n\U0001f194 {user.id}")
             except: pass
             await update.message.reply_text("\u2705 \u0686\u062a \u067e\u0627\u06cc\u0627\u0646 \u06cc\u0627\u0641\u062a.",reply_markup=main_menu()); return
-        name_u=user.first_name or"\u2014"; uid_u='@'+user.username if user.username else str(user.id)
         try:
             await ctx.bot.send_message(ADMIN_ID,
-                f"\U0001f4ac {name_u} | {uid_u}\n\U0001f194 {user.id}\n\u2500"*14+f"\n{text}",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"\U0001f4ac \u067e\u0627\u0633\u062e \u0628\u0647 {name_u}",callback_data=f"chat_sel_{user.id}")]]))
+                f"\U0001f4ac {user.first_name or'\u2014'} | {'@'+user.username if user.username else str(user.id)}\n\U0001f194 {user.id}\n\u2500"*14+f"\n{text}",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"\U0001f4ac \u067e\u0627\u0633\u062e",callback_data=f"chat_sel_{user.id}")]]))
         except Exception as e: logger.error(f"chat fwd: {e}")
         await update.message.reply_text("\U0001f4e8 \u067e\u06cc\u0627\u0645 \u0627\u0631\u0633\u0627\u0644 \u0634\u062f.",reply_markup=chat_menu()); return
 
