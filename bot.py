@@ -52,7 +52,7 @@ SECTION_NAMES = {"welcome":"\U0001f3e0 \u062e\u0648\u0634\u200c\u0622\u0645\u062
 
 # ── state ─────────────────────────────────────────
 responses=None; banners={}; workhours={}; buttons={}; settings={}; stats={}
-active_chats={}  # {user_id: True}
+active_chats={}
 
 DEFAULT_WH = {"enabled":True,"schedule":{
     "0":{"open":True,"shifts":[{"from":"11:00","to":"14:00"},{"from":"17:00","to":"23:00"}]},
@@ -65,7 +65,6 @@ DEFAULT_WH = {"enabled":True,"schedule":{
     "msg_open":"\u2705 \u0647\u0645\u200c\u0627\u06a9\u0646\u0648\u0646 \u0628\u0627\u0632 \u0627\u0633\u062a",
     "msg_closed":"\U0001f534 \u0647\u0645\u200c\u0627\u06a9\u0646\u0648\u0646 \u0628\u0633\u062a\u0647 \u0627\u0633\u062a"}
 
-# پیش‌فرض همه قابلیت‌ها غیرفعال
 DEFAULT_SETTINGS = {"show_workhours_in_sections":False,"show_datetime_footer":False,
                     "show_workhours_menu":False,"show_catalog_menu":False,
                     "notify_new_user":False,"store_open":True}
@@ -256,7 +255,6 @@ async def new_today():   return await _cnt("SELECT COUNT(*) FROM users WHERE DAT
 async def blk_count():   return await _cnt("SELECT COUNT(*) FROM users WHERE is_blocked=1")
 
 # ── catalog db ────────────────────────────────────
-# Schema: id(0),name(1),icon(2),parent_id(3),is_active(4)
 async def get_root_cats(active_only=True):
     w="AND is_active=1" if active_only else ""
     async with db.execute(f"SELECT id,name,icon,parent_id,is_active FROM categories WHERE parent_id IS NULL {w} ORDER BY id") as c: return await c.fetchall()
@@ -269,7 +267,6 @@ async def get_cat(cat_id):
     async with db.execute("SELECT id,name,icon,parent_id,is_active FROM categories WHERE id=?",(cat_id,)) as c: return await c.fetchone()
 
 # ── product db ────────────────────────────────────
-# Schema: id(0),name(1),price(2),description(3),photo_id(4),site_url(5),is_active(6),category_id(7)
 async def get_products(cat_id,active_only=True):
     w="AND is_active=1" if active_only else ""
     async with db.execute(f"SELECT id,name,price,description,photo_id,site_url,is_active,category_id FROM products WHERE category_id=? {w} ORDER BY id",(cat_id,)) as c: return await c.fetchall()
@@ -369,7 +366,6 @@ def cat_products_kb(products,sub_id):
     return InlineKeyboardMarkup(btns)
 
 def product_kb(p):
-    # p: id(0),name(1),price(2),desc(3),photo(4),url(5),active(6),cat_id(7)
     btns=[]
     if p[5]: btns.append([InlineKeyboardButton("\U0001f310 \u0645\u0634\u0627\u0647\u062f\u0647 / \u062e\u0631\u06cc\u062f \u0627\u0632 \u0633\u0627\u06cc\u062a",url=p[5])])
     btns.append([InlineKeyboardButton("\U0001f4cb \u062f\u0631\u062e\u0648\u0627\u0633\u062a \u062e\u0631\u06cc\u062f",callback_data=f"req_{p[0]}")])
@@ -1105,7 +1101,6 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         if not workhours.get("enabled",True): await update.message.reply_text("\U0001f550 \u0633\u0627\u0639\u062a \u06a9\u0627\u0631\u06cc \u062a\u0646\u0638\u06cc\u0645 \u0646\u0634\u062f\u0647.",reply_markup=main_menu()); return
         wh=wh_today_block() or""
         ft=f"\n\u2500"*17+f"\n\u23f1 {shamsi_now()}" if get_setting("show_datetime_footer") else""
-        # حداکثر ۴۰۹۶ کاراکتر — فقط امروز نمایش بده
         msg=f"\U0001f550 \u0633\u0627\u0639\u062a \u06a9\u0627\u0631\u06cc \u0627\u0633\u062a\u0648\u06a9 \u0644\u0646\u062f\n{wh}{ft}"
         if len(msg)>4000: msg=msg[:3990]+"..."
         await update.message.reply_text(msg,reply_markup=main_menu()); return
@@ -1158,6 +1153,34 @@ async def photo_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         except Exception as e: logger.error(f"chat photo: {e}")
 
 # ════════════════════════════════════════════════
+#  DEBUG COMMAND
+# ════════════════════════════════════════════════
+async def cmd_check(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID: return
+    async with db.execute("SELECT COUNT(*) FROM products WHERE is_active=1") as c:
+        active_products = (await c.fetchone())[0]
+    async with db.execute("SELECT COUNT(*) FROM categories WHERE parent_id IS NOT NULL AND is_active=1") as c:
+        active_subs = (await c.fetchone())[0]
+    async with db.execute("SELECT COUNT(*) FROM categories WHERE parent_id IS NULL AND is_active=1") as c:
+        active_roots = (await c.fetchone())[0]
+    async with db.execute("SELECT id, name, category_id, is_active FROM products WHERE is_active=1 LIMIT 5") as c:
+        sample = await c.fetchall()
+    
+    msg = f"📊 وضعیت کاتالوگ:\n"
+    msg += f"دسته‌های اصلی فعال: {active_roots}\n"
+    msg += f"زیردسته‌های فعال: {active_subs}\n"
+    msg += f"محصولات فعال: {active_products}\n\n"
+    
+    if sample:
+        msg += "نمونه محصولات:\n"
+        for p in sample:
+            msg += f"🔹 {p[1]} (cat_id:{p[2]}) - {'✅' if p[3] else '❌'}\n"
+    else:
+        msg += "❌ هیچ محصول فعالی یافت نشد!"
+    
+    await update.message.reply_text(msg, reply_markup=main_menu())
+
+# ════════════════════════════════════════════════
 #  MAIN
 # ════════════════════════════════════════════════
 async def post_init(app):
@@ -1170,6 +1193,7 @@ def main():
     app=ApplicationBuilder().token(TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start",cmd_start))
     app.add_handler(CommandHandler("admin",cmd_admin))
+    app.add_handler(CommandHandler("check",cmd_check))  # دستور دیباگ جدید
     app.add_handler(CallbackQueryHandler(callbacks))
     app.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND,photo_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,text_handler))
