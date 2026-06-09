@@ -1242,16 +1242,15 @@ async def cmd_debug(update:Update, ctx:ContextTypes.DEFAULT_TYPE):
 
 
 def main():
-    app.add_handler(CommandHandler("debug", cmd_debug))
     app=ApplicationBuilder().token(TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start",cmd_start))
     app.add_handler(CommandHandler("admin",cmd_admin))
-    app.add_handler(CommandHandler("check",cmd_check))  # دستور دیباگ جدید
+    app.add_handler(CommandHandler("check",cmd_check))
+    app.add_handler(CommandHandler("debug", cmd_debug))  # ✅ اینجا بعد از ساخته شدن app اضافه کن
     app.add_handler(CallbackQueryHandler(callbacks))
     app.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND,photo_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,text_handler))
     print("\U0001f680 \u0631\u0628\u0627\u062a \u062f\u0631 \u062d\u0627\u0644 \u0627\u062c\u0631\u0627\u0633\u062a...")
     app.run_polling(drop_pending_updates=True)
-
 if __name__=="__main__":
     main()
