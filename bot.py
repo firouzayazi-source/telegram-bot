@@ -794,7 +794,7 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
 
     # ── catalog admin ──
     elif data=="admin_catalog":
-        roots=await get_root_cats(active_only=False)
+        roots=await get_root_cats()
         await safe_edit(query.message,"\U0001f6cd \u0645\u062f\u06cc\u0631\u06cc\u062a \u06a9\u0627\u062a\u0627\u0644\u0648\u06af:",reply_markup=acat_root_kb(roots))
     elif data=="acr_new":
         ctx.user_data.update({"mode":"acr_new_ic"}); await query.message.reply_text("\U0001f3a8 \u0622\u06cc\u06a9\u0648\u0646 (\u0645\u062b\u0627\u0644: \U0001f4f1 \U0001f4bb \U0001f3a7):",reply_markup=cancel_menu())
@@ -808,7 +808,7 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     elif data.startswith("acr_"):
         root_id=int(data[4:]); root=await get_cat(root_id)
         if not root: return
-        subs=await get_subcats(root_id,active_only=False)
+        subs=await get_subcats(root_id)
         await query.message.edit_text(f"\U0001f4c1 {root[2]} {root[1]}\n\u0632\u06cc\u0631\u062f\u0633\u062a\u0647: {to_fa(len(subs))} \u0639\u062f\u062f",reply_markup=acat_sub_kb(root_id,subs))
     elif data.startswith("acs_new_"):
         root_id=int(data[8:]); ctx.user_data.update({"mode":"acs_new_ic","root_id":root_id})
@@ -822,7 +822,7 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         await db.execute("UPDATE categories SET is_active=0 WHERE id=?",(sid,)); await db.commit()
         await query.answer("\U0001f5d1 \u063a\u06cc\u0631\u0641\u0639\u0627\u0644 \u0634\u062f.",show_alert=True)
         if root_id:
-            subs=await get_subcats(root_id,active_only=False); root=await get_cat(root_id)
+            subs=await get_subcats(root_id); root=await get_cat(root_id)
             await query.message.edit_text(f"\U0001f4c1 {root[2] if root else ''} {root[1] if root else ''}",reply_markup=acat_sub_kb(root_id,subs))
     elif data.startswith("acs_"):
         sub_id=int(data[4:]); sub=await get_cat(sub_id)
