@@ -643,7 +643,7 @@ async def user_cb(query,ctx):
         if not sub: return
         root=await get_cat(sub[3])
         subs=await get_subcats(sub[3])
-        await query.message.edit_text(f"\U0001f4c1 {root[2] if root else ''} {root[1] if root else ''}",reply_markup=cat_sub_kb(sub[3],subs)); return
+        await query.message.edit_text(f"\U0001f4c1 {root[2] if root else ''} {root[1] if root else ''}",reply_markup=cat_sub_kb(subs, sub[3]); return
 
     if data.startswith("cr_"):
         root_id=int(data[3:]); root=await get_cat(root_id)
