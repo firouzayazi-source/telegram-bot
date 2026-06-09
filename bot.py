@@ -804,7 +804,7 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     elif data.startswith("acr_dl_"):
         rid=int(data[7:]); await db.execute("UPDATE categories SET is_active=0 WHERE id=?",(rid,)); await db.commit()
         await query.answer("\U0001f5d1 \u063a\u06cc\u0631\u0641\u0639\u0627\u0644 \u0634\u062f.",show_alert=True)
-        roots=await get_root_cats(active_only=False); await query.message.edit_text("\U0001f6cd:",reply_markup=acat_root_kb(roots))
+        roots=await get_root_cats(); await query.message.edit_text("\U0001f6cd:",reply_markup=acat_root_kb(roots))
     elif data.startswith("acr_"):
         root_id=int(data[4:]); root=await get_cat(root_id)
         if not root: return
