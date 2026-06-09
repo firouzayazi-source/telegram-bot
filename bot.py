@@ -9,8 +9,8 @@ from telegram.ext import (ApplicationBuilder, CommandHandler, MessageHandler,
 os.environ.pop("HTTP_PROXY", None); os.environ.pop("HTTPS_PROXY", None)
 os.environ.pop("ALL_PROXY", None); os.environ["NO_PROXY"] = "*"
 
-TOKEN    = os.getenv("BOT_TOKEN", "8792062012:AAGXforSa1IY45AuC-yOHs2PsdzudvtdD44")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "638469407"))
+TOKEN = os.environ["BOT_TOKEN"].strip()
+ADMIN_ID = int(os.environ["ADMIN_ID"].strip())
 DATA_FILE = "data.json"; DB_FILE = "users.db"; BANNER_FILE = "banner.json"
 WORKHOURS_FILE = "workhours.json"; BUTTONS_FILE = "buttons.json"
 SETTINGS_FILE = "settings.json"; STATS_FILE = "stats.json"
