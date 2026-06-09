@@ -708,7 +708,13 @@ async def user_cb(query,ctx):
 async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     query=update.callback_query; await query.answer()
     data=query.data; uid=query.from_user.id
-
+    
+    # اجازه تست کاتالوگ کاربر برای ادمین
+    if data.startswith(("cr_", "cs_", "prd_", "req_", "cat_")):
+        await user_cb(query, ctx)
+        return
+    
+    
     if uid!=ADMIN_ID:
         try: await user_cb(query,ctx)
         except Exception as e:
