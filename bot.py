@@ -259,9 +259,10 @@ async def get_root_cats(active_only=True):
     w="AND is_active=1" if active_only else ""
     async with db.execute(f"SELECT id,name,icon,parent_id,is_active FROM categories WHERE parent_id IS NULL {w} ORDER BY id") as c: return await c.fetchall()
 
-async def get_subcats(parent_id,active_only=True):
-    w="AND is_active=1" if active_only else ""
-    async with db.execute(f"SELECT id,name,icon,parent_id,is_active FROM categories WHERE parent_id=? {w} ORDER BY id",(parent_id,)) as c: return await c.fetchall()
+async def get_subcats(parent_id, active_only=True):
+    # زیردسته‌ها همیشه نمایش داده می‌شن، فقط محصولات فیلتر می‌شن
+    async with db.execute(f"SELECT id,name,icon,parent_id,is_active FROM categories WHERE parent_id=? ORDER BY id",(parent_id,)) as c: 
+        return await c.fetchall()
 
 async def get_cat(cat_id):
     async with db.execute("SELECT id,name,icon,parent_id,is_active FROM categories WHERE id=?",(cat_id,)) as c: return await c.fetchone()
