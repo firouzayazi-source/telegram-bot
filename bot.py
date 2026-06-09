@@ -617,7 +617,13 @@ async def user_cb(query,ctx):
                 f"\U0001f7e2 \u0686\u062a \u062c\u062f\u06cc\u062f!\n\U0001f464 {name} | {uname}\n\U0001f194 {user.id}\n\u2500"*14+"\n\u0628\u0631\u0627\u06cc \u067e\u0627\u0633\u062e \u0627\u0632 \u067e\u0646\u0644 > \u0686\u062a\u200c\u0647\u0627\u06cc \u0641\u0639\u0627\u0644 \u0627\u0646\u062a\u062e\u0627\u0628 \u06a9\u0646\u06cc\u062f.",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"\U0001f4ac \u067e\u0627\u0633\u062e \u0628\u0647 {name}",callback_data=f"chat_sel_{user.id}")]]))
         except Exception as e: logger.error(f"chat notify: {e}")
-        await query.message.reply_text(f"\U0001f4ac \u0686\u062a \u0634\u0631\u0648\u0639 \u0634\u062f!\n\u067e\u06cc\u0627\u0645 \u062e\u0648\u062f \u0631\u0627 \u0628\u0646\u0648\u06cc\u0633\u06cc\u062f:",reply_markup=chat_menu()); return
+        await query.message.reply_text(
+            "\U0001f4ac \u0686\u062a \u0628\u0627 \u067e\u0634\u062a\u06cc\u0628\u0627\u0646\u06cc \u0634\u0631\u0648\u0639 \u0634\u062f!\n"
+            "\u2500"*14+"\n"
+            "\u2709\ufe0f \u067e\u06cc\u0627\u0645 \u062e\u0648\u062f \u0631\u0627 \u0628\u0646\u0648\u06cc\u0633\u06cc\u062f.\n"
+            "\U0001f4f7 \u0639\u06a9\u0633 \u0647\u0645 \u0645\u06cc\u200c\u062a\u0648\u0627\u0646\u06cc\u062f \u0627\u0631\u0633\u0627\u0644 \u06a9\u0646\u06cc\u062f.\n"
+            "\u274c \u0628\u0631\u0627\u06cc \u067e\u0627\u06cc\u0627\u0646 \u062f\u0627\u062f\u0646 \u0686\u062a \u062f\u06a9\u0645\u0647 \"\u067e\u0627\u06cc\u0627\u0646 \u0686\u062a\" \u0631\u0627 \u0628\u0632\u0646\u06cc\u062f.",
+            reply_markup=chat_menu()); return
 
     # ── کاتالوگ root ──
     if data=="cat_back":
@@ -868,7 +874,12 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         ctx.user_data["chat_target"]=cuid
         await query.message.edit_text(f"\U0001f4ac \u0686\u062a \u0628\u0627 {name} ({uname})\n\U0001f194 {cuid}\n\u2500"*14+"\n\u2705 \u0647\u0631 \u067e\u06cc\u0627\u0645\u06cc \u0628\u0646\u0648\u06cc\u0633\u06cc\u062f \u0645\u0633\u062a\u0642\u06cc\u0645 \u0628\u0647 \u06a9\u0627\u0631\u0628\u0631 \u0645\u06cc\u200c\u0631\u0633\u062f.",reply_markup=chat_admin_kb(cuid,name))
     elif data=="chat_clear":
-        ctx.user_data.pop("chat_target",None); await query.answer("\u2705 \u062a\u0648\u0642\u0641 \u067e\u0627\u0633\u062e\u062f\u0647\u06cc",show_alert=True)
+        cuid_clear=ctx.user_data.pop("chat_target",None)
+        if cuid_clear and cuid_clear in active_chats:
+            await close_chat(cuid_clear)
+            try: await ctx.bot.send_message(cuid_clear,"\U0001f534 \u067e\u0634\u062a\u06cc\u0628\u0627\u0646\u06cc \u062a\u0648\u0642\u0641 \u067e\u0627\u0633\u062e\u062f\u0647\u06cc \u0631\u0627 \u0645\u062a\u0648\u0642\u0641 \u06a9\u0631\u062f.\n\u0645\u06cc\u200c\u062a\u0648\u0627\u0646\u06cc\u062f \u062f\u0648\u0628\u0627\u0631\u0647 \u0627\u0632 \u0628\u062e\u0634 \u067e\u0634\u062a\u06cc\u0628\u0627\u0646\u06cc \u0634\u0631\u0648\u0639 \u06a9\u0646\u06cc\u062f.",reply_markup=main_menu())
+            except: pass
+        await query.answer("\u2705 \u062a\u0648\u0642\u0641 \u067e\u0627\u0633\u062e\u062f\u0647\u06cc",show_alert=True)
         await query.message.edit_text("\U0001f451 \u067e\u0646\u0644 \u0645\u062f\u06cc\u0631\u06cc\u062a",reply_markup=admin_menu())
     elif data.startswith("chat_end_"):
         cuid=int(data[9:]); await close_chat(cuid)
@@ -950,8 +961,9 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             if key: responses[key]=text; await save_data()
             await update.message.reply_text("\u2705 \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f.",reply_markup=main_menu()); return
         if mode=="broadcast":
-            ctx.user_data.pop("mode",None); await update.message.reply_text("\U0001f4e4 \u062f\u0631 \u062d\u0627\u0644 \u0627\u0631\u0633\u0627\u0644...")
-            await broadcast(ctx,text); return
+            ctx.user_data.pop("mode",None)
+            await update.message.reply_text("\U0001f4e4 \u062f\u0631 \u062d\u0627\u0644 \u0627\u0631\u0633\u0627\u0644...")
+            asyncio.create_task(broadcast(ctx,text)); return
         if mode=="users_search":
             ctx.user_data.pop("mode",None); rows=await search_users(text)
             if not rows: await update.message.reply_text("\u274c \u06cc\u0627\u0641\u062a \u0646\u0634\u062f.",reply_markup=main_menu()); return
@@ -1051,9 +1063,10 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             except: pass
             await update.message.reply_text("\u2705 \u0686\u062a \u067e\u0627\u06cc\u0627\u0646 \u06cc\u0627\u0641\u062a.",reply_markup=main_menu()); return
         try:
-            await ctx.bot.send_message(ADMIN_ID,
-                f"\U0001f4ac {user.first_name or'\u2014'} | {'@'+user.username if user.username else str(user.id)}\n\U0001f194 {user.id}\n\u2500"*14+f"\n{text}",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"\U0001f4ac \u067e\u0627\u0633\u062e",callback_data=f"chat_sel_{user.id}")]]))
+            name_u=user.first_name or'\u2014'; uname_u='@'+user.username if user.username else str(user.id)
+            msg_text=f"\U0001f4ac {name_u} | {uname_u}\n\U0001f194 {user.id}\n\u2500"*14+f"\n{text}"
+            await ctx.bot.send_message(ADMIN_ID, msg_text,
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"\U0001f4ac \u067e\u0627\u0633\u062e \u0628\u0647 {name_u}",callback_data=f"chat_sel_{user.id}")]]))
         except Exception as e: logger.error(f"chat fwd: {e}")
         await update.message.reply_text("\U0001f4e8 \u067e\u06cc\u0627\u0645 \u0627\u0631\u0633\u0627\u0644 \u0634\u062f.",reply_markup=chat_menu()); return
 
@@ -1116,7 +1129,7 @@ async def photo_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     if mode=="broadcast":
         ctx.user_data.pop("mode",None); caption=update.message.caption or""
         await update.message.reply_text("\U0001f4e4 \u062f\u0631 \u062d\u0627\u0644 \u0627\u0631\u0633\u0627\u0644...")
-        await broadcast(ctx,caption,photo=photo.file_id); return
+        asyncio.create_task(broadcast(ctx,caption,photo=photo.file_id)); return
     if mode=="aprd_n_photo":
         sub_id=ctx.user_data.pop("sub_id",None); name=ctx.user_data.pop("prd_name",""); price=ctx.user_data.pop("prd_price","")
         desc=ctx.user_data.pop("prd_desc",None); url=ctx.user_data.pop("prd_url",None); ctx.user_data.pop("mode",None)
