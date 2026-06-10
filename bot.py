@@ -625,7 +625,7 @@ async def cmd_admin(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
 async def user_cb(query,ctx):
     data=query.data
     user=query.from_user
-
+    logger.warning(f"USER_CB: {data}")
     # ── چت ──
     if data=="start_chat":
 
