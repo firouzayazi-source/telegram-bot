@@ -766,10 +766,7 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     data=query.data; uid=query.from_user.id
     
     # اجازه تست کاتالوگ کاربر برای ادمین
-    if (
-        data == "start_chat"
-        or data.startswith(("cr_", "cs_", "prd_", "req_", "cat_"))
-    ):
+    if data.startswith(("cr_", "cs_", "prd_", "req_", "cat_")):
         await user_cb(query, ctx)
         return
     
