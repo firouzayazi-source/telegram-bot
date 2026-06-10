@@ -11,7 +11,6 @@ os.environ.pop("ALL_PROXY", None); os.environ["NO_PROXY"] = "*"
 
 TOKEN = os.environ["BOT_TOKEN"].strip()
 ADMIN_ID = int(os.environ["ADMIN_ID"].strip())
-
 DATA_FILE = "data.json"; DB_FILE = "users.db"; BANNER_FILE = "banner.json"
 WORKHOURS_FILE = "workhours.json"; BUTTONS_FILE = "buttons.json"
 SETTINGS_FILE = "settings.json"; STATS_FILE = "stats.json"
@@ -122,7 +121,8 @@ def build_msg(title,content,sec_key):
     lines=[f"\U0001f4cc {title}","\u2500"*14,content,"\u2500"*14]
     if wh: lines+=["",wh]
     if ft: lines+=["","\u2500"*17,ft]
-    return "\n".join(lines)
+    msg="\n".join(lines)
+    return msg[:4000]+"..." if len(msg)>4000 else msg
 
 def progress_bar(v,t,n=8):
     if t==0: return "\u2591"*n
@@ -184,6 +184,13 @@ async def save_stats(): await _wj(STATS_FILE,stats)
 
 # ── database ──────────────────────────────────────
 db=None
+
+async def safe_edit(msg,text,**kw):
+    try: await msg.edit_text(text,**kw)
+    except Exception as e:
+        if "not modified" in str(e).lower(): return
+        try: await msg.reply_text(text,**kw)
+        except: logger.error(f"safe_edit: {e}")
 
 async def init_db():
     global db
@@ -535,7 +542,7 @@ async def chats_kb():
 def chat_admin_kb(uid,name):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(f"\U0001f51a \u067e\u0627\u06cc\u0627\u0646 \u0686\u062a \u0628\u0627 {name}",callback_data=f"chat_end_{uid}")],
-        [InlineKeyboardButton("\U0001f6ab \u0628\u0644\u0627\u06a9 \u06a9\u0627\u0631\u0628\u0631",callback_data=f"chat_block_{uid}")],
+        [InlineKeyboardButton("\U0001f6ab \u062a\u0648\u0642\u0641 \u067e\u0627\u0633\u062e\u062f\u0647\u06cc",callback_data="chat_clear")],
         [InlineKeyboardButton("\U0001f519",callback_data="chats_list")]])
 
 # ════════════════════════════════════════════════
@@ -623,8 +630,8 @@ async def user_cb(query,ctx):
     # ── کاتالوگ root ──
     if data=="cat_back":
         cats=await get_root_cats()
-        if not cats: await query.message.edit_text("\U0001f4ed \u0645\u062d\u0635\u0648\u0644\u06cc \u0645\u0648\u062c\u0648\u062f \u0646\u06cc\u0633\u062a."); return
-        await query.message.edit_text("\U0001f6cd \u06a9\u0627\u062a\u0627\u0644\u0648\u06af \u0627\u0633\u062a\u0648\u06a9 \u0644\u0646\u062f\n\u062f\u0633\u062a\u0647\u200c\u0628\u0646\u062f\u06cc \u0631\u0627 \u0627\u0646\u062a\u062e\u0627\u0628 \u06a9\u0646\u06cc\u062f:",reply_markup=cat_root_kb(cats)); return
+        if not cats: await safe_edit(query.message,"\U0001f4ed \u0645\u062d\u0635\u0648\u0644\u06cc \u0645\u0648\u062c\u0648\u062f \u0646\u06cc\u0633\u062a."); return
+        await safe_edit(query.message,"\U0001f6cd \u06a9\u0627\u062a\u0627\u0644\u0648\u06af \u0627\u0633\u062a\u0648\u06a9 \u0644\u0646\u062f\n\u062f\u0633\u062a\u0647\u200c\u0628\u0646\u062f\u06cc \u0631\u0627 \u0627\u0646\u062a\u062e\u0627\u0628 \u06a9\u0646\u06cc\u062f:",reply_markup=cat_root_kb(cats)); return
 
     if data=="cat_search":
         ctx.user_data["mode"]="cat_search"
@@ -636,7 +643,7 @@ async def user_cb(query,ctx):
         if not sub: return
         root=await get_cat(sub[3])
         subs=await get_subcats(sub[3])
-        await query.message.edit_text(f"\U0001f4c1 {root[2] if root else ''} {root[1] if root else ''}",reply_markup=cat_sub_kb(sub[3],subs)); return
+        await query.message.edit_text(f"\U0001f4c1 {root[2] if root else ''} {root[1] if root else ''}",reply_markup=cat_sub_kb(subs, sub[3])); return
 
     if data.startswith("cr_"):
         root_id=int(data[3:]); root=await get_cat(root_id)
@@ -679,11 +686,13 @@ async def user_cb(query,ctx):
         if p[3]: text+=f"\n\n\U0001f4dd {p[3]}"
         text+=ft; kb=product_kb(p)
         if p[4]:
+            caption=text[:1024] if len(text)>1024 else text
             try:
-                await query.message.reply_photo(photo=p[4],caption=text,reply_markup=kb)
+                await query.message.reply_photo(photo=p[4],caption=caption,reply_markup=kb)
                 return
             except Exception as e:
                 logger.error(f"prd photo {pid}: {e}")
+        if len(text)>4000: text=text[:3990]+"..."
         await query.message.reply_text(text,reply_markup=kb); return
 
     # ── درخواست خرید ──
@@ -699,7 +708,13 @@ async def user_cb(query,ctx):
 async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     query=update.callback_query; await query.answer()
     data=query.data; uid=query.from_user.id
-
+    
+    # اجازه تست کاتالوگ کاربر برای ادمین
+    if data.startswith(("cr_", "cs_", "prd_", "req_", "cat_")):
+        await user_cb(query, ctx)
+        return
+    
+    
     if uid!=ADMIN_ID:
         try: await user_cb(query,ctx)
         except Exception as e:
@@ -709,7 +724,7 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         return
 
     # ════ ADMIN ════
-    if data=="back_to_admin": await query.message.edit_text("\U0001f451 \u067e\u0646\u0644 \u0645\u062f\u06cc\u0631\u06cc\u062a",reply_markup=admin_menu())
+    if data=="back_to_admin": await safe_edit(query.message,"\U0001f451 \u067e\u0646\u0644 \u0645\u062f\u06cc\u0631\u06cc\u062a",reply_markup=admin_menu())
     elif data=="quick_toggle":
         settings["store_open"]=not get_setting("store_open"); await save_settings()
         await query.answer("\U0001f7e2 \u0628\u0627\u0632 \u0634\u062f" if settings["store_open"] else"\U0001f534 \u0628\u0633\u062a\u0647 \u0634\u062f",show_alert=True)
@@ -717,10 +732,15 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     elif data=="dash":
         t,d,w,m,nt,bl=(await total_users(),await today_users(),await week_users(),await month_users(),await new_today(),await blk_count())
         wh=wh_today_block() or""
-        await query.message.edit_text(
-            f"\U0001f4ca \u062f\u0627\u0634\u0628\u0648\u0631\u062f \u2014 {shamsi_now()}\n\u2550"*14+f"\n\U0001f465 \u06a9\u0644: {to_fa(t)}  |  \U0001f6ab \u0628\u0644\u0627\u06a9: {to_fa(bl)}\n\u2550"*14+
-            f"\n\U0001f195 \u0639\u0636\u0648 \u0627\u0645\u0631\u0648\u0632: {to_fa(nt)}\n\U0001f4c5 \u0641\u0639\u0627\u0644 \u0627\u0645\u0631\u0648\u0632: {to_fa(d)}  {progress_bar(d,t)}\n\U0001f4c6 \u0641\u0639\u0627\u0644 \u0647\u0641\u062a\u0647: {to_fa(w)}  {progress_bar(w,t)}\n\U0001f5d3 \u0641\u0639\u0627\u0644 \u0645\u0627\u0647: {to_fa(m)}  {progress_bar(m,t)}\n\U0001f4ac \u0686\u062a \u0641\u0639\u0627\u0644: {to_fa(len(active_chats))}\n\u2550"*14+f"\n\U0001f3ea {'\U0001f7e2 \u0628\u0627\u0632' if is_open() else '\U0001f534 \u0628\u0633\u062a\u0647'}\n{wh}",
-            reply_markup=admin_menu())
+        dash=(f"\U0001f4ca \u062f\u0627\u0634\u0628\u0648\u0631\u062f \u2014 {shamsi_now()}\n\u2550"*14+
+              f"\n\U0001f465 \u06a9\u0644: {to_fa(t)}  |  \U0001f6ab \u0628\u0644\u0627\u06a9: {to_fa(bl)}\n\u2550"*14+
+              f"\n\U0001f195 \u0639\u0636\u0648 \u0627\u0645\u0631\u0648\u0632: {to_fa(nt)}\n\U0001f4c5 \u0641\u0639\u0627\u0644 \u0627\u0645\u0631\u0648\u0632: {to_fa(d)}  {progress_bar(d,t)}"
+              f"\n\U0001f4c6 \u0641\u0639\u0627\u0644 \u0647\u0641\u062a\u0647: {to_fa(w)}  {progress_bar(w,t)}\n\U0001f5d3 \u0641\u0639\u0627\u0644 \u0645\u0627\u0647: {to_fa(m)}  {progress_bar(m,t)}"
+              f"\n\U0001f4ac \u0686\u062a \u0641\u0639\u0627\u0644: {to_fa(len(active_chats))}\n\u2550"*14+
+              f"\n\U0001f3ea {chr(0x1F7E2)+' \u0628\u0627\u0632' if is_open() else chr(0x1F534)+' \u0628\u0633\u062a\u0647'}")
+        if wh: dash+=f"\n{wh[:300]}"
+        if len(dash)>4000: dash=dash[:3990]+"..."
+        await query.message.edit_text(dash,reply_markup=admin_menu())
     elif data=="broadcast":
         ctx.user_data["mode"]="broadcast"
         await query.message.reply_text("\U0001f4e2 \u067e\u06cc\u0627\u0645 \u0627\u0631\u0633\u0627\u0644 \u06a9\u0646\u06cc\u062f:",reply_markup=cancel_menu())
@@ -783,7 +803,7 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     # ── catalog admin ──
     elif data=="admin_catalog":
         roots=await get_root_cats(active_only=False)
-        await query.message.edit_text("\U0001f6cd \u0645\u062f\u06cc\u0631\u06cc\u062a \u06a9\u0627\u062a\u0627\u0644\u0648\u06af:",reply_markup=acat_root_kb(roots))
+        await safe_edit(query.message,"\U0001f6cd \u0645\u062f\u06cc\u0631\u06cc\u062a \u06a9\u0627\u062a\u0627\u0644\u0648\u06af:",reply_markup=acat_root_kb(roots))
     elif data=="acr_new":
         ctx.user_data.update({"mode":"acr_new_ic"}); await query.message.reply_text("\U0001f3a8 \u0622\u06cc\u06a9\u0648\u0646 (\u0645\u062b\u0627\u0644: \U0001f4f1 \U0001f4bb \U0001f3a7):",reply_markup=cancel_menu())
     elif data.startswith("acr_ed_"):
@@ -861,28 +881,26 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
 
     # ── چت ادمین ──
     elif data=="chats_list":
-        await query.message.edit_text(f"\U0001f4ac \u0686\u062a\u200c\u0647\u0627\u06cc \u0641\u0639\u0627\u0644 ({to_fa(len(active_chats))}):",reply_markup=await chats_kb())
+        await safe_edit(query.message,f"\U0001f4ac \u0686\u062a\u200c\u0647\u0627\u06cc \u0641\u0639\u0627\u0644 ({to_fa(len(active_chats))}):",reply_markup=await chats_kb())
     elif data.startswith("chat_sel_"):
         cuid=int(data[9:])
         async with db.execute("SELECT first_name,username FROM users WHERE user_id=?",(cuid,)) as c: row=await c.fetchone()
         name=row[0] if row else"\u2014"; uname=f"@{row[1]}" if row and row[1] else str(cuid)
         ctx.user_data["chat_target"]=cuid
-        await query.message.edit_text(f"\U0001f4ac \u0686\u062a \u0628\u0627 {name} ({uname})\n\U0001f194 {cuid}\n\u2500"*14+"\n\u2705 \u0647\u0631 \u067e\u06cc\u0627\u0645\u06cc \u0628\u0646\u0648\u06cc\u0633\u06cc\u062f \u0645\u0633\u062a\u0642\u06cc\u0645 \u0628\u0647 \u06a9\u0627\u0631\u0628\u0631 \u0645\u06cc\u200c\u0631\u0633\u062f.",reply_markup=chat_admin_kb(cuid,name))
+        await safe_edit(query.message,f"\U0001f4ac \u0686\u062a \u0628\u0627 {name} ({uname})\n\U0001f194 {cuid}\n\u2500"*14+"\n\u2705 \u0647\u0631 \u067e\u06cc\u0627\u0645\u06cc \u0628\u0646\u0648\u06cc\u0633\u06cc\u062f \u0645\u0633\u062a\u0642\u06cc\u0645 \u0628\u0647 \u06a9\u0627\u0631\u0628\u0631 \u0645\u06cc\u200c\u0631\u0633\u062f.",reply_markup=chat_admin_kb(cuid,name))
     elif data=="chat_clear":
-        ctx.user_data.pop("chat_target",None); await query.answer("\u2705 \u062a\u0648\u0642\u0641 \u067e\u0627\u0633\u062e\u062f\u0647\u06cc",show_alert=True)
-        await query.message.edit_text("\U0001f451 \u067e\u0646\u0644 \u0645\u062f\u06cc\u0631\u06cc\u062a",reply_markup=admin_menu())
+        cuid_clear=ctx.user_data.pop("chat_target",None)
+        if cuid_clear and cuid_clear in active_chats:
+            await close_chat(cuid_clear)
+            try: await ctx.bot.send_message(cuid_clear,"\U0001f534 \u067e\u0634\u062a\u06cc\u0628\u0627\u0646\u06cc \u062a\u0648\u0642\u0641 \u067e\u0627\u0633\u062e\u062f\u0647\u06cc \u0631\u0627 \u0645\u062a\u0648\u0642\u0641 \u06a9\u0631\u062f.\n\u0645\u06cc\u200c\u062a\u0648\u0627\u0646\u06cc\u062f \u062f\u0648\u0628\u0627\u0631\u0647 \u0627\u0632 \u0628\u062e\u0634 \u067e\u0634\u062a\u06cc\u0628\u0627\u0646\u06cc \u0634\u0631\u0648\u0639 \u06a9\u0646\u06cc\u062f.",reply_markup=main_menu())
+            except: pass
+        await query.answer("\u2705 \u062a\u0648\u0642\u0641 \u067e\u0627\u0633\u062e\u062f\u0647\u06cc",show_alert=True)
+        await safe_edit(query.message,"\U0001f451 \u067e\u0646\u0644 \u0645\u062f\u06cc\u0631\u06cc\u062a",reply_markup=admin_menu())
     elif data.startswith("chat_end_"):
         cuid=int(data[9:]); await close_chat(cuid)
         if ctx.user_data.get("chat_target")==cuid: ctx.user_data.pop("chat_target",None)
         await query.answer("\u2705 \u067e\u0627\u06cc\u0627\u0646 \u06cc\u0627\u0641\u062a",show_alert=True)
         try: await ctx.bot.send_message(cuid,"\U0001f534 \u067e\u0634\u062a\u06cc\u0628\u0627\u0646\u06cc \u0686\u062a \u0631\u0627 \u067e\u0627\u06cc\u0627\u0646 \u062f\u0627\u062f.\n\u0645\u06cc\u200c\u062a\u0648\u0627\u0646\u06cc\u062f \u062f\u0648\u0628\u0627\u0631\u0647 \u0627\u0632 \u0628\u062e\u0634 \u067e\u0634\u062a\u06cc\u0628\u0627\u0646\u06cc \u0634\u0631\u0648\u0639 \u06a9\u0646\u06cc\u062f.",reply_markup=main_menu())
-        except: pass
-        await query.message.edit_text("\U0001f451 \u067e\u0646\u0644",reply_markup=admin_menu())
-    elif data.startswith("chat_block_"):
-        cuid=int(data[11:]); await close_chat(cuid); await set_block(cuid,1)
-        if ctx.user_data.get("chat_target")==cuid: ctx.user_data.pop("chat_target",None)
-        await query.answer("\U0001f6ab \u0628\u0644\u0627\u06a9 \u0634\u062f",show_alert=True)
-        try: await ctx.bot.send_message(cuid,"\u274c \u062f\u0633\u062a\u0631\u0633\u06cc \u0634\u0645\u0627 \u0645\u062d\u062f\u0648\u062f \u0634\u062f.",reply_markup=main_menu())
         except: pass
         await query.message.edit_text("\U0001f451 \u067e\u0646\u0644",reply_markup=admin_menu())
 
@@ -1038,9 +1056,9 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             pid=ctx.user_data.pop("edit_pid",None); ctx.user_data.pop("mode",None)
             await db.execute("UPDATE products SET site_url=? WHERE id=?",(None if text=="." else text,pid)); await db.commit()
             await update.message.reply_text("\u2705",reply_markup=main_menu()); return
-        # پاسخ ادمین به چت — اگه mode نداشت و chat_target داشت، اول اینجا بیاد
+        # پاسخ ادمین به چت
         chat_target=ctx.user_data.get("chat_target")
-        if not mode and chat_target and chat_target in active_chats:
+        if chat_target and chat_target in active_chats:
             ft=f"\n\u2500"*17+f"\n\u23f1 {shamsi_now()}" if get_setting("show_datetime_footer") else""
             try:
                 await ctx.bot.send_message(chat_target,f"\U0001f4e9 \u067e\u0634\u062a\u06cc\u0628\u0627\u0646\u06cc:\n\u2500"*14+f"\n{text}{ft}")
@@ -1093,7 +1111,10 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         if not workhours.get("enabled",True): await update.message.reply_text("\U0001f550 \u0633\u0627\u0639\u062a \u06a9\u0627\u0631\u06cc \u062a\u0646\u0638\u06cc\u0645 \u0646\u0634\u062f\u0647.",reply_markup=main_menu()); return
         wh=wh_today_block() or""
         ft=f"\n\u2500"*17+f"\n\u23f1 {shamsi_now()}" if get_setting("show_datetime_footer") else""
-        await update.message.reply_text(f"\U0001f550 \u0633\u0627\u0639\u062a \u06a9\u0627\u0631\u06cc \u0627\u0633\u062a\u0648\u06a9 \u0644\u0646\u062f\n\u2501"*15+f"\n{wh_full_table()}\n\u2501"*15+f"\n{wh}{ft}",reply_markup=main_menu()); return
+        # حداکثر ۴۰۹۶ کاراکتر — فقط امروز نمایش بده
+        msg=f"\U0001f550 \u0633\u0627\u0639\u062a \u06a9\u0627\u0631\u06cc \u0627\u0633\u062a\u0648\u06a9 \u0644\u0646\u062f\n{wh}{ft}"
+        if len(msg)>4000: msg=msg[:3990]+"..."
+        await update.message.reply_text(msg,reply_markup=main_menu()); return
 
     if text=="\U0001f6cd \u0645\u062d\u0635\u0648\u0644\u0627\u062a":
         await record_stat("catalog"); cats=await get_root_cats()
