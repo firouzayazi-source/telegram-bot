@@ -623,22 +623,38 @@ async def cmd_admin(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
 #  USER CALLBACKS
 # ════════════════════════════════════════════════
 async def user_cb(query,ctx):
-    data=query.data; user=query.from_user
+    data=query.data
+    user=query.from_user
 
     # ── چت ──
     if data=="start_chat":
+
         if await is_blocked(user.id):
             await query.message.reply_text(
                 "🚫 امکان گفتگو برای شما غیرفعال شده است."
             )
             return
+
         if active_chats.get(user.id):
-            await query.message.reply_text("\U0001f4ac \u0686\u062a \u0641\u0639\u0627\u0644 \u0627\u0633\u062a.\n\u067e\u06cc\u0627\u0645 \u0628\u0641\u0631\u0633\u062a\u06cc\u062f \u06cc\u0627 \u062f\u06a9\u0645\u0647 \u067e\u0627\u06cc\u0627\u0646 \u0631\u0627 \u0628\u0632\u0646\u06cc\u062f:",reply_markup=chat_menu()); return
-        try: await open_chat(user.id)
+            await query.message.reply_text(
+                "💬 چت فعال است.\n"
+                "پیام خود را ارسال کنید یا دکمه پایان چت را بزنید.",
+                reply_markup=chat_menu()
+            )
+            return
+
+        try:
+            await open_chat(user.id)
         except Exception as e:
             logger.error(f"open_chat uid={user.id}: {e}")
-            await query.message.reply_text("\u274c \u062e\u0637\u0627 \u062f\u0631 \u0634\u0631\u0648\u0639 \u0686\u062a. \u062f\u0648\u0628\u0627\u0631\u0647 \u0627\u0645\u062a\u062d\u0627\u0646 \u06a9\u0646\u06cc\u062f."); return
-        name=user.first_name or"\u2014"; uname=f"@{user.username}" if user.username else str(user.id)
+            await query.message.reply_text(
+                "❌ خطا در شروع چت. دوباره امتحان کنید."
+            )
+            return
+
+        name = user.first_name or "—"
+        uname = f"@{user.username}" if user.username else str(user.id)
+
         try:
             await ctx.bot.send_message(
                 ADMIN_ID,
@@ -648,16 +664,25 @@ async def user_cb(query,ctx):
                 f"{'─'*14}\n"
                 "برای پاسخ از پنل > چت‌های فعال انتخاب کنید.",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton(
-                        f"💬 پاسخ به {name}",
-                        callback_data=f"chat_sel_{user.id}"
-                    )]
+                    [
+                        InlineKeyboardButton(
+                            f"💬 پاسخ به {name}",
+                            callback_data=f"chat_sel_{user.id}"
+                        )
+                    ]
                 ])
             )
+        except Exception as e:
+            logger.error(f"chat notify: {e}")
 
-        except Exception as e: logger.error(f"chat notify: {e}")
-        await query.message.reply_text(f"\U0001f4ac \u0686\u062a \u0634\u0631\u0648\u0639 \u0634\u062f!\n\u067e\u06cc\u0627\u0645 \u062e\u0648\u062f \u0631\u0627 \u0628\u0646\u0648\u06cc\u0633\u06cc\u062f:",reply_markup=chat_menu()); return
-
+        await query.message.reply_text(
+            "💬 گفتگو با پشتیبانی شروع شد.\n\n"
+            "پیام خود را ارسال کنید.\n"
+            "برای پایان گفتگو روی «❌ پایان چت» بزنید.",
+            reply_markup=chat_menu()
+        )
+        return
+      
     # ── کاتالوگ root ──
     if data=="cat_back":
         cats=await get_root_cats()
