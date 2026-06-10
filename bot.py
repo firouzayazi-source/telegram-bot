@@ -541,9 +541,23 @@ async def chats_kb():
 
 def chat_admin_kb(uid,name):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"\U0001f51a \u067e\u0627\u06cc\u0627\u0646 \u0686\u062a \u0628\u0627 {name}",callback_data=f"chat_end_{uid}")],
-        [InlineKeyboardButton("\U0001f6ab \u062a\u0648\u0642\u0641 \u067e\u0627\u0633\u062e\u062f\u0647\u06cc",callback_data="chat_clear")],
-        [InlineKeyboardButton("\U0001f519",callback_data="chats_list")]])
+        [InlineKeyboardButton(
+            f"🔚 پایان چت با {name}",
+            callback_data=f"chat_end_{uid}"
+        )],
+        [InlineKeyboardButton(
+            "⛔ بلاک کاربر",
+            callback_data=f"chat_block_{uid}"
+        )],
+        [InlineKeyboardButton(
+            "🚫 توقف پاسخدهی",
+            callback_data="chat_clear"
+        )],
+        [InlineKeyboardButton(
+            "🔙 بازگشت",
+            callback_data="chats_list"
+        )]
+    ])
 
 # ════════════════════════════════════════════════
 #  SEND WITH BANNER
@@ -613,6 +627,11 @@ async def user_cb(query,ctx):
 
     # ── چت ──
     if data=="start_chat":
+        if await is_blocked(user.id):
+            await query.message.reply_text(
+                "🚫 امکان گفتگو برای شما غیرفعال شده است."
+            )
+            return
         if active_chats.get(user.id):
             await query.message.reply_text("\U0001f4ac \u0686\u062a \u0641\u0639\u0627\u0644 \u0627\u0633\u062a.\n\u067e\u06cc\u0627\u0645 \u0628\u0641\u0631\u0633\u062a\u06cc\u062f \u06cc\u0627 \u062f\u06a9\u0645\u0647 \u067e\u0627\u06cc\u0627\u0646 \u0631\u0627 \u0628\u0632\u0646\u06cc\u062f:",reply_markup=chat_menu()); return
         try: await open_chat(user.id)
@@ -621,9 +640,21 @@ async def user_cb(query,ctx):
             await query.message.reply_text("\u274c \u062e\u0637\u0627 \u062f\u0631 \u0634\u0631\u0648\u0639 \u0686\u062a. \u062f\u0648\u0628\u0627\u0631\u0647 \u0627\u0645\u062a\u062d\u0627\u0646 \u06a9\u0646\u06cc\u062f."); return
         name=user.first_name or"\u2014"; uname=f"@{user.username}" if user.username else str(user.id)
         try:
-            await ctx.bot.send_message(ADMIN_ID,
-                f"\U0001f7e2 \u0686\u062a \u062c\u062f\u06cc\u062f!\n\U0001f464 {name} | {uname}\n\U0001f194 {user.id}\n\u2500"*14+"\n\u0628\u0631\u0627\u06cc \u067e\u0627\u0633\u062e \u0627\u0632 \u067e\u0646\u0644 > \u0686\u062a\u200c\u0647\u0627\u06cc \u0641\u0639\u0627\u0644 \u0627\u0646\u062a\u062e\u0627\u0628 \u06a9\u0646\u06cc\u062f.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"\U0001f4ac \u067e\u0627\u0633\u062e \u0628\u0647 {name}",callback_data=f"chat_sel_{user.id}")]]))
+            await ctx.bot.send_message(
+                ADMIN_ID,
+                f"🟢 چت جدید!\n"
+                f"👤 {name} | {uname}\n"
+                f"🆔 {user.id}\n"
+                f"{'─'*14}\n"
+                "برای پاسخ از پنل > چت‌های فعال انتخاب کنید.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(
+                        f"💬 پاسخ به {name}",
+                        callback_data=f"chat_sel_{user.id}"
+                    )]
+                ])
+            )
+
         except Exception as e: logger.error(f"chat notify: {e}")
         await query.message.reply_text(f"\U0001f4ac \u0686\u062a \u0634\u0631\u0648\u0639 \u0634\u062f!\n\u067e\u06cc\u0627\u0645 \u062e\u0648\u062f \u0631\u0627 \u0628\u0646\u0648\u06cc\u0633\u06cc\u062f:",reply_markup=chat_menu()); return
 
@@ -903,7 +934,28 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         try: await ctx.bot.send_message(cuid,"\U0001f534 \u067e\u0634\u062a\u06cc\u0628\u0627\u0646\u06cc \u0686\u062a \u0631\u0627 \u067e\u0627\u06cc\u0627\u0646 \u062f\u0627\u062f.\n\u0645\u06cc\u200c\u062a\u0648\u0627\u0646\u06cc\u062f \u062f\u0648\u0628\u0627\u0631\u0647 \u0627\u0632 \u0628\u062e\u0634 \u067e\u0634\u062a\u06cc\u0628\u0627\u0646\u06cc \u0634\u0631\u0648\u0639 \u06a9\u0646\u06cc\u062f.",reply_markup=main_menu())
         except: pass
         await query.message.edit_text("\U0001f451 \u067e\u0646\u0644",reply_markup=admin_menu())
+    elif data.startswith("chat_block_"):
+        cuid = int(data.split("_")[-1])
 
+        await close_chat(cuid)
+        await set_block(cuid,1)
+
+        if ctx.user_data.get("chat_target") == cuid:
+            ctx.user_data.pop("chat_target",None)
+
+        try:
+            await ctx.bot.send_message(
+                cuid,
+                "🚫 دسترسی شما به پشتیبانی مسدود شد."
+            )
+        except:
+            pass
+
+        await query.message.edit_text(
+              "✅ کاربر بلاک شد.",
+            reply_markup=await chats_kb()
+        )
+  
     # ── ساعت کاری ──
     elif data=="wh_menu":
         en="\u2705 \u0641\u0639\u0627\u0644" if workhours.get("enabled") else"\u274c \u063a\u06cc\u0631\u0641\u0639\u0627\u0644"
