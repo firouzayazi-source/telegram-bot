@@ -52,7 +52,6 @@ SECTION_NAMES = {"welcome":"\U0001f3e0 \u062e\u0648\u0634\u200c\u0622\u0645\u062
 
 # ── state ─────────────────────────────────────────
 responses=None; banners={}; workhours={}; buttons={}; settings={}; stats={}
-active_chats={}  # {user_id: True}
 
 DEFAULT_WH = {"enabled":True,"schedule":{
     "0":{"open":True,"shifts":[{"from":"11:00","to":"14:00"},{"from":"17:00","to":"23:00"}]},
@@ -212,8 +211,6 @@ async def init_db():
             username TEXT,first_name TEXT,phone TEXT,
             product_id INTEGER,product_name TEXT,
             status TEXT DEFAULT 'new',created_at TEXT);
-        CREATE TABLE IF NOT EXISTS active_chats(
-            user_id INTEGER PRIMARY KEY,started_at TEXT);
         CREATE INDEX IF NOT EXISTS idx_ls ON users(last_seen);
     """)
     for sql in ["ALTER TABLE users ADD COLUMN is_blocked INTEGER DEFAULT 0",
@@ -281,19 +278,6 @@ async def search_products(q):
     q=f"%{q}%"
     async with db.execute("SELECT id,name,price,description,photo_id,site_url,is_active,category_id FROM products WHERE(name LIKE ? OR description LIKE ?) AND is_active=1 ORDER BY name LIMIT 20",(q,q)) as c: return await c.fetchall()
 
-# ── chat db ───────────────────────────────────────
-async def load_active_chats():
-    async with db.execute("SELECT user_id FROM active_chats") as c:
-        for r in await c.fetchall(): active_chats[r[0]]=True
-
-async def open_chat(uid):
-    await db.execute("INSERT OR REPLACE INTO active_chats VALUES(?,?)",(uid,gregorian_now()))
-    await db.commit(); active_chats[uid]=True
-
-async def close_chat(uid):
-    await db.execute("DELETE FROM active_chats WHERE user_id=?",(uid,))
-    await db.commit(); active_chats.pop(uid,None)
-
 # ── requests db ───────────────────────────────────
 async def save_request(uid,username,first_name,phone,pid,pname):
     await db.execute("INSERT INTO requests(user_id,username,first_name,phone,product_id,product_name,status,created_at) VALUES(?,?,?,?,?,?,?,?)",
@@ -332,7 +316,6 @@ def main_menu():
     if extra: rows.append(extra)
     return ReplyKeyboardMarkup(rows,resize_keyboard=True)
 
-def chat_menu(): return ReplyKeyboardMarkup([["\u274c \u067e\u0627\u06cc\u0627\u0646 \u0686\u062a"]],resize_keyboard=True)
 def cancel_menu(): return ReplyKeyboardMarkup([["\u274c \u0644\u063a\u0648 \u0639\u0645\u0644\u06cc\u0627\u062a"]],resize_keyboard=True)
 
 def user_sec_kb(key):
@@ -347,10 +330,10 @@ def user_sec_kb(key):
     return InlineKeyboardMarkup(btns) if btns else None
 
 def support_kb():
-    chat_row=[InlineKeyboardButton("\U0001f4ac \u0634\u0631\u0648\u0639 \u06af\u0641\u062a\u06af\u0648 \u0628\u0627 \u067e\u0634\u062a\u06cc\u0628\u0627\u0646\u06cc",callback_data="start_chat")]
     sec_kb=user_sec_kb("4")
-    rows=[chat_row]+(sec_kb.inline_keyboard if sec_kb else [])
-    return InlineKeyboardMarkup(rows)
+    if sec_kb:
+        return sec_kb
+    return None
 
 # ── catalog keyboards (user) ──────────────────────
 def cat_root_kb(cats):
@@ -388,7 +371,6 @@ def admin_menu():
         [InlineKeyboardButton("\U0001f4cb \u0645\u062f\u06cc\u0631\u06cc\u062a \u0628\u062e\u0634\u200c\u0647\u0627",callback_data="sections")],
         [InlineKeyboardButton("\U0001f6cd \u06a9\u0627\u062a\u0627\u0644\u0648\u06af",callback_data="admin_catalog"),
          InlineKeyboardButton("\U0001f4e8 \u062f\u0631\u062e\u0648\u0627\u0633\u062a\u200c\u0647\u0627",callback_data="admin_reqs")],
-        [InlineKeyboardButton("\U0001f4ac \u0686\u062a\u200c\u0647\u0627\u06cc \u0641\u0639\u0627\u0644",callback_data="chats_list")],
         [InlineKeyboardButton("\U0001f550 \u0633\u0627\u0639\u062a \u06a9\u0627\u0631\u06cc",callback_data="wh_menu"),
          InlineKeyboardButton("\u2699\ufe0f \u062a\u0646\u0638\u06cc\u0645\u0627\u062a",callback_data="settings_menu")],
         [InlineKeyboardButton("\U0001f4e2 \u067e\u062e\u0634 \u0647\u0645\u06af\u0627\u0646\u06cc",callback_data="broadcast"),
@@ -526,39 +508,6 @@ def req_kb(rid,status):
     if status=="new": btns.append([InlineKeyboardButton("\u2705 \u067e\u06cc\u06af\u06cc\u0631\u06cc \u0634\u062f",callback_data=f"rq_done_{rid}")])
     btns.append([InlineKeyboardButton("\U0001f519",callback_data="admin_reqs")]); return InlineKeyboardMarkup(btns)
 
-async def chats_kb():
-    btns=[]
-    if active_chats:
-        ids=list(active_chats.keys())
-        ph=",".join("?"*len(ids))
-        async with db.execute(f"SELECT user_id,first_name,username FROM users WHERE user_id IN({ph})",ids) as c:
-            info={r[0]:(r[1],r[2]) for r in await c.fetchall()}
-        for uid in ids:
-            fn,un=info.get(uid,("",""))
-            label=f"\U0001f4ac {fn or '\u2014'} {'@'+un if un else str(uid)}"
-            btns.append([InlineKeyboardButton(label,callback_data=f"chat_sel_{uid}")])
-    btns.append([InlineKeyboardButton("\U0001f519",callback_data="back_to_admin")]); return InlineKeyboardMarkup(btns)
-
-def chat_admin_kb(uid,name):
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(
-            f"🔚 پایان چت با {name}",
-            callback_data=f"chat_end_{uid}"
-        )],
-        [InlineKeyboardButton(
-            "⛔ بلاک کاربر",
-            callback_data=f"chat_block_{uid}"
-        )],
-        [InlineKeyboardButton(
-            "🚫 توقف پاسخدهی",
-            callback_data="chat_clear"
-        )],
-        [InlineKeyboardButton(
-            "🔙 بازگشت",
-            callback_data="chats_list"
-        )]
-    ])
-
 # ════════════════════════════════════════════════
 #  SEND WITH BANNER
 # ════════════════════════════════════════════════
@@ -626,63 +575,6 @@ async def user_cb(query,ctx):
     data=query.data
     user=query.from_user
     logger.warning(f"USER_CB: {data}")
-    # ── چت ──
-    if data=="start_chat":
-
-        if await is_blocked(user.id):
-            await query.message.reply_text(
-                "🚫 امکان گفتگو برای شما غیرفعال شده است."
-            )
-            return
-
-        if active_chats.get(user.id):
-            await query.message.reply_text(
-                "💬 چت فعال است.\n"
-                "پیام خود را ارسال کنید یا دکمه پایان چت را بزنید.",
-                reply_markup=chat_menu()
-            )
-            return
-
-        try:
-            await open_chat(user.id)
-        except Exception as e:
-            logger.error(f"open_chat uid={user.id}: {e}")
-            await query.message.reply_text(
-                "❌ خطا در شروع چت. دوباره امتحان کنید."
-            )
-            return
-
-        name = user.first_name or "—"
-        uname = f"@{user.username}" if user.username else str(user.id)
-
-        try:
-            await ctx.bot.send_message(
-                ADMIN_ID,
-                f"🟢 چت جدید!\n"
-                f"👤 {name} | {uname}\n"
-                f"🆔 {user.id}\n"
-                f"{'─'*14}\n"
-                "برای پاسخ از پنل > چت‌های فعال انتخاب کنید.",
-                reply_markup=InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton(
-                            f"💬 پاسخ به {name}",
-                            callback_data=f"chat_sel_{user.id}"
-                        )
-                    ]
-                ])
-            )
-        except Exception as e:
-            logger.error(f"chat notify: {e}")
-
-        await query.message.reply_text(
-            "💬 گفتگو با پشتیبانی شروع شد.\n\n"
-            "پیام خود را ارسال کنید.\n"
-            "برای پایان گفتگو روی «❌ پایان چت» بزنید.",
-            reply_markup=chat_menu()
-        )
-        return
-      
     # ── کاتالوگ root ──
     if data=="cat_back":
         cats=await get_root_cats()
@@ -792,7 +684,7 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
               f"\n\U0001f465 \u06a9\u0644: {to_fa(t)}  |  \U0001f6ab \u0628\u0644\u0627\u06a9: {to_fa(bl)}\n\u2550"*14+
               f"\n\U0001f195 \u0639\u0636\u0648 \u0627\u0645\u0631\u0648\u0632: {to_fa(nt)}\n\U0001f4c5 \u0641\u0639\u0627\u0644 \u0627\u0645\u0631\u0648\u0632: {to_fa(d)}  {progress_bar(d,t)}"
               f"\n\U0001f4c6 \u0641\u0639\u0627\u0644 \u0647\u0641\u062a\u0647: {to_fa(w)}  {progress_bar(w,t)}\n\U0001f5d3 \u0641\u0639\u0627\u0644 \u0645\u0627\u0647: {to_fa(m)}  {progress_bar(m,t)}"
-              f"\n\U0001f4ac \u0686\u062a \u0641\u0639\u0627\u0644: {to_fa(len(active_chats))}\n\u2550"*14+
+              f"\n\u2550"*14+
               f"\n\U0001f3ea {chr(0x1F7E2)+' \u0628\u0627\u0632' if is_open() else chr(0x1F534)+' \u0628\u0633\u062a\u0647'}")
         if wh: dash+=f"\n{wh[:300]}"
         if len(dash)>4000: dash=dash[:3990]+"..."
@@ -935,52 +827,6 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         st="\U0001f195 \u062c\u062f\u06cc\u062f" if r[6]=="new" else"\u2705 \u067e\u06cc\u06af\u06cc\u0631\u06cc \u0634\u062f"
         await query.message.edit_text(f"\U0001f4cb \u062f\u0631\u062e\u0648\u0627\u0633\u062a #{to_fa(r[0])}\n\U0001f4f1 {r[5]}\n\U0001f464 {r[3] or'\u2014'} | {'@'+r[2] if r[2] else r[1]}\n\U0001f4de {r[4]}\n\U0001f194 {r[1]}\n\u23f1 {r[7]}\n{st}",reply_markup=req_kb(rid,r[6]))
 
-    # ── چت ادمین ──
-    elif data=="chats_list":
-        await safe_edit(query.message,f"\U0001f4ac \u0686\u062a\u200c\u0647\u0627\u06cc \u0641\u0639\u0627\u0644 ({to_fa(len(active_chats))}):",reply_markup=await chats_kb())
-    elif data.startswith("chat_sel_"):
-        cuid=int(data[9:])
-        async with db.execute("SELECT first_name,username FROM users WHERE user_id=?",(cuid,)) as c: row=await c.fetchone()
-        name=row[0] if row else"\u2014"; uname=f"@{row[1]}" if row and row[1] else str(cuid)
-        ctx.user_data["chat_target"]=cuid
-        await safe_edit(query.message,f"\U0001f4ac \u0686\u062a \u0628\u0627 {name} ({uname})\n\U0001f194 {cuid}\n\u2500"*14+"\n\u2705 \u0647\u0631 \u067e\u06cc\u0627\u0645\u06cc \u0628\u0646\u0648\u06cc\u0633\u06cc\u062f \u0645\u0633\u062a\u0642\u06cc\u0645 \u0628\u0647 \u06a9\u0627\u0631\u0628\u0631 \u0645\u06cc\u200c\u0631\u0633\u062f.",reply_markup=chat_admin_kb(cuid,name))
-    elif data=="chat_clear":
-        cuid_clear=ctx.user_data.pop("chat_target",None)
-        if cuid_clear and cuid_clear in active_chats:
-            await close_chat(cuid_clear)
-            try: await ctx.bot.send_message(cuid_clear,"\U0001f534 \u067e\u0634\u062a\u06cc\u0628\u0627\u0646\u06cc \u062a\u0648\u0642\u0641 \u067e\u0627\u0633\u062e\u062f\u0647\u06cc \u0631\u0627 \u0645\u062a\u0648\u0642\u0641 \u06a9\u0631\u062f.\n\u0645\u06cc\u200c\u062a\u0648\u0627\u0646\u06cc\u062f \u062f\u0648\u0628\u0627\u0631\u0647 \u0627\u0632 \u0628\u062e\u0634 \u067e\u0634\u062a\u06cc\u0628\u0627\u0646\u06cc \u0634\u0631\u0648\u0639 \u06a9\u0646\u06cc\u062f.",reply_markup=main_menu())
-            except: pass
-        await query.answer("\u2705 \u062a\u0648\u0642\u0641 \u067e\u0627\u0633\u062e\u062f\u0647\u06cc",show_alert=True)
-        await safe_edit(query.message,"\U0001f451 \u067e\u0646\u0644 \u0645\u062f\u06cc\u0631\u06cc\u062a",reply_markup=admin_menu())
-    elif data.startswith("chat_end_"):
-        cuid=int(data[9:]); await close_chat(cuid)
-        if ctx.user_data.get("chat_target")==cuid: ctx.user_data.pop("chat_target",None)
-        await query.answer("\u2705 \u067e\u0627\u06cc\u0627\u0646 \u06cc\u0627\u0641\u062a",show_alert=True)
-        try: await ctx.bot.send_message(cuid,"\U0001f534 \u067e\u0634\u062a\u06cc\u0628\u0627\u0646\u06cc \u0686\u062a \u0631\u0627 \u067e\u0627\u06cc\u0627\u0646 \u062f\u0627\u062f.\n\u0645\u06cc\u200c\u062a\u0648\u0627\u0646\u06cc\u062f \u062f\u0648\u0628\u0627\u0631\u0647 \u0627\u0632 \u0628\u062e\u0634 \u067e\u0634\u062a\u06cc\u0628\u0627\u0646\u06cc \u0634\u0631\u0648\u0639 \u06a9\u0646\u06cc\u062f.",reply_markup=main_menu())
-        except: pass
-        await query.message.edit_text("\U0001f451 \u067e\u0646\u0644",reply_markup=admin_menu())
-    elif data.startswith("chat_block_"):
-        cuid = int(data.split("_")[-1])
-
-        await close_chat(cuid)
-        await set_block(cuid,1)
-
-        if ctx.user_data.get("chat_target") == cuid:
-            ctx.user_data.pop("chat_target",None)
-
-        try:
-            await ctx.bot.send_message(
-                cuid,
-                "🚫 دسترسی شما به پشتیبانی مسدود شد."
-            )
-        except:
-            pass
-
-        await query.message.edit_text(
-              "✅ کاربر بلاک شد.",
-            reply_markup=await chats_kb()
-        )
-  
     # ── ساعت کاری ──
     elif data=="wh_menu":
         en="\u2705 \u0641\u0639\u0627\u0644" if workhours.get("enabled") else"\u274c \u063a\u06cc\u0631\u0641\u0639\u0627\u0644"
@@ -1133,32 +979,7 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             pid=ctx.user_data.pop("edit_pid",None); ctx.user_data.pop("mode",None)
             await db.execute("UPDATE products SET site_url=? WHERE id=?",(None if text=="." else text,pid)); await db.commit()
             await update.message.reply_text("\u2705",reply_markup=main_menu()); return
-        # پاسخ ادمین به چت
-        chat_target=ctx.user_data.get("chat_target")
-        if chat_target and chat_target in active_chats:
-            ft=f"\n\u2500"*17+f"\n\u23f1 {shamsi_now()}" if get_setting("show_datetime_footer") else""
-            try:
-                await ctx.bot.send_message(chat_target,f"\U0001f4e9 \u067e\u0634\u062a\u06cc\u0628\u0627\u0646\u06cc:\n\u2500"*14+f"\n{text}{ft}")
-                async with db.execute("SELECT first_name FROM users WHERE user_id=?",(chat_target,)) as c:
-                    row=await c.fetchone()
-                await update.message.reply_text(f"\u2705 \u067e\u06cc\u0627\u0645 \u0628\u0647 {row[0] if row else chat_target} \u0627\u0631\u0633\u0627\u0644 \u0634\u062f.")
-            except Exception as e: logger.error(f"chat reply: {e}"); await update.message.reply_text("\u274c \u0627\u0631\u0633\u0627\u0644 \u0646\u0627\u0645\u0648\u0641\u0642.")
-            return
         # ادمین می‌تونه از منو هم استفاده کنه — fall through
-
-    # ════ USER active chat ════
-    if user.id!=ADMIN_ID and active_chats.get(user.id):
-        if text=="\u274c \u067e\u0627\u06cc\u0627\u0646 \u0686\u062a":
-            await close_chat(user.id)
-            try: await ctx.bot.send_message(ADMIN_ID,f"\U0001f534 {user.first_name or user.id} \u0686\u062a \u0631\u0627 \u067e\u0627\u06cc\u0627\u0646 \u062f\u0627\u062f.\n\U0001f194 {user.id}")
-            except: pass
-            await update.message.reply_text("\u2705 \u0686\u062a \u067e\u0627\u06cc\u0627\u0646 \u06cc\u0627\u0641\u062a.",reply_markup=main_menu()); return
-        try:
-            await ctx.bot.send_message(ADMIN_ID,
-                f"\U0001f4ac {user.first_name or'\u2014'} | {'@'+user.username if user.username else str(user.id)}\n\U0001f194 {user.id}\n\u2500"*14+f"\n{text}",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"\U0001f4ac \u067e\u0627\u0633\u062e",callback_data=f"chat_sel_{user.id}")]]))
-        except Exception as e: logger.error(f"chat fwd: {e}")
-        await update.message.reply_text("\U0001f4e8 \u067e\u06cc\u0627\u0645 \u0627\u0631\u0633\u0627\u0644 \u0634\u062f.",reply_markup=chat_menu()); return
 
     # ════ catalog search ════
     if mode=="cat_search":
@@ -1232,13 +1053,6 @@ async def photo_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         pid=ctx.user_data.pop("edit_pid",None); ctx.user_data.pop("mode",None)
         await db.execute("UPDATE products SET photo_id=? WHERE id=?",(photo.file_id,pid)); await db.commit()
         await update.message.reply_text("\u2705 \u0639\u06a9\u0633 \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f.",reply_markup=main_menu()); return
-    # ادمین عکس reply به چت
-    chat_target=ctx.user_data.get("chat_target")
-    if chat_target and chat_target in active_chats:
-        try:
-            await ctx.bot.send_photo(chat_target,photo=photo.file_id,caption=f"\U0001f4e9 \u067e\u0634\u062a\u06cc\u0628\u0627\u0646\u06cc:\n{update.message.caption or''}")
-            await update.message.reply_text("\u2705 \u0639\u06a9\u0633 \u0627\u0631\u0633\u0627\u0644 \u0634\u062f.")
-        except Exception as e: logger.error(f"chat photo: {e}")
 
 # ════════════════════════════════════════════════
 #  MAIN
@@ -1246,7 +1060,7 @@ async def photo_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
 async def post_init(app):
     await init_db(); await load_data(); await load_banners()
     await load_workhours(); await load_buttons(); await load_settings()
-    await load_stats(); await load_active_chats()
+    await load_stats()
     logger.info("\u2705 \u0631\u0628\u0627\u062a \u0631\u0627\u0647\u200c\u0627\u0646\u062f\u0627\u0632\u06cc \u0634\u062f")
 
 def main():
