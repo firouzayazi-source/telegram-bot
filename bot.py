@@ -373,7 +373,7 @@ def admin_menu():
          InlineKeyboardButton("\u2699\ufe0f \u062a\u0646\u0638\u06cc\u0645\u0627\u062a",callback_data="settings_menu")],
         [InlineKeyboardButton("\U0001f4e2 \u067e\u062e\u0634 \u0647\u0645\u06af\u0627\u0646\u06cc",callback_data="broadcast"),
          InlineKeyboardButton("\U0001f4be \u0628\u06a9\u200c\u0622\u067e",callback_data="backup")],
-        [InlineKeyboardButton(f"{st} {tg}",callback_data="quick_toggle")],
+        
     ])
 
 def sections_kb():
