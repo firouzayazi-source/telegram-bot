@@ -1,4 +1,4 @@
-import os, json, time, asyncio, logging, aiosqlite, jdatetime, pytz
+import os, json, time, asyncio, logging, aiosqlite, jdatetime, pytz, zipfile, io
 from datetime import datetime
 from collections import defaultdict, deque
 import aiofiles
@@ -355,6 +355,10 @@ def product_kb(p):
 
 # ── admin keyboards ───────────────────────────────
 def back_admin(): return InlineKeyboardMarkup([[InlineKeyboardButton("\U0001f519 \u0628\u0631\u06af\u0634\u062a \u0628\u0647 \u067e\u0646\u0644",callback_data="back_to_admin")]])
+def backup_kb(): return InlineKeyboardMarkup([
+    [InlineKeyboardButton("\U0001f4be \u062f\u0631\u06cc\u0627\u0641\u062a \u0628\u06a9\u200c\u0622\u067e",callback_data="backup_get")],
+    [InlineKeyboardButton("\U0001f4e5 \u0627\u06cc\u0645\u067e\u0648\u0631\u062a \u0628\u06a9\u200c\u0622\u067e",callback_data="backup_import")],
+    [InlineKeyboardButton("\U0001f519 \u0628\u0631\u06af\u0634\u062a",callback_data="back_to_admin")]])
 
 def admin_menu():
     op=is_open(); st="\U0001f7e2" if op else "\U0001f534"
@@ -533,12 +537,38 @@ async def broadcast(ctx,text,photo=None):
 # ════════════════════════════════════════════════
 async def send_backup(bot):
     ts=shamsi_now().replace(" ","_").replace("\u2014","-").replace(":","-")
+    buf=io.BytesIO()
+    files=[(DATA_FILE,"data.json"),(BANNER_FILE,"banner.json"),(WORKHOURS_FILE,"workhours.json"),
+           (BUTTONS_FILE,"buttons.json"),(SETTINGS_FILE,"settings.json"),(STATS_FILE,"stats.json"),(DB_FILE,"users.db")]
+    with zipfile.ZipFile(buf,"w",zipfile.ZIP_DEFLATED) as zf:
+        for fp,name in files:
+            try:
+                async with aiofiles.open(fp,"rb") as f: zf.writestr(name,await f.read())
+            except Exception as e: logger.warning(f"backup skip {fp}: {e}")
+    buf.seek(0)
+    fname=f"backup_{ts}.zip"
     await bot.send_message(ADMIN_ID,f"\U0001f4be \u0628\u06a9\u200c\u0622\u067e \u2014 {shamsi_now()}")
-    for fp,lb in[(DATA_FILE,"data"),(BANNER_FILE,"ban"),(WORKHOURS_FILE,"wh"),(BUTTONS_FILE,"btn"),(SETTINGS_FILE,"cfg"),(STATS_FILE,"stats"),(DB_FILE,"db")]:
-        try:
-            async with aiofiles.open(fp,"rb") as f: content=await f.read()
-            await bot.send_document(ADMIN_ID,document=content,filename=f"bkp_{lb}_{ts}.{fp.split('.')[-1]}")
-        except Exception as e: logger.error(f"backup {fp}: {e}")
+    await bot.send_document(ADMIN_ID,document=buf,filename=fname,caption=f"\U0001f4be \u0628\u06a9\u200c\u0622\u067e \u06a9\u0627\u0645\u0644")
+
+async def restore_backup(bot,file_id):
+    try:
+        f=await bot.get_file(file_id)
+        buf=io.BytesIO(); await f.download_to_memory(buf); buf.seek(0)
+        with zipfile.ZipFile(buf,"r") as zf:
+            names=zf.namelist()
+            mapping={"data.json":DATA_FILE,"banner.json":BANNER_FILE,"workhours.json":WORKHOURS_FILE,
+                     "buttons.json":BUTTONS_FILE,"settings.json":SETTINGS_FILE,"stats.json":STATS_FILE,"users.db":DB_FILE}
+            restored=[]
+            for name in names:
+                if name in mapping:
+                    async with aiofiles.open(mapping[name],"wb") as out: await out.write(zf.read(name))
+                    restored.append(name)
+        # reload all data
+        await load_data(); await load_banners(); await load_workhours()
+        await load_buttons(); await load_settings(); await load_stats()
+        return True,restored
+    except Exception as e:
+        logger.error(f"restore: {e}"); return False,str(e)
 
 # ════════════════════════════════════════════════
 #  HANDLERS
@@ -574,7 +604,16 @@ async def user_cb(query,ctx):
         sep="\u2501"*15
         msg=f"{sep}\n\U0001f4c6 \u0633\u0627\u0639\u062a \u06a9\u0627\u0631 \u0647\u0641\u062a\u06af\u06cc \u0645\u062c\u0645\u0648\u0639\u0647\n{sep}\n{table}\n{sep}"
         await query.answer()
-        await query.message.reply_text(msg,reply_markup=main_menu()); return
+        kb=InlineKeyboardMarkup([[InlineKeyboardButton("\U0001f519 \u0628\u0631\u06af\u0634\u062a",callback_data="wh_back_today")]])
+        await query.message.reply_text(msg,reply_markup=kb); return
+
+    if data=="wh_back_today":
+        await query.answer()
+        wh=wh_today_block() or""
+        ft=("\n"+"\u2500"*17+f"\n\u23f1 {shamsi_now()}") if get_setting("show_datetime_footer") else""
+        msg=f"\U0001f550 \u0633\u0627\u0639\u062a \u06a9\u0627\u0631\u06cc \u0627\u0633\u062a\u0648\u06a9 \u0644\u0646\u062f\n{wh}{ft}"
+        kb=InlineKeyboardMarkup([[InlineKeyboardButton("\U0001f4c6 \u0633\u0627\u0639\u062a \u06a9\u0627\u0631 \u0647\u0641\u062a\u06af\u06cc \u0645\u062c\u0645\u0648\u0639\u0647",callback_data="wh_weekly")]])
+        await query.message.edit_text(msg,reply_markup=kb); return
 
     # ── کاتالوگ root ──
     if data=="cat_back":
@@ -659,7 +698,7 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     data=query.data; uid=query.from_user.id
     
     # اجازه تست کاتالوگ کاربر برای ادمین
-    if data.startswith(("cr_", "cs_", "prd_", "req_", "cat_", "wh_weekly")):
+    if data.startswith(("cr_", "cs_", "prd_", "req_", "cat_", "wh_weekly", "wh_back_today")):
         await user_cb(query, ctx)
         return
     
@@ -680,24 +719,26 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         await query.message.edit_text("\U0001f451 \u067e\u0646\u0644 \u0645\u062f\u06cc\u0631\u06cc\u062a",reply_markup=admin_menu())
     elif data=="dash":
         t,d,w,m,nt,bl=(await total_users(),await today_users(),await week_users(),await month_users(),await new_today(),await blk_count())
-        wh=wh_today_block() or""
-        sep = "\u2550"*14
+        sep="\u2550"*14
         dash=(f"\U0001f4ca \u062f\u0627\u0634\u0628\u0648\u0631\u062f \u2014 {shamsi_now()}\n{sep}"
               f"\n\U0001f465 \u06a9\u0644: {to_fa(t)}  |  \U0001f6ab \u0628\u0644\u0627\u06a9: {to_fa(bl)}\n{sep}"
               f"\n\U0001f195 \u0639\u0636\u0648 \u0627\u0645\u0631\u0648\u0632: {to_fa(nt)}\n\U0001f4c5 \u0641\u0639\u0627\u0644 \u0627\u0645\u0631\u0648\u0632: {to_fa(d)}  {progress_bar(d,t)}"
               f"\n\U0001f4c6 \u0641\u0639\u0627\u0644 \u0647\u0641\u062a\u0647: {to_fa(w)}  {progress_bar(w,t)}\n\U0001f5d3 \u0641\u0639\u0627\u0644 \u0645\u0627\u0647: {to_fa(m)}  {progress_bar(m,t)}"
-              f"\n{sep}"
-              f"\n\U0001f3ea {chr(0x1F7E2)+' \u0628\u0627\u0632' if is_open() else chr(0x1F534)+' \u0628\u0633\u062a\u0647'}")
-        if wh: dash+=f"\n{wh[:300]}"
+              f"\n{sep}")
         if len(dash)>4000: dash=dash[:3990]+"..."
         await query.message.edit_text(dash,reply_markup=admin_menu())
     elif data=="broadcast":
         ctx.user_data["mode"]="broadcast"
         await query.message.reply_text("\U0001f4e2 \u067e\u06cc\u0627\u0645 \u0627\u0631\u0633\u0627\u0644 \u06a9\u0646\u06cc\u062f:",reply_markup=cancel_menu())
     elif data=="backup":
-        await query.message.edit_text("\U0001f4be \u0627\u0631\u0633\u0627\u0644...",reply_markup=back_admin())
+        await safe_edit(query.message,"\U0001f4be \u0645\u062f\u06cc\u0631\u06cc\u062a \u0628\u06a9\u200c\u0622\u067e:",reply_markup=backup_kb())
+    elif data=="backup_get":
+        await safe_edit(query.message,"\U0001f4be \u062f\u0631 \u062d\u0627\u0644 \u062a\u0647\u06cc\u0647...",reply_markup=None)
         await send_backup(query.message._bot)
-        await query.message.edit_text("\u2705 \u0628\u06a9\u200c\u0622\u067e \u0627\u0631\u0633\u0627\u0644 \u0634\u062f.",reply_markup=back_admin())
+        await safe_edit(query.message,"\u2705 \u0628\u06a9\u200c\u0622\u067e \u0627\u0631\u0633\u0627\u0644 \u0634\u062f.",reply_markup=backup_kb())
+    elif data=="backup_import":
+        ctx.user_data["mode"]="backup_restore"
+        await query.message.reply_text("\U0001f4e5 \u0641\u0627\u06cc\u0644 ZIP \u0628\u06a9\u200c\u0622\u067e \u0631\u0627 \u0627\u0631\u0633\u0627\u0644 \u06a9\u0646\u06cc\u062f:",reply_markup=cancel_menu())
 
     # ── sections ──
     elif data=="sections": await query.message.edit_text("\U0001f4cb \u0645\u062f\u06cc\u0631\u06cc\u062a \u0628\u062e\u0634\u200c\u0647\u0627:",reply_markup=sections_kb())
@@ -795,7 +836,7 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     elif data.startswith("acr_dl_"):
         rid=int(data[7:]); await db.execute("UPDATE categories SET is_active=0 WHERE id=?",(rid,)); await db.commit()
         await query.answer("\U0001f5d1 \u063a\u06cc\u0631\u0641\u0639\u0627\u0644 \u0634\u062f.",show_alert=True)
-        roots=await get_root_cats(active_only=False); await query.message.edit_text("\U0001f6cd:",reply_markup=acat_root_kb(roots))
+        roots=await get_root_cats(active_only=False); await query.message.edit_text("\U0001f6cd \u06a9\u0627\u062a\u0627\u0644\u0648\u06af:",reply_markup=acat_root_kb(roots))
     elif data.startswith("acr_"):
         root_id=int(data[4:]); root=await get_cat(root_id)
         if not root: return
@@ -1106,6 +1147,25 @@ async def photo_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("\u2705 \u0639\u06a9\u0633 \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f.",reply_markup=main_menu()); return
 
 # ════════════════════════════════════════════════
+#  DOCUMENT HANDLER (backup import)
+# ════════════════════════════════════════════════
+async def document_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
+    user=update.effective_user
+    if user.id!=ADMIN_ID: return
+    mode=ctx.user_data.get("mode")
+    if mode!="backup_restore": return
+    ctx.user_data.pop("mode",None)
+    doc=update.message.document
+    if not doc.file_name.endswith(".zip"):
+        await update.message.reply_text("\u274c \u0641\u0642\u0637 \u0641\u0627\u06cc\u0644 ZIP \u0642\u0627\u0628\u0644 \u0642\u0628\u0648\u0644 \u0627\u0633\u062a.",reply_markup=main_menu()); return
+    await update.message.reply_text("\u23f3 \u062f\u0631 \u062d\u0627\u0644 \u0628\u0627\u0632\u06af\u0631\u062f\u0627\u0646\u06cc...")
+    ok,result=await restore_backup(ctx.bot,doc.file_id)
+    if ok:
+        await update.message.reply_text(f"\u2705 \u0628\u06a9\u200c\u0622\u067e \u0628\u0627\u0632\u06af\u0631\u062f\u0627\u0646\u06cc \u0634\u062f.\n\u0641\u0627\u06cc\u0644\u200c\u0647\u0627: {', '.join(result)}",reply_markup=main_menu())
+    else:
+        await update.message.reply_text(f"\u274c \u062e\u0637\u0627: {result}",reply_markup=main_menu())
+
+# ════════════════════════════════════════════════
 #  MAIN
 # ════════════════════════════════════════════════
 async def post_init(app):
@@ -1120,6 +1180,7 @@ def main():
     app.add_handler(CommandHandler("admin",cmd_admin))
     app.add_handler(CallbackQueryHandler(callbacks))
     app.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND,photo_handler))
+    app.add_handler(MessageHandler(filters.Document.ZIP & ~filters.COMMAND,document_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,text_handler))
     print("\U0001f680 \u0631\u0628\u0627\u062a \u062f\u0631 \u062d\u0627\u0644 \u0627\u062c\u0631\u0627\u0633\u062a...")
     app.run_polling(drop_pending_updates=True)
