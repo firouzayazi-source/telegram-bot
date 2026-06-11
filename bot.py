@@ -680,18 +680,43 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         settings["store_open"]=not get_setting("store_open"); await save_settings()
         await query.answer("\U0001f7e2 \u0628\u0627\u0632 \u0634\u062f" if settings["store_open"] else"\U0001f534 \u0628\u0633\u062a\u0647 \u0634\u062f",show_alert=True)
         await query.message.edit_text("\U0001f451 \u067e\u0646\u0644 \u0645\u062f\u06cc\u0631\u06cc\u062a",reply_markup=admin_menu())
-    elif data=="dash":
-        t,d,w,m,nt,bl=(await total_users(),await today_users(),await week_users(),await month_users(),await new_today(),await blk_count())
-        wh=wh_today_block() or""
-        dash=(f"\U0001f4ca \u062f\u0627\u0634\u0628\u0648\u0631\u062f \u2014 {shamsi_now()}\n\u2550"*14+
-              f"\n\U0001f465 \u06a9\u0644: {to_fa(t)}  |  \U0001f6ab \u0628\u0644\u0627\u06a9: {to_fa(bl)}\n\u2550"*14+
-              f"\n\U0001f195 \u0639\u0636\u0648 \u0627\u0645\u0631\u0648\u0632: {to_fa(nt)}\n\U0001f4c5 \u0641\u0639\u0627\u0644 \u0627\u0645\u0631\u0648\u0632: {to_fa(d)}  {progress_bar(d,t)}"
-              f"\n\U0001f4c6 \u0641\u0639\u0627\u0644 \u0647\u0641\u062a\u0647: {to_fa(w)}  {progress_bar(w,t)}\n\U0001f5d3 \u0641\u0639\u0627\u0644 \u0645\u0627\u0647: {to_fa(m)}  {progress_bar(m,t)}"
-              f"\n\u2550"*14+
-              f"\n\U0001f3ea {chr(0x1F7E2)+' \u0628\u0627\u0632' if is_open() else chr(0x1F534)+' \u0628\u0633\u062a\u0647'}")
-        if wh: dash+=f"\n{wh[:300]}"
-        if len(dash)>4000: dash=dash[:3990]+"..."
-        await query.message.edit_text(dash,reply_markup=admin_menu())
+    
+    elif data == "dash":
+        t  = await total_users()
+        d  = await today_users()
+        w  = await week_users()
+        m  = await month_users()
+        nt = await new_today()
+        bl = await blk_count()
+
+        status = "🟢 باز" if is_open() else "🔴 بسته"
+
+        dash = (
+            f"📊 داشبورد مدیریت\n"
+            f"{'═'*24}\n\n"
+
+            f"🆕 عضو امروز: {to_fa(nt)}\n\n"
+
+            f"📅 فعال امروز: {to_fa(d)}\n"
+            f"{progress_bar(d,t)}\n\n"
+
+            f"📆 فعال هفته: {to_fa(w)}\n"
+            f"{progress_bar(w,t)}\n\n"
+
+            f"🗓 فعال ماه: {to_fa(m)}\n"
+            f"{progress_bar(m,t)}\n\n"
+
+            f"👥 کل کاربران: {to_fa(t)}\n"
+            f"🚫 کاربران بلاک: {to_fa(bl)}\n\n"
+
+            f"💬 وضعیت چت: {status}"
+        )
+
+        await query.message.edit_text(
+            dash,
+            reply_markup=admin_menu()
+        )
+
     elif data=="broadcast":
         ctx.user_data["mode"]="broadcast"
         await query.message.reply_text("\U0001f4e2 \u067e\u06cc\u0627\u0645 \u0627\u0631\u0633\u0627\u0644 \u06a9\u0646\u06cc\u062f:",reply_markup=cancel_menu())
