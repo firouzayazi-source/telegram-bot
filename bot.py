@@ -123,9 +123,12 @@ def build_msg(title,content,sec_key):
     msg="\n".join(lines)
     return msg[:4000]+"..." if len(msg)>4000 else msg
 
-def progress_bar(v,t,n=8):
-    if t==0: return "\u2591"*n
-    f=int(n*v/t); return "\u2593"*f+"\u2591"*(n-f)
+def progress_bar(v, t, n=8):
+    if t <= 0:
+        return "⚪" * n
+
+    f = min(n, int(round((v / t) * n)))
+    return "🟢" * f + "⚪" * (n - f)
 
 # ── stats ─────────────────────────────────────────
 async def record_stat(k): stats[k]=stats.get(k,0)+1; await save_stats()
