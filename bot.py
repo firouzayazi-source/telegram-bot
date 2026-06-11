@@ -42,13 +42,17 @@ MENU_ITEMS = {"1":"\U0001f310 \u0634\u0628\u06a9\u0647\u200c\u0647\u0627\u06cc \
               "2":"\U0001f310 \u0633\u0627\u06cc\u062a \u0627\u0633\u062a\u0648\u06a9 \u0644\u0646\u062f",
               "3":"\U0001f4b0 \u0634\u0631\u0627\u06cc\u0637 \u0627\u0642\u0633\u0627\u0637",
               "4":"\U0001f4de \u067e\u0634\u062a\u06cc\u0628\u0627\u0646\u06cc",
-              "5":"\U0001f4cd \u0622\u062f\u0631\u0633 \u0641\u0631\u0648\u0634\u06af\u0627\u0647"}
+              "5":"\U0001f4cd \u0622\u062f\u0631\u0633 \u0641\u0631\u0648\u0634\u06af\u0627\u0647",
+                 "catalog":"🛍 محصولات",
+                 "workhours":"🕐 ساعت کاری"}
 SECTION_NAMES = {"welcome":"\U0001f3e0 \u062e\u0648\u0634\u200c\u0622\u0645\u062f\u06af\u0648\u06cc\u06cc",
                  "1":"\U0001f310 \u0634\u0628\u06a9\u0647\u200c\u0647\u0627\u06cc \u0627\u062c\u062a\u0645\u0627\u0639\u06cc",
                  "2":"\U0001f310 \u0633\u0627\u06cc\u062a \u0627\u0633\u062a\u0648\u06a9 \u0644\u0646\u062f",
                  "3":"\U0001f4b0 \u0634\u0631\u0627\u06cc\u0637 \u0627\u0642\u0633\u0627\u0637",
                  "4":"\U0001f4de \u067e\u0634\u062a\u06cc\u0628\u0627\u0646\u06cc",
-                 "5":"\U0001f4cd \u0622\u062f\u0631\u0633 \u0641\u0631\u0648\u0634\u06af\u0627\u0647"}
+                 "5":"\U0001f4cd \u0622\u062f\u0631\u0633 \u0641\u0631\u0648\u0634\u06af\u0627\u0647",
+                 "catalog":"🛍 محصولات",
+                 "workhours":"🕐 ساعت کاری"}
 
 # ── state ─────────────────────────────────────────
 responses=None; banners={}; workhours={}; buttons={}; settings={}; stats={}
@@ -373,7 +377,6 @@ def admin_menu():
          InlineKeyboardButton("\u2699\ufe0f \u062a\u0646\u0638\u06cc\u0645\u0627\u062a",callback_data="settings_menu")],
         [InlineKeyboardButton("\U0001f4e2 \u067e\u062e\u0634 \u0647\u0645\u06af\u0627\u0646\u06cc",callback_data="broadcast"),
          InlineKeyboardButton("\U0001f4be \u0628\u06a9\u200c\u0622\u067e",callback_data="backup")],
-        
     ])
 
 def sections_kb():
