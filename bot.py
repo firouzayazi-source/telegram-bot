@@ -123,12 +123,9 @@ def build_msg(title,content,sec_key):
     msg="\n".join(lines)
     return msg[:4000]+"..." if len(msg)>4000 else msg
 
-def progress_bar(v, t, n=8):
-    if t <= 0:
-        return "⚪" * n
-
-    f = min(n, int(round((v / t) * n)))
-    return "🟢" * f + "⚪" * (n - f)
+def progress_bar(v,t,n=8):
+    if t==0: return "\u2591"*n
+    f=int(n*v/t); return "\u2593"*f+"\u2591"*(n-f)
 
 # ── stats ─────────────────────────────────────────
 async def record_stat(k): stats[k]=stats.get(k,0)+1; await save_stats()
@@ -632,7 +629,7 @@ async def user_cb(query,ctx):
         pid=int(data[4:]); p=await get_product(pid)
         if not p: return
         await record_stat(f"prd_{pid}")
-        ft=f"\n\u2500"*17+f"\n\u23f1 {shamsi_now()}" if get_setting("show_datetime_footer") else ""
+        ft=("\n"+"\u2500"*17+f"\n\u23f1 {shamsi_now()}") if get_setting("show_datetime_footer") else ""
         text=f"\U0001f4f1 {p[1]}\n\U0001f4b0 \u0642\u06cc\u0645\u062a: {p[2]}"
         if p[3]: text+=f"\n\n\U0001f4dd {p[3]}"
         text+=ft; kb=product_kb(p)
@@ -680,43 +677,19 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         settings["store_open"]=not get_setting("store_open"); await save_settings()
         await query.answer("\U0001f7e2 \u0628\u0627\u0632 \u0634\u062f" if settings["store_open"] else"\U0001f534 \u0628\u0633\u062a\u0647 \u0634\u062f",show_alert=True)
         await query.message.edit_text("\U0001f451 \u067e\u0646\u0644 \u0645\u062f\u06cc\u0631\u06cc\u062a",reply_markup=admin_menu())
-    
-    elif data == "dash":
-        t  = await total_users()
-        d  = await today_users()
-        w  = await week_users()
-        m  = await month_users()
-        nt = await new_today()
-        bl = await blk_count()
-
-        status = "🟢 باز" if is_open() else "🔴 بسته"
-
-        dash = (
-            f"📊 داشبورد مدیریت\n"
-            f"{'═'*24}\n\n"
-
-            f"🆕 عضو امروز: {to_fa(nt)}\n\n"
-
-            f"📅 فعال امروز: {to_fa(d)}\n"
-            f"{progress_bar(d,t)}\n\n"
-
-            f"📆 فعال هفته: {to_fa(w)}\n"
-            f"{progress_bar(w,t)}\n\n"
-
-            f"🗓 فعال ماه: {to_fa(m)}\n"
-            f"{progress_bar(m,t)}\n\n"
-
-            f"👥 کل کاربران: {to_fa(t)}\n"
-            f"🚫 کاربران بلاک: {to_fa(bl)}\n\n"
-
-            f"💬 وضعیت چت: {status}"
-        )
-
-        await query.message.edit_text(
-            dash,
-            reply_markup=admin_menu()
-        )
-
+    elif data=="dash":
+        t,d,w,m,nt,bl=(await total_users(),await today_users(),await week_users(),await month_users(),await new_today(),await blk_count())
+        wh=wh_today_block() or""
+        sep = "\u2550"*14
+        dash=(f"\U0001f4ca \u062f\u0627\u0634\u0628\u0648\u0631\u062f \u2014 {shamsi_now()}\n{sep}"
+              f"\n\U0001f465 \u06a9\u0644: {to_fa(t)}  |  \U0001f6ab \u0628\u0644\u0627\u06a9: {to_fa(bl)}\n{sep}"
+              f"\n\U0001f195 \u0639\u0636\u0648 \u0627\u0645\u0631\u0648\u0632: {to_fa(nt)}\n\U0001f4c5 \u0641\u0639\u0627\u0644 \u0627\u0645\u0631\u0648\u0632: {to_fa(d)}  {progress_bar(d,t)}"
+              f"\n\U0001f4c6 \u0641\u0639\u0627\u0644 \u0647\u0641\u062a\u0647: {to_fa(w)}  {progress_bar(w,t)}\n\U0001f5d3 \u0641\u0639\u0627\u0644 \u0645\u0627\u0647: {to_fa(m)}  {progress_bar(m,t)}"
+              f"\n{sep}"
+              f"\n\U0001f3ea {chr(0x1F7E2)+' \u0628\u0627\u0632' if is_open() else chr(0x1F534)+' \u0628\u0633\u062a\u0647'}")
+        if wh: dash+=f"\n{wh[:300]}"
+        if len(dash)>4000: dash=dash[:3990]+"..."
+        await query.message.edit_text(dash,reply_markup=admin_menu())
     elif data=="broadcast":
         ctx.user_data["mode"]="broadcast"
         await query.message.reply_text("\U0001f4e2 \u067e\u06cc\u0627\u0645 \u0627\u0631\u0633\u0627\u0644 \u06a9\u0646\u06cc\u062f:",reply_markup=cancel_menu())
@@ -730,7 +703,14 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     elif data.startswith("sec_") and not any(data.startswith(p) for p in["sec_text_","sec_ban_","sec_btns_","sec_wh_"]):
         key=data[4:]
         from telegram.error import BadRequest
-        try: await query.message.edit_text(f"\U0001f4cb \u0628\u062e\u0634: {SECTION_NAMES.get(key,key)}\n\u2500"*14+f"\n\u270f\ufe0f \u0645\u062a\u0646: {'\u2705' if responses.get(key,'') not in('','\u062a\u0646\u0638\u06cc\u0645 \u0646\u0634\u062f\u0647') else '\u274c'}\n\U0001f5bc \u0628\u0646\u0631: {'\u2705 \u0641\u0639\u0627\u0644' if get_banner(key).get('active') and get_banner(key).get('file_id') else '\u274c'}\n\U0001f518 \u062f\u06a9\u0645\u0647: {len(get_sec_btns(key).get('items',[]))} {'\u2705' if get_sec_btns(key).get('enabled') else '\u274c'}",reply_markup=section_kb(key))
+        sep14 = "\u2500"*14
+        txt_ok = "\u2705" if responses.get(key,"") not in ("","\u062a\u0646\u0638\u06cc\u0645 \u0646\u0634\u062f\u0647") else "\u274c"
+        ban_ok = "\u2705 \u0641\u0639\u0627\u0644" if get_banner(key).get("active") and get_banner(key).get("file_id") else "\u274c"
+        btn_ok = f"{len(get_sec_btns(key).get('items',[]))} {'\u2705' if get_sec_btns(key).get('enabled') else '\u274c'}"
+        try: await query.message.edit_text(
+            f"\U0001f4cb \u0628\u062e\u0634: {SECTION_NAMES.get(key,key)}\n{sep14}"
+            f"\n\u270f\ufe0f \u0645\u062a\u0646: {txt_ok}\n\U0001f5bc \u0628\u0646\u0631: {ban_ok}\n\U0001f518 \u062f\u06a9\u0645\u0647: {btn_ok}",
+            reply_markup=section_kb(key))
         except BadRequest: await query.message.reply_text(f"\U0001f4cb {SECTION_NAMES.get(key,key)}",reply_markup=section_kb(key))
     elif data.startswith("sec_text_"):
         key=data[9:]; ctx.user_data.update({"mode":"edit_text","edit_key":key})
@@ -1036,7 +1016,7 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         await record_stat("wh_page")
         if not workhours.get("enabled",True): await update.message.reply_text("\U0001f550 \u0633\u0627\u0639\u062a \u06a9\u0627\u0631\u06cc \u062a\u0646\u0638\u06cc\u0645 \u0646\u0634\u062f\u0647.",reply_markup=main_menu()); return
         wh=wh_today_block() or""
-        ft=f"\n\u2500"*17+f"\n\u23f1 {shamsi_now()}" if get_setting("show_datetime_footer") else""
+        ft=("\n"+"\u2500"*17+f"\n\u23f1 {shamsi_now()}") if get_setting("show_datetime_footer") else""
         # حداکثر ۴۰۹۶ کاراکتر — فقط امروز نمایش بده
         msg=f"\U0001f550 \u0633\u0627\u0639\u062a \u06a9\u0627\u0631\u06cc \u0627\u0633\u062a\u0648\u06a9 \u0644\u0646\u062f\n{wh}{ft}"
         if len(msg)>4000: msg=msg[:3990]+"..."
