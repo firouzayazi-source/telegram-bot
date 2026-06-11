@@ -64,20 +64,16 @@ DEFAULT_WH = {"enabled":True,"schedule":{
     "msg_open":"\u2705 \u0647\u0645\u200c\u0627\u06a9\u0646\u0648\u0646 \u0628\u0627\u0632 \u0627\u0633\u062a",
     "msg_closed":"\U0001f534 \u0647\u0645\u200c\u0627\u06a9\u0646\u0648\u0646 \u0628\u0633\u062a\u0647 \u0627\u0633\u062a"}
 
-# پیش‌فرض همه قابلیت‌ها غیرفعال
-DEFAULT_SETTINGS = {"show_workhours_in_sections":False,"show_datetime_footer":False,
-                    "show_workhours_menu":False,"show_catalog_menu":False,
-                    "notify_new_user":False,"store_open":True}
-DEFAULT_SEC_WH = {k:False for k in SECTION_NAMES}
+# پیش‌فرض همه قابلیت‌ها فعال
+DEFAULT_SETTINGS = {"show_datetime_footer":True,
+                    "show_workhours_menu":True,"show_catalog_menu":True,
+                    "notify_new_user":True,"store_open":True}
+DEFAULT_SEC_WH = {k:True for k in SECTION_NAMES}
 
 # ── helpers ───────────────────────────────────────
 def get_banner(k): banners.setdefault(k,{"file_id":None,"active":False}); return banners[k]
-def get_sec_btns(k): buttons.setdefault(k,{"enabled":False,"items":[]}); return buttons[k]
-def get_setting(k): return settings.get(k,DEFAULT_SETTINGS.get(k,False))
-def get_sec_wh(k):
-    if not get_setting("show_workhours_in_sections"): return False
-    return settings.get("section_workhours",DEFAULT_SEC_WH).get(k,False)
-def set_sec_wh(k,v): settings.setdefault("section_workhours",dict(DEFAULT_SEC_WH))[k]=v
+def get_sec_btns(k): buttons.setdefault(k,{"enabled":True,"items":[]}); return buttons[k]
+def get_setting(k): return settings.get(k,DEFAULT_SETTINGS.get(k,True))
 
 def is_open():
     if not get_setting("store_open"): return False
@@ -115,10 +111,8 @@ def wh_full_table():
     return "\n".join(rows)
 
 def build_msg(title,content,sec_key):
-    wh=wh_today_block() if get_sec_wh(sec_key) else None
     ft=f"\u23f1 {shamsi_now()}" if get_setting("show_datetime_footer") else ""
     lines=[f"\U0001f4cc {title}","\u2500"*14,content,"\u2500"*14]
-    if wh: lines+=["",wh]
     if ft: lines+=["","\u2500"*17,ft]
     msg="\n".join(lines)
     return msg[:4000]+"..." if len(msg)>4000 else msg
@@ -165,7 +159,7 @@ async def save_workhours(): await _wj(WORKHOURS_FILE,workhours)
 async def load_buttons():
     global buttons
     buttons=await _rj(BUTTONS_FILE,dict)
-    for k in SECTION_NAMES: buttons.setdefault(k,{"enabled":False,"items":[]})
+    for k in SECTION_NAMES: buttons.setdefault(k,{"enabled":True,"items":[]})
 
 async def save_buttons(): await _wj(BUTTONS_FILE,buttons)
 
@@ -391,14 +385,13 @@ def sections_kb():
     return InlineKeyboardMarkup(btns)
 
 def section_kb(key):
-    b=get_banner(key); sec=get_sec_btns(key); wh=get_sec_wh(key)
+    b=get_banner(key); sec=get_sec_btns(key)
     bs="\U0001f5bc\u2705" if b.get("active") and b.get("file_id") else("\U0001f5bc\u23f8" if b.get("file_id") else"\U0001f5bc\u2795")
     bn=f"\U0001f518\u2705({len(sec.get('items',[]))})" if sec.get("enabled") else f"\U0001f518\u274c({len(sec.get('items',[]))})"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("\u270f\ufe0f \u0648\u06cc\u0631\u0627\u06cc\u0634 \u0645\u062a\u0646",callback_data=f"sec_text_{key}")],
         [InlineKeyboardButton(f"{bs} \u0628\u0646\u0631",callback_data=f"sec_ban_{key}")],
         [InlineKeyboardButton(f"{bn} \u062f\u06a9\u0645\u0647\u200c\u0647\u0627",callback_data=f"sec_btns_{key}")],
-        [InlineKeyboardButton(f"\U0001f550{'\u2705' if wh else '\u274c'} \u0633\u0627\u0639\u062a \u06a9\u0627\u0631\u06cc",callback_data=f"sec_wh_{key}")],
         [InlineKeyboardButton("\U0001f519 \u0628\u0631\u06af\u0634\u062a",callback_data="sections")],
     ])
 
@@ -440,7 +433,6 @@ def wh_day_kb(dk):
 def settings_kb():
     def t(k): return"\u2705" if get_setting(k) else"\u274c"
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"{t('show_workhours_in_sections')} \u0633\u0627\u0639\u062a \u06a9\u0627\u0631\u06cc \u062f\u0631 \u0628\u062e\u0634\u200c\u0647\u0627",callback_data="stg_show_workhours_in_sections")],
         [InlineKeyboardButton(f"{t('show_datetime_footer')} \u062a\u0627\u0631\u06cc\u062e \u0648 \u0633\u0627\u0639\u062a \u067e\u0627\u06cc\u06cc\u0646",callback_data="stg_show_datetime_footer")],
         [InlineKeyboardButton(f"{t('show_workhours_menu')} \u0633\u0627\u0639\u062a \u06a9\u0627\u0631\u06cc \u062f\u0631 \u0645\u0646\u0648",callback_data="stg_show_workhours_menu")],
         [InlineKeyboardButton(f"{t('show_catalog_menu')} \u0645\u062d\u0635\u0648\u0644\u0627\u062a \u062f\u0631 \u0645\u0646\u0648",callback_data="stg_show_catalog_menu")],
@@ -575,6 +567,15 @@ async def user_cb(query,ctx):
     data=query.data
     user=query.from_user
     logger.warning(f"USER_CB: {data}")
+
+    # ── ساعت کار هفتگی ──
+    if data=="wh_weekly":
+        table=wh_full_table()
+        sep="\u2501"*15
+        msg=f"{sep}\n\U0001f4c6 \u0633\u0627\u0639\u062a \u06a9\u0627\u0631 \u0647\u0641\u062a\u06af\u06cc \u0645\u062c\u0645\u0648\u0639\u0647\n{sep}\n{table}\n{sep}"
+        await query.answer()
+        await query.message.reply_text(msg,reply_markup=main_menu()); return
+
     # ── کاتالوگ root ──
     if data=="cat_back":
         cats=await get_root_cats()
@@ -658,7 +659,7 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     data=query.data; uid=query.from_user.id
     
     # اجازه تست کاتالوگ کاربر برای ادمین
-    if data.startswith(("cr_", "cs_", "prd_", "req_", "cat_")):
+    if data.startswith(("cr_", "cs_", "prd_", "req_", "cat_", "wh_weekly")):
         await user_cb(query, ctx)
         return
     
@@ -700,7 +701,7 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
 
     # ── sections ──
     elif data=="sections": await query.message.edit_text("\U0001f4cb \u0645\u062f\u06cc\u0631\u06cc\u062a \u0628\u062e\u0634\u200c\u0647\u0627:",reply_markup=sections_kb())
-    elif data.startswith("sec_") and not any(data.startswith(p) for p in["sec_text_","sec_ban_","sec_btns_","sec_wh_"]):
+    elif data.startswith("sec_") and not any(data.startswith(p) for p in["sec_text_","sec_ban_","sec_btns_"]):
         key=data[4:]
         from telegram.error import BadRequest
         sep14 = "\u2500"*14
@@ -715,9 +716,6 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     elif data.startswith("sec_text_"):
         key=data[9:]; ctx.user_data.update({"mode":"edit_text","edit_key":key})
         await query.message.reply_text(f"\u270f\ufe0f \u0645\u062a\u0646 \u0641\u0639\u0644\u06cc:\n\n{responses.get(key,'\u062a\u0646\u0638\u06cc\u0645 \u0646\u0634\u062f\u0647')}\n\n\u0645\u062a\u0646 \u062c\u062f\u06cc\u062f:",reply_markup=cancel_menu())
-    elif data.startswith("sec_wh_"):
-        key=data[7:]; set_sec_wh(key,not get_sec_wh(key)); await save_settings()
-        await query.answer("\u2705",show_alert=True)
     elif data.startswith("sec_ban_"):
         key=data[8:]; b=get_banner(key)
         await query.message.edit_text(f"\U0001f5bc \u0628\u0646\u0631: {SECTION_NAMES.get(key,key)}\n{'\u2705 \u0622\u067e\u0644\u0648\u062f \u0634\u062f\u0647' if b.get('file_id') else '\u274c \u0646\u062f\u0627\u0631\u062f'} | {'\u2705 \u0641\u0639\u0627\u0644' if b.get('active') else '\u274c \u063a\u06cc\u0631\u0641\u0639\u0627\u0644'}",reply_markup=banner_kb(key))
@@ -759,7 +757,36 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     # ── catalog admin ──
     elif data=="admin_catalog":
         roots=await get_root_cats(active_only=False)
-        await safe_edit(query.message,"\U0001f6cd \u0645\u062f\u06cc\u0631\u06cc\u062a \u06a9\u0627\u062a\u0627\u0644\u0648\u06af:",reply_markup=acat_root_kb(roots))
+        # دکمه «محصول جدید سریع» اضافه می‌کنیم
+        kb=acat_root_kb(roots)
+        btns=kb.inline_keyboard[:]
+        btns.insert(0,[InlineKeyboardButton("\u2728 \u0627\u0641\u0632\u0648\u062f\u0646 \u0645\u062d\u0635\u0648\u0644 \u062c\u062f\u06cc\u062f",callback_data="aprd_quick_new")])
+        await safe_edit(query.message,"\U0001f6cd \u0645\u062f\u06cc\u0631\u06cc\u062a \u06a9\u0627\u062a\u0627\u0644\u0648\u06af:",reply_markup=InlineKeyboardMarkup(btns))
+    elif data=="aprd_quick_new":
+        # شروع flow محصول جدید — اول دسته
+        roots=await get_root_cats(active_only=False)
+        btns=[[InlineKeyboardButton(f"{c[2]} {c[1]}",callback_data=f"aprd_qn_root_{c[0]}")] for c in roots]
+        btns.append([InlineKeyboardButton("\u2795 \u062f\u0633\u062a\u0647 \u062c\u062f\u06cc\u062f \u0628\u0633\u0627\u0632",callback_data="aprd_qn_newroot")])
+        btns.append([InlineKeyboardButton("\U0001f519",callback_data="admin_catalog")])
+        await query.message.edit_text("\U0001f4e6 \u062f\u0633\u062a\u0647 \u0645\u062d\u0635\u0648\u0644 \u0631\u0627 \u0627\u0646\u062a\u062e\u0627\u0628 \u06a9\u0646\u06cc\u062f:",reply_markup=InlineKeyboardMarkup(btns))
+    elif data=="aprd_qn_newroot":
+        ctx.user_data.update({"mode":"acr_new_ic","coming_from_prod":True})
+        await query.message.reply_text("\U0001f3a8 \u0622\u06cc\u06a9\u0648\u0646 \u062f\u0633\u062a\u0647 (\u0645\u062b\u0627\u0644: \U0001f4f1):",reply_markup=cancel_menu())
+    elif data.startswith("aprd_qn_root_"):
+        root_id=int(data[13:])
+        subs=await get_subcats(root_id,active_only=False)
+        root=await get_cat(root_id)
+        btns=[[InlineKeyboardButton(f"{s[2]} {s[1]}",callback_data=f"aprd_qn_sub_{s[0]}")] for s in subs]
+        btns.append([InlineKeyboardButton("\u2795 \u0632\u06cc\u0631\u062f\u0633\u062a\u0647 \u062c\u062f\u06cc\u062f \u0628\u0633\u0627\u0632",callback_data=f"aprd_qn_newsub_{root_id}")])
+        btns.append([InlineKeyboardButton("\U0001f519",callback_data="aprd_quick_new")])
+        await query.message.edit_text(f"\U0001f4c1 {root[2]} {root[1]}\n\u0632\u06cc\u0631\u062f\u0633\u062a\u0647 \u0631\u0627 \u0627\u0646\u062a\u062e\u0627\u0628 \u06a9\u0646\u06cc\u062f:",reply_markup=InlineKeyboardMarkup(btns))
+    elif data.startswith("aprd_qn_newsub_"):
+        root_id=int(data[15:])
+        ctx.user_data.update({"mode":"acs_new_ic","root_id":root_id,"coming_from_prod":True})
+        await query.message.reply_text("\U0001f3a8 \u0622\u06cc\u06a9\u0648\u0646 \u0632\u06cc\u0631\u062f\u0633\u062a\u0647:",reply_markup=cancel_menu())
+    elif data.startswith("aprd_qn_sub_"):
+        sub_id=int(data[12:]); ctx.user_data.update({"mode":"aprd_n_name","sub_id":sub_id})
+        await query.message.reply_text("\U0001f4f1 \u0646\u0627\u0645 \u0645\u062d\u0635\u0648\u0644:",reply_markup=cancel_menu())
     elif data=="acr_new":
         ctx.user_data.update({"mode":"acr_new_ic"}); await query.message.reply_text("\U0001f3a8 \u0622\u06cc\u06a9\u0648\u0646 (\u0645\u062b\u0627\u0644: \U0001f4f1 \U0001f4bb \U0001f3a7):",reply_markup=cancel_menu())
     elif data.startswith("acr_ed_"):
@@ -946,8 +973,16 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         if mode=="wh_mcl": ctx.user_data.pop("mode",None); workhours["msg_closed"]=text; await save_workhours(); await update.message.reply_text("\u2705",reply_markup=main_menu()); return
         if mode=="acr_new_ic": ctx.user_data.update({"acr_ic":text,"mode":"acr_new_nm"}); await update.message.reply_text("\u270f\ufe0f \u0646\u0627\u0645 \u062f\u0633\u062a\u0647 \u0627\u0635\u0644\u06cc:",reply_markup=cancel_menu()); return
         if mode=="acr_new_nm":
-            ic=ctx.user_data.pop("acr_ic","\U0001f4e6"); ctx.user_data.pop("mode",None)
+            ic=ctx.user_data.pop("acr_ic","\U0001f4e6")
+            coming_from_prod=ctx.user_data.pop("coming_from_prod",False)
+            ctx.user_data.pop("mode",None)
             await db.execute("INSERT INTO categories(name,icon,parent_id,is_active) VALUES(?,?,NULL,1)",(text,ic)); await db.commit()
+            async with db.execute("SELECT id FROM categories WHERE name=? AND parent_id IS NULL ORDER BY id DESC LIMIT 1",(text,)) as c:
+                row=await c.fetchone()
+            new_rid=row[0] if row else None
+            if coming_from_prod and new_rid:
+                ctx.user_data.update({"mode":"acs_new_ic","root_id":new_rid})
+                await update.message.reply_text(f"\u2705 \u062f\u0633\u062a\u0647 \u00ab{ic} {text}\u00bb \u0633\u0627\u062e\u062a\u0647 \u0634\u062f.\n\u2795 \u062d\u0627\u0644\u0627 \u0632\u06cc\u0631\u062f\u0633\u062a\u0647 \u0628\u0633\u0627\u0632\u06cc\u062f:\n\U0001f3a8 \u0622\u06cc\u06a9\u0648\u0646 \u0632\u06cc\u0631\u062f\u0633\u062a\u0647:",reply_markup=cancel_menu()); return
             await update.message.reply_text(f"\u2705 \u062f\u0633\u062a\u0647 \u00ab{ic} {text}\u00bb \u0627\u0636\u0627\u0641\u0647 \u0634\u062f.",reply_markup=main_menu()); return
         if mode=="acr_edit":
             cat_id=ctx.user_data.pop("cat_id",None); ctx.user_data.pop("mode",None)
@@ -955,8 +990,16 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("\u2705 \u0630\u062e\u06cc\u0631\u0647 \u0634\u062f.",reply_markup=main_menu()); return
         if mode=="acs_new_ic": ctx.user_data.update({"acs_ic":text,"mode":"acs_new_nm"}); await update.message.reply_text("\u270f\ufe0f \u0646\u0627\u0645 \u0632\u06cc\u0631\u062f\u0633\u062a\u0647:",reply_markup=cancel_menu()); return
         if mode=="acs_new_nm":
-            ic=ctx.user_data.pop("acs_ic","\U0001f4e6"); root_id=ctx.user_data.pop("root_id",None); ctx.user_data.pop("mode",None)
+            ic=ctx.user_data.pop("acs_ic","\U0001f4e6"); root_id=ctx.user_data.pop("root_id",None)
+            coming_from_prod=ctx.user_data.pop("coming_from_prod",False)
+            ctx.user_data.pop("mode",None)
             await db.execute("INSERT INTO categories(name,icon,parent_id,is_active) VALUES(?,?,?,1)",(text,ic,root_id)); await db.commit()
+            async with db.execute("SELECT id FROM categories WHERE name=? AND parent_id=? ORDER BY id DESC LIMIT 1",(text,root_id)) as c:
+                row=await c.fetchone()
+            new_sid=row[0] if row else None
+            if coming_from_prod and new_sid:
+                ctx.user_data.update({"mode":"aprd_n_name","sub_id":new_sid})
+                await update.message.reply_text(f"\u2705 \u0632\u06cc\u0631\u062f\u0633\u062a\u0647 \u00ab{ic} {text}\u00bb \u0633\u0627\u062e\u062a\u0647 \u0634\u062f.\n\u2795 \u062d\u0627\u0644\u0627 \u0645\u062d\u0635\u0648\u0644 \u0628\u0633\u0627\u0632\u06cc\u062f:\n\U0001f4f1 \u0646\u0627\u0645 \u0645\u062d\u0635\u0648\u0644:",reply_markup=cancel_menu()); return
             await update.message.reply_text(f"\u2705 \u0632\u06cc\u0631\u062f\u0633\u062a\u0647 \u00ab{ic} {text}\u00bb \u0627\u0636\u0627\u0641\u0647 \u0634\u062f.",reply_markup=main_menu()); return
         if mode=="acs_edit":
             cat_id=ctx.user_data.pop("cat_id",None); ctx.user_data.pop("mode",None)
@@ -1017,10 +1060,10 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         if not workhours.get("enabled",True): await update.message.reply_text("\U0001f550 \u0633\u0627\u0639\u062a \u06a9\u0627\u0631\u06cc \u062a\u0646\u0638\u06cc\u0645 \u0646\u0634\u062f\u0647.",reply_markup=main_menu()); return
         wh=wh_today_block() or""
         ft=("\n"+"\u2500"*17+f"\n\u23f1 {shamsi_now()}") if get_setting("show_datetime_footer") else""
-        # حداکثر ۴۰۹۶ کاراکتر — فقط امروز نمایش بده
         msg=f"\U0001f550 \u0633\u0627\u0639\u062a \u06a9\u0627\u0631\u06cc \u0627\u0633\u062a\u0648\u06a9 \u0644\u0646\u062f\n{wh}{ft}"
         if len(msg)>4000: msg=msg[:3990]+"..."
-        await update.message.reply_text(msg,reply_markup=main_menu()); return
+        kb=InlineKeyboardMarkup([[InlineKeyboardButton("\U0001f4c6 \u0633\u0627\u0639\u062a \u06a9\u0627\u0631 \u0647\u0641\u062a\u06af\u06cc \u0645\u062c\u0645\u0648\u0639\u0647",callback_data="wh_weekly")]])
+        await update.message.reply_text(msg,reply_markup=kb); return
 
     if text=="\U0001f6cd \u0645\u062d\u0635\u0648\u0644\u0627\u062a":
         await record_stat("catalog"); cats=await get_root_cats()
