@@ -100,8 +100,8 @@ def wh_full_table():
 
 def build_msg(title,content,sec_key):
     ft=f"⏱ {shamsi_now()}" if get_setting("show_datetime_footer") else ""
-    lines=[f"📌 {title}","─"*14,content,"─"*14]
-    if ft: lines+=["","─"*17,ft]
+    lines=[f"✦ {title}","",content,""]
+    if ft: lines+=["─"*18,"",ft]
     msg="\n".join(lines)
     return msg[:4000]+"..." if len(msg)>4000 else msg
 
@@ -328,25 +328,24 @@ def product_kb(p):
     return InlineKeyboardMarkup(btns)
 
 # ── admin keyboards
-def back_admin(): return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 برگشت به پنل",callback_data="back_to_admin")]])
+def back_admin(): return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به پنل",callback_data="back_to_admin")]])
 
 def backup_kb(): return InlineKeyboardMarkup([
-    [InlineKeyboardButton("💾 دریافت بک‌آپ",callback_data="backup_get")],
-    [InlineKeyboardButton("📥 ایمپورت بک‌آپ",callback_data="backup_import")],
-    [InlineKeyboardButton("🔙 برگشت",callback_data="back_to_admin")]])
+    [InlineKeyboardButton("💾 دریافت پشتیبان",callback_data="backup_get"),
+     InlineKeyboardButton("📥 بازگردانی",callback_data="backup_import")],
+    [InlineKeyboardButton("🔙 پنل اصلی",callback_data="back_to_admin")]])
 
 def admin_menu():
-
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 داشبورد",callback_data="dash"),
          InlineKeyboardButton("👥 کاربران",callback_data="users_menu")],
-        [InlineKeyboardButton("📋 مدیریت بخش‌ها",callback_data="sections")],
         [InlineKeyboardButton("🛍 محصولات",callback_data="admin_catalog"),
-         InlineKeyboardButton("📨 درخواست‌ها",callback_data="admin_reqs")],
+         InlineKeyboardButton("📬 درخواست‌ها",callback_data="admin_reqs")],
+        [InlineKeyboardButton("✏️ مدیریت بخش‌ها",callback_data="sections")],
         [InlineKeyboardButton("🕐 ساعت کاری",callback_data="wh_menu"),
          InlineKeyboardButton("⚙️ تنظیمات",callback_data="settings_menu")],
-        [InlineKeyboardButton("📢 پخش همگانی",callback_data="broadcast"),
-         InlineKeyboardButton("💾 بک‌آپ",callback_data="backup")],
+        [InlineKeyboardButton("📣 پخش همگانی",callback_data="broadcast"),
+         InlineKeyboardButton("💾 پشتیبان‌گیری",callback_data="backup")],
     ])
 
 def sections_kb():
@@ -354,50 +353,56 @@ def sections_kb():
     for key,name in SECTION_NAMES.items():
         cont=responses.get(key,"") if responses else ""
         b=get_banner(key); sec=get_sec_btns(key)
-        ti="✅" if cont and cont not in("تنظیم نشده","") else "➕"
-        bi="🖼" if b.get("active") and b.get("file_id") else "○"
-        si=f"🔘{len(sec.get('items',[]))}" if sec.get("enabled") else "○"
-        btns.append([InlineKeyboardButton(f"{name}  {ti}{bi}{si}",callback_data=f"sec_{key}")])
-    btns.append([InlineKeyboardButton("🔙 برگشت",callback_data="back_to_admin")])
+        t="📝" if cont and cont not in("تنظیم نشده","") else "‌ ·"
+        bi="🖼" if b.get("active") and b.get("file_id") else " ·"
+        n=len(sec.get("items",[])); si=f"🔗{to_fa(n)}" if sec.get("enabled") and n else " ·"
+        btns.append([InlineKeyboardButton(f"{name}   {t} {bi} {si}",callback_data=f"sec_{key}")])
+    btns.append([InlineKeyboardButton("🔙 پنل اصلی",callback_data="back_to_admin")])
     return InlineKeyboardMarkup(btns)
 
 def section_kb(key):
     b=get_banner(key); sec=get_sec_btns(key)
-    bs="🖼✅" if b.get("active") and b.get("file_id") else("🖼⏸" if b.get("file_id") else"🖼➕")
-    bn=f"🔘✅({len(sec.get('items',[]))})" if sec.get("enabled") else f"🔘❌({len(sec.get('items',[]))})"
+    ban_lbl="🖼 بنر  🟢 فعال" if(b.get("active") and b.get("file_id")) else("🖼 بنر  ⏸ آپلود‌شده" if b.get("file_id") else"🖼 بنر  ➕ ندارد")
+    n=len(sec.get("items",[])); en=sec.get("enabled")
+    btn_lbl=f"🔗 دکمه‌ها  {'🟢' if en else '🔴'}  ({to_fa(n)} عدد)"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✏️ ویرایش متن",callback_data=f"sec_text_{key}")],
-        [InlineKeyboardButton(f"{bs} بنر",callback_data=f"sec_ban_{key}")],
-        [InlineKeyboardButton(f"{bn} دکمه‌ها",callback_data=f"sec_btns_{key}")],
-        [InlineKeyboardButton("🔙 برگشت",callback_data="sections")],
+        [InlineKeyboardButton(ban_lbl,callback_data=f"sec_ban_{key}")],
+        [InlineKeyboardButton(btn_lbl,callback_data=f"sec_btns_{key}")],
+        [InlineKeyboardButton("🔙 بازگشت",callback_data="sections")],
     ])
 
 def banner_kb(key):
-    b=get_banner(key); tg="🔴 غیرفعال" if b.get("active") else "🟢 فعال"
-    btns=[[InlineKeyboardButton("📤 آپلود",callback_data=f"ban_up_{key}")],
+    b=get_banner(key); tg="🔴 غیرفعال‌سازی" if b.get("active") else "🟢 فعال‌سازی"
+    btns=[[InlineKeyboardButton("📤 آپلود تصویر",callback_data=f"ban_up_{key}")],
           [InlineKeyboardButton(tg,callback_data=f"ban_tg_{key}")]]
-    if b.get("file_id"): btns.append([InlineKeyboardButton("🗑 حذف",callback_data=f"ban_dl_{key}")])
-    btns.append([InlineKeyboardButton("🔙",callback_data=f"sec_{key}")]); return InlineKeyboardMarkup(btns)
+    if b.get("file_id"): btns.append([InlineKeyboardButton("🗑 حذف تصویر",callback_data=f"ban_dl_{key}")])
+    btns.append([InlineKeyboardButton("🔙 بازگشت",callback_data=f"sec_{key}")]); return InlineKeyboardMarkup(btns)
 
 def sec_btns_kb(key):
-    sec=get_sec_btns(key); tg="🔴 غیرفعال" if sec.get("enabled") else "🟢 فعال"
+    sec=get_sec_btns(key); tg="🔴 غیرفعال‌سازی" if sec.get("enabled") else "🟢 فعال‌سازی"
     btns=[[InlineKeyboardButton(tg,callback_data=f"btn_tg_{key}")]]
     for it in sec.get("items",[]):
         btns.append([InlineKeyboardButton(f"🔗 {it['title']}",callback_data=f"btn_ed_{key}_{it['id']}"),
-                     InlineKeyboardButton("🗑",callback_data=f"btn_dl_{key}_{it['id']}")])
-    btns.append([InlineKeyboardButton("➕ دکمه جدید",callback_data=f"btn_add_{key}"),
-                 InlineKeyboardButton("🔙",callback_data=f"sec_{key}")])
+                     InlineKeyboardButton("🗑 حذف",callback_data=f"btn_dl_{key}_{it['id']}")])
+    btns.append([InlineKeyboardButton("➕ افزودن دکمه",callback_data=f"btn_add_{key}"),
+                 InlineKeyboardButton("🔙 بازگشت",callback_data=f"sec_{key}")])
     return InlineKeyboardMarkup(btns)
 
 def wh_kb():
     en=workhours.get("enabled",True)
-    btns=[[InlineKeyboardButton("🔴 غیرفعال" if en else "🟢 فعال",callback_data="wh_toggle")]]
-    for k,name in DAY_FA.items():
-        day=workhours.get("schedule",{}).get(k,{})
-        btns.append([InlineKeyboardButton(f"{'✅' if day.get('open') else '❌'} {name}",callback_data=f"wh_day_{k}")])
-    btns+=[[InlineKeyboardButton("✏️ پیام باز",callback_data="wh_mop")],
-           [InlineKeyboardButton("✏️ پیام بسته",callback_data="wh_mcl")],
-           [InlineKeyboardButton("🔙",callback_data="back_to_admin")]]
+    tg="🔴 غیرفعال‌سازی" if en else "🟢 فعال‌سازی"
+    btns=[[InlineKeyboardButton(tg,callback_data="wh_toggle")]]
+    day_list=list(DAY_FA.items())
+    for i in range(0,len(day_list),2):
+        row=[]
+        for k,name in day_list[i:i+2]:
+            day=workhours.get("schedule",{}).get(k,{})
+            row.append(InlineKeyboardButton(f"{'✅' if day.get('open') else '❌'} {name}",callback_data=f"wh_day_{k}"))
+        btns.append(row)
+    btns+=[[InlineKeyboardButton("✏️ پیام باز",callback_data="wh_mop"),
+            InlineKeyboardButton("✏️ پیام بسته",callback_data="wh_mcl")],
+           [InlineKeyboardButton("🔙 پنل اصلی",callback_data="back_to_admin")]]
     return InlineKeyboardMarkup(btns)
 
 def wh_day_kb(dk):
@@ -408,20 +413,22 @@ def wh_day_kb(dk):
         [InlineKeyboardButton("🔙",callback_data="wh_menu")]])
 
 def settings_kb():
-    def t(k): return"✅" if get_setting(k) else"❌"
+    def t(k): return"🟢" if get_setting(k) else"⚫️"
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"{t('show_datetime_footer')} تاریخ و ساعت پایین",callback_data="stg_show_datetime_footer")],
-        [InlineKeyboardButton(f"{t('show_workhours_menu')} ساعت کاری در منو",callback_data="stg_show_workhours_menu")],
-        [InlineKeyboardButton(f"{t('show_catalog_menu')} محصولات در منو",callback_data="stg_show_catalog_menu")],
+        [InlineKeyboardButton(f"{t('show_datetime_footer')} تاریخ و ساعت",callback_data="stg_show_datetime_footer")],
+        [InlineKeyboardButton(f"{t('show_workhours_menu')} ساعت کاری در منو",callback_data="stg_show_workhours_menu"),
+         InlineKeyboardButton(f"{t('show_catalog_menu')} محصولات در منو",callback_data="stg_show_catalog_menu")],
         [InlineKeyboardButton(f"{t('notify_new_user')} اعلان عضو جدید",callback_data="stg_notify_new_user")],
-        [InlineKeyboardButton("🔙",callback_data="back_to_admin")],
+        [InlineKeyboardButton("🔙 پنل اصلی",callback_data="back_to_admin")],
     ])
 
 def users_menu_kb(): return InlineKeyboardMarkup([
-    [InlineKeyboardButton("👥 همه",callback_data="ul_all_0"),InlineKeyboardButton("📅 امروز",callback_data="ul_today_0")],
-    [InlineKeyboardButton("📆 هفته",callback_data="ul_week_0"),InlineKeyboardButton("🚫 بلاک",callback_data="ul_blocked_0")],
-    [InlineKeyboardButton("🔍 جستجو",callback_data="users_search")],
-    [InlineKeyboardButton("🔙",callback_data="back_to_admin")]])
+    [InlineKeyboardButton("👥 همه کاربران",callback_data="ul_all_0"),
+     InlineKeyboardButton("🆕 امروز",callback_data="ul_today_0")],
+    [InlineKeyboardButton("📆 این هفته",callback_data="ul_week_0"),
+     InlineKeyboardButton("🚫 بلاک‌شده‌ها",callback_data="ul_blocked_0")],
+    [InlineKeyboardButton("🔍 جستجوی کاربر",callback_data="users_search")],
+    [InlineKeyboardButton("🔙 پنل اصلی",callback_data="back_to_admin")]])
 
 def users_list_kb(rows,off,ft,total):
     btns=[[InlineKeyboardButton(f"{'🚫 ' if r[4] else ''}{r[1] or '—'} | {r[0]}",callback_data=f"uv_{r[0]}")] for r in rows]
@@ -456,16 +463,16 @@ def acat_products_kb(sub_id,products,root_id):
     btns.append([InlineKeyboardButton("🔙",callback_data=f"acr_{root_id}")]); return InlineKeyboardMarkup(btns)
 
 def aprd_kb(pid,sub_id,is_active):
-    tg="🔴 غیرفعال" if is_active else "🟢 فعال"
+    tg="🔴 غیرفعال‌سازی" if is_active else "🟢 فعال‌سازی"
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✏️ نام",callback_data=f"aprd_en_{pid}"),
-         InlineKeyboardButton("💰 قیمت",callback_data=f"aprd_ep_{pid}")],
-        [InlineKeyboardButton("📝 توضیح",callback_data=f"aprd_ed_{pid}"),
-         InlineKeyboardButton("📸 عکس",callback_data=f"aprd_ei_{pid}")],
-        [InlineKeyboardButton("🌐 لینک محصول",callback_data=f"aprd_eu_{pid}")],
+        [InlineKeyboardButton("✏️ ویرایش نام",callback_data=f"aprd_en_{pid}"),
+         InlineKeyboardButton("💰 ویرایش قیمت",callback_data=f"aprd_ep_{pid}")],
+        [InlineKeyboardButton("📝 ویرایش توضیح",callback_data=f"aprd_ed_{pid}"),
+         InlineKeyboardButton("📸 ویرایش عکس",callback_data=f"aprd_ei_{pid}")],
+        [InlineKeyboardButton("🌐 ویرایش لینک",callback_data=f"aprd_eu_{pid}")],
         [InlineKeyboardButton(tg,callback_data=f"aprd_etg_{pid}")],
-        [InlineKeyboardButton("🗑 حذف",callback_data=f"aprd_del_{pid}")],
-        [InlineKeyboardButton("🔙",callback_data=f"acs_{sub_id}")]])
+        [InlineKeyboardButton("🗑 حذف محصول",callback_data=f"aprd_del_{pid}")],
+        [InlineKeyboardButton("🔙 بازگشت",callback_data=f"acs_{sub_id}")]])
 
 def reqs_kb(reqs):
     btns=[[InlineKeyboardButton(f"{'🆕' if r[6]=='new' else '✅'} {r[5]} — {r[3]}",callback_data=f"rq_{r[0]}")] for r in reqs]
@@ -550,7 +557,7 @@ async def cmd_start(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
 
 async def cmd_admin(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id!=ADMIN_ID: return await update.message.reply_text("⛔ دسترسی ندارید")
-    await update.message.reply_text("👑 پنل مدیریت",reply_markup=admin_menu())
+    await update.message.reply_text("👑 پنل مدیریت استوک لند",reply_markup=admin_menu())
 
 # ════════════════════════════════════════════════
 #  USER CALLBACKS
@@ -617,8 +624,8 @@ async def user_cb(query,ctx):
         pid=int(data[4:]); p=await get_product(pid)
         if not p: return
         await record_stat(f"prd_{pid}")
-        ft=("\n"+"─"*17+f"\n⏱ {shamsi_now()}") if get_setting("show_datetime_footer") else ""
-        text=f"📱 {p[1]}\n💰 قیمت: {p[2]}"
+        ft=("\n\n─"*9+f"\n⏱ {shamsi_now()}") if get_setting("show_datetime_footer") else ""
+        text=f"📱 {p[1]}\n{'─'*18}\n💰 قیمت:  {p[2]}"
         if p[3]: text+=f"\n\n📝 {p[3]}"
         text+=ft; kb=product_kb(p)
         if p[4]:
@@ -657,17 +664,20 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     try:
         if data=="back_to_admin":
             await query.answer()
-            await safe_edit(query.message,"👑 پنل مدیریت",reply_markup=admin_menu())
+            await safe_edit(query.message,"👑 پنل مدیریت استوک لند",reply_markup=admin_menu())
 
         elif data=="dash":
             await query.answer()
             t,d,w,m,nt,bl=(await total_users(),await today_users(),await week_users(),
                             await month_users(),await new_today(),await blk_count())
-            sep="══"*7
+            sep="─"*22
             dash=(f"📊 داشبورد — {shamsi_now()}\n{sep}"
-                  f"\n👥 کل: {to_fa(t)}  |  🚫 بلاک: {to_fa(bl)}\n{sep}"
-                  f"\n🆕 عضو امروز: {to_fa(nt)}\n📅 فعال امروز: {to_fa(d)}  {progress_bar(d,t)}"
-                  f"\n📆 فعال هفته: {to_fa(w)}  {progress_bar(w,t)}\n🗓 فعال ماه: {to_fa(m)}  {progress_bar(m,t)}"
+                  f"\n👥 کل کاربران: {to_fa(t)}     🚫 بلاک: {to_fa(bl)}"
+                  f"\n{sep}"
+                  f"\n🆕 عضو امروز:   {to_fa(nt)}"
+                  f"\n📅 فعال امروز:  {to_fa(d)}   {progress_bar(d,t)}"
+                  f"\n📆 فعال هفته:   {to_fa(w)}   {progress_bar(w,t)}"
+                  f"\n🗓  فعال ماه:    {to_fa(m)}   {progress_bar(m,t)}"
                   f"\n{sep}")
             if len(dash)>4000: dash=dash[:3990]+"..."
             await query.message.edit_text(dash,reply_markup=admin_menu())
@@ -934,7 +944,16 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             async with db.execute("SELECT id,user_id,username,first_name,phone,product_name,status,created_at FROM requests WHERE id=?",(rid,)) as c: r=await c.fetchone()
             if not r: return
             st2="🆕 جدید" if r[6]=="new" else"✅ پیگیری شد"
-            await query.message.edit_text(f"📋 درخواست #{to_fa(r[0])}\n📱 {r[5]}\n👤 {r[3] or'—'} | {'@'+r[2] if r[2] else r[1]}\n📞 {r[4]}\n🆔 {r[1]}\n⏱ {r[7]}\n{st2}",reply_markup=req_kb(rid,r[6]))
+            sep="─"*20
+            txt=(f"📋 درخواست #{to_fa(r[0])}\n{sep}"
+                 f"\n📱 {r[5]}"
+                 f"\n{sep}"
+                 f"\n👤 {r[3] or'—'}"
+                 f"\n📞 {r[4]}"
+                 f"\n🆔 {r[1]}  {'@'+r[2] if r[2] else ''}"
+                 f"\n⏱ {r[7]}"
+                 f"\n{sep}\n{st2}")
+            await query.message.edit_text(txt,reply_markup=req_kb(rid,r[6]))
 
         # ── ساعت کاری
         elif data=="wh_menu":
@@ -1009,7 +1028,16 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             async with db.execute("SELECT user_id,first_name,username,joined_at,last_seen,is_blocked FROM users WHERE user_id=?",(uid2,)) as c: row=await c.fetchone()
             if not row: await query.answer("یافت نشد!",show_alert=True); return
             await query.answer()
-            await query.message.edit_text(f"👤 {row[1] or'—'}\n{'@'+row[2] if row[2] else'—'}\n🆔 {row[0]}\nعضویت: {row[3]}\nآخرین فعالیت: {row[4]}\n{'🚫 بلاک' if row[5] else '✅ فعال'}",reply_markup=udetail_kb(uid2,bool(row[5])))
+            sep="─"*20
+            utxt=(f"👤 {row[1] or'—'}"
+                  f"\n{'@'+row[2] if row[2] else'بدون یوزرنیم'}"
+                  f"\n🆔 {row[0]}"
+                  f"\n{sep}"
+                  f"\n📅 عضویت: {row[3]}"
+                  f"\n🕐 آخرین فعالیت: {row[4]}"
+                  f"\n{sep}"
+                  f"\n{'🚫 بلاک‌شده' if row[5] else '✅ فعال'}")
+            await query.message.edit_text(utxt,reply_markup=udetail_kb(uid2,bool(row[5])))
 
         elif data.startswith("utog_"):
             uid2=int(data[5:])
