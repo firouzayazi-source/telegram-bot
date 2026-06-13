@@ -109,6 +109,14 @@ def progress_bar(v,t,n=8):
     if t==0: return "░"*n
     f=int(n*v/t); return "▓"*f+"░"*(n-f)
 
+def fmt_product(p):
+    """فرمت نمایش محصول برای ادمین — p: id(0),name(1),price(2),desc(3),photo(4),url(5),active(6),cat_id(7)"""
+    lines=[f"📱 {p[1]}","─"*18,f"💰 قیمت:  {p[2]}"]
+    if p[3]: lines+=["",f"📝 {p[3]}"]
+    if p[5]: lines+=["",f"🌐 {p[5]}"]
+    lines+=["","─"*18,f"وضعیت: {'✅ فعال' if p[6] else '❌ غیرفعال'}"]
+    return "\n".join(lines)
+
 async def record_stat(k): stats[k]=stats.get(k,0)+1; await save_stats()
 
 # ── load/save
@@ -840,7 +848,10 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             rid=int(data[7:]); await db.execute("UPDATE categories SET is_active=0 WHERE id=?",(rid,)); await db.commit()
             await query.answer("🗑 غیرفعال شد.",show_alert=True)
             roots=await get_root_cats(active_only=False)
-            await query.message.edit_text("🛍 مدیریت محصولات:",reply_markup=acat_root_kb(roots))
+            btns=[[InlineKeyboardButton("✨ افزودن محصول جدید",callback_data="aprd_quick_new")]]
+            for c in roots: btns.append([InlineKeyboardButton(f"{'✅' if c[4] else '❌'} {c[2]} {c[1]}",callback_data=f"acr_{c[0]}")])
+            btns+=[[InlineKeyboardButton("➕ دسته اصلی جدید",callback_data="acr_new")],[InlineKeyboardButton("🔙 پنل اصلی",callback_data="back_to_admin")]]
+            await query.message.edit_text("🛍 مدیریت محصولات:",reply_markup=InlineKeyboardMarkup(btns))
 
         elif data.startswith("acr_"):
             await query.answer()
@@ -888,11 +899,20 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             await query.message.edit_text(f"📱 {p[1]}\n💰 {p[2]}\n{'✅' if p[6] else '❌'}",reply_markup=aprd_kb(pid,p[7],bool(p[6])))
 
         elif data.startswith("aprd_del_"):
-            pid=int(data[9:]); p=await get_product(pid); sub_id=p[7] if p else 0
+            pid=int(data[9:]); p=await get_product(pid); sub_id=p[7] if p else None
             await db.execute("DELETE FROM products WHERE id=?",(pid,)); await db.commit()
-            await query.answer("🗑 حذف شد.",show_alert=True)
-            sub=await get_cat(sub_id); products=await get_products(sub_id,active_only=False)
-            if sub: await query.message.edit_text(f"📦 {sub[2]} {sub[1]}",reply_markup=acat_products_kb(sub_id,products,sub[3]))
+            await query.answer("🗑 محصول حذف شد.",show_alert=True)
+            if sub_id:
+                sub=await get_cat(sub_id); products=await get_products(sub_id,active_only=False)
+                if sub:
+                    await safe_edit(query.message,
+                        f"📦 {sub[2]} {sub[1]}\nمحصول: {to_fa(len(products))} عدد",
+                        reply_markup=acat_products_kb(sub_id,products,sub[3])); return
+            roots=await get_root_cats(active_only=False)
+            btns=[[InlineKeyboardButton("✨ افزودن محصول جدید",callback_data="aprd_quick_new")]]
+            for c in roots: btns.append([InlineKeyboardButton(f"{'✅' if c[4] else '❌'} {c[2]} {c[1]}",callback_data=f"acr_{c[0]}")])
+            btns+=[[InlineKeyboardButton("➕ دسته اصلی جدید",callback_data="acr_new")],[InlineKeyboardButton("🔙 پنل اصلی",callback_data="back_to_admin")]]
+            await safe_edit(query.message,"🛍 مدیریت محصولات:",reply_markup=InlineKeyboardMarkup(btns))
 
         elif data.startswith("aprd_en_"):
             await query.answer()
@@ -922,8 +942,12 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         elif data.startswith("aprd_"):
             await query.answer()
             pid=int(data[5:]); p=await get_product(pid)
-            if not p: return
-            await query.message.edit_text(f"📱 {p[1]}\n💰 {p[2]}\n📝 {p[3] or'—'}\n{'✅' if p[6] else '❌'}",reply_markup=aprd_kb(pid,p[7],bool(p[6])))
+            if not p: await query.message.reply_text("❌ محصول یافت نشد.",reply_markup=back_admin()); return
+            txt=fmt_product(p); kb=aprd_kb(pid,p[7] or 0,bool(p[6]))
+            if p[4]:
+                try: await query.message.reply_photo(photo=p[4],caption=txt[:1024],reply_markup=kb); return
+                except: pass
+            await safe_edit(query.message,txt,reply_markup=kb)
 
         # ── درخواست‌ها
         elif data=="admin_reqs":
@@ -1131,7 +1155,12 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             if coming_from_prod and new_rid:
                 ctx.user_data.update({"mode":"acs_new_ic","root_id":new_rid})
                 await update.message.reply_text(f"✅ دسته «{ic} {text}» ساخته شد.\n➕ حالا زیردسته بسازید:\n🎨 آیکون زیردسته:",reply_markup=cancel_menu()); return
-            await update.message.reply_text(f"✅ دسته «{ic} {text}» اضافه شد.",reply_markup=main_menu()); return
+            roots=await get_root_cats(active_only=False)
+            btns=[[InlineKeyboardButton("✨ افزودن محصول جدید",callback_data="aprd_quick_new")]]
+            for c in roots: btns.append([InlineKeyboardButton(f"{'✅' if c[4] else '❌'} {c[2]} {c[1]}",callback_data=f"acr_{c[0]}")])
+            btns+=[[InlineKeyboardButton("➕ دسته اصلی جدید",callback_data="acr_new")],[InlineKeyboardButton("🔙 پنل اصلی",callback_data="back_to_admin")]]
+            await update.message.reply_text(f"✅ دسته «{ic} {text}» اضافه شد.",reply_markup=main_menu())
+            await update.message.reply_text("🛍 مدیریت محصولات:",reply_markup=InlineKeyboardMarkup(btns)); return
         if mode=="acr_edit":
             cat_id=ctx.user_data.pop("cat_id",None); ctx.user_data.pop("mode",None)
             await db.execute("UPDATE categories SET name=? WHERE id=?",(text,cat_id)); await db.commit()
@@ -1148,6 +1177,11 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             if coming_from_prod and new_sid:
                 ctx.user_data.update({"mode":"aprd_n_name","sub_id":new_sid})
                 await update.message.reply_text(f"✅ زیردسته «{ic} {text}» ساخته شد.\n➕ حالا محصول بسازید:\n📱 نام محصول:",reply_markup=cancel_menu()); return
+            if root_id:
+                root=await get_cat(root_id); subs=await get_subcats(root_id,active_only=False)
+                if root:
+                    await update.message.reply_text(f"✅ زیردسته «{ic} {text}» اضافه شد.",reply_markup=main_menu())
+                    await update.message.reply_text(f"📁 {root[2]} {root[1]}\nزیردسته: {to_fa(len(subs))} عدد",reply_markup=acat_sub_kb(root_id,subs)); return
             await update.message.reply_text(f"✅ زیردسته «{ic} {text}» اضافه شد.",reply_markup=main_menu()); return
         if mode=="acs_edit":
             cat_id=ctx.user_data.pop("cat_id",None); ctx.user_data.pop("mode",None)
@@ -1169,22 +1203,48 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             sub_id=ctx.user_data.pop("sub_id",None); name=ctx.user_data.pop("prd_name",""); price=ctx.user_data.pop("prd_price","")
             desc=ctx.user_data.pop("prd_desc",None); url=ctx.user_data.pop("prd_url",None); ctx.user_data.pop("mode",None)
             await db.execute("INSERT INTO products(category_id,name,price,description,photo_id,site_url,is_active,created_at) VALUES(?,?,?,?,?,?,1,?)",(sub_id,name,price,desc,None,url,gregorian_now())); await db.commit()
-            await update.message.reply_text(f"✅ «{name}» اضافه شد.",reply_markup=main_menu()); return
+            await update.message.reply_text(f"✅ محصول «{name}» اضافه شد.",reply_markup=main_menu())
+            if sub_id:
+                sub=await get_cat(sub_id); products=await get_products(sub_id,active_only=False)
+                if sub: await update.message.reply_text(f"📦 {sub[2]} {sub[1]}\nمحصول: {to_fa(len(products))} عدد",reply_markup=acat_products_kb(sub_id,products,sub[3]))
+            return
         if mode=="aprd_e_name":
             pid=ctx.user_data.pop("edit_pid",None); ctx.user_data.pop("mode",None)
-            await db.execute("UPDATE products SET name=? WHERE id=?",(text,pid)); await db.commit()
+            if pid:
+                await db.execute("UPDATE products SET name=? WHERE id=?",(text,pid)); await db.commit()
+                p=await get_product(pid)
+                if p:
+                    await update.message.reply_text(f"✅ نام به «{text}» تغییر کرد.",reply_markup=main_menu())
+                    await update.message.reply_text(fmt_product(p),reply_markup=aprd_kb(pid,p[7] or 0,bool(p[6]))); return
             await update.message.reply_text("✅",reply_markup=main_menu()); return
         if mode=="aprd_e_price":
             pid=ctx.user_data.pop("edit_pid",None); ctx.user_data.pop("mode",None)
-            await db.execute("UPDATE products SET price=? WHERE id=?",(text,pid)); await db.commit()
+            if pid:
+                await db.execute("UPDATE products SET price=? WHERE id=?",(text,pid)); await db.commit()
+                p=await get_product(pid)
+                if p:
+                    await update.message.reply_text(f"✅ قیمت به «{text}» تغییر کرد.",reply_markup=main_menu())
+                    await update.message.reply_text(fmt_product(p),reply_markup=aprd_kb(pid,p[7] or 0,bool(p[6]))); return
             await update.message.reply_text("✅",reply_markup=main_menu()); return
         if mode=="aprd_e_desc":
             pid=ctx.user_data.pop("edit_pid",None); ctx.user_data.pop("mode",None)
-            await db.execute("UPDATE products SET description=? WHERE id=?",(None if text=="." else text,pid)); await db.commit()
+            if pid:
+                val=None if text=="." else text
+                await db.execute("UPDATE products SET description=? WHERE id=?",(val,pid)); await db.commit()
+                p=await get_product(pid)
+                if p:
+                    await update.message.reply_text("✅ توضیح ذخیره شد.",reply_markup=main_menu())
+                    await update.message.reply_text(fmt_product(p),reply_markup=aprd_kb(pid,p[7] or 0,bool(p[6]))); return
             await update.message.reply_text("✅",reply_markup=main_menu()); return
         if mode=="aprd_e_url":
             pid=ctx.user_data.pop("edit_pid",None); ctx.user_data.pop("mode",None)
-            await db.execute("UPDATE products SET site_url=? WHERE id=?",(None if text=="." else text,pid)); await db.commit()
+            if pid:
+                val=None if text=="." else text
+                await db.execute("UPDATE products SET site_url=? WHERE id=?",(val,pid)); await db.commit()
+                p=await get_product(pid)
+                if p:
+                    await update.message.reply_text("✅ لینک ذخیره شد.",reply_markup=main_menu())
+                    await update.message.reply_text(fmt_product(p),reply_markup=aprd_kb(pid,p[7] or 0,bool(p[6]))); return
             await update.message.reply_text("✅",reply_markup=main_menu()); return
 
     # ════ catalog search ════
@@ -1265,10 +1325,19 @@ async def photo_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         sub_id=ctx.user_data.pop("sub_id",None); name=ctx.user_data.pop("prd_name",""); price=ctx.user_data.pop("prd_price","")
         desc=ctx.user_data.pop("prd_desc",None); url=ctx.user_data.pop("prd_url",None); ctx.user_data.pop("mode",None)
         await db.execute("INSERT INTO products(category_id,name,price,description,photo_id,site_url,is_active,created_at) VALUES(?,?,?,?,?,?,1,?)",(sub_id,name,price,desc,photo.file_id,url,gregorian_now())); await db.commit()
-        await update.message.reply_text(f"✅ «{name}» با عکس اضافه شد.",reply_markup=main_menu()); return
+        await update.message.reply_text(f"✅ محصول «{name}» با عکس اضافه شد.",reply_markup=main_menu())
+        if sub_id:
+            sub=await get_cat(sub_id); products=await get_products(sub_id,active_only=False)
+            if sub: await update.message.reply_text(f"📦 {sub[2]} {sub[1]}\nمحصول: {to_fa(len(products))} عدد",reply_markup=acat_products_kb(sub_id,products,sub[3]))
+        return
     if mode=="aprd_e_photo":
         pid=ctx.user_data.pop("edit_pid",None); ctx.user_data.pop("mode",None)
-        await db.execute("UPDATE products SET photo_id=? WHERE id=?",(photo.file_id,pid)); await db.commit()
+        if pid:
+            await db.execute("UPDATE products SET photo_id=? WHERE id=?",(photo.file_id,pid)); await db.commit()
+            p=await get_product(pid)
+            if p:
+                await update.message.reply_text("✅ عکس محصول ذخیره شد.",reply_markup=main_menu())
+                await update.message.reply_photo(photo=p[4],caption=fmt_product(p)[:1024],reply_markup=aprd_kb(pid,p[7] or 0,bool(p[6]))); return
         await update.message.reply_text("✅ عکس ذخیره شد.",reply_markup=main_menu()); return
 
 # ════════════════════════════════════════════════
