@@ -377,15 +377,24 @@ def admin_menu():
          InlineKeyboardButton("💾 پشتیبان‌گیری",callback_data="backup")],
     ])
 
+# ترتیب نمایش بخش‌ها — دقیقاً مطابق منوی کاربر
+SECTION_ORDER = ["welcome","1","2","3","4","5","catalog","workhours"]
+
 def sections_kb():
-    btns=[]
-    for key,name in SECTION_NAMES.items():
+    btns=[]; row=[]
+    for key in SECTION_ORDER:
+        if key not in SECTION_NAMES: continue
+        name=SECTION_NAMES[key]
         cont=responses.get(key,"") if responses else ""
         b=get_banner(key); sec=get_sec_btns(key)
-        t="📝" if cont and cont not in("تنظیم نشده","") else "‌ ·"
-        bi="🖼" if b.get("active") and b.get("file_id") else " ·"
-        n=len(sec.get("items",[])); si=f"🔗{to_fa(n)}" if sec.get("enabled") and n else " ·"
-        btns.append([InlineKeyboardButton(f"{name}   {t} {bi} {si}",callback_data=f"sec_{key}")])
+        mark=""
+        if cont and cont not in("تنظیم نشده",""): mark+="📝"
+        if b.get("active") and b.get("file_id"): mark+="🖼"
+        if sec.get("enabled") and sec.get("items"): mark+="🔗"
+        label=f"{name}  {mark}" if mark else name
+        row.append(InlineKeyboardButton(label,callback_data=f"sec_{key}"))
+        if len(row)==2: btns.append(row); row=[]
+    if row: btns.append(row)
     btns.append([InlineKeyboardButton("🔙 پنل اصلی",callback_data="back_to_admin")])
     return InlineKeyboardMarkup(btns)
 
@@ -603,7 +612,7 @@ async def user_cb(query,ctx):
         wh=wh_today_block() or""
         msg=f"🕐 ساعت کاری استوک لند\n{wh}"
         kb=InlineKeyboardMarkup([[InlineKeyboardButton("📆 ساعت کار هفتگی مجموعه",callback_data="wh_weekly")]])
-        await query.message.edit_text(msg,reply_markup=kb); return
+        await safe_edit(query.message,msg,reply_markup=kb); return
 
     if data=="cat_back":
         cats=await get_root_cats()
@@ -706,7 +715,7 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
                   f"\n🗓  فعال ماه:    {to_fa(m)}   {progress_bar(m,t)}"
                   f"\n{sep}")
             if len(dash)>4000: dash=dash[:3990]+"..."
-            await query.message.edit_text(dash,reply_markup=admin_menu())
+            await safe_edit(query.message,dash,reply_markup=admin_menu())
 
         elif data=="broadcast":
             await query.answer()
@@ -731,7 +740,7 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         # ── مدیریت بخش‌ها — یکپارچه برای تمام بخش‌ها
         elif data=="sections":
             await query.answer()
-            await query.message.edit_text("📋 مدیریت بخش‌ها:",reply_markup=sections_kb())
+            await safe_edit(query.message,"📋 مدیریت بخش‌ها:",reply_markup=sections_kb())
 
         elif data.startswith("sec_") and not any(data.startswith(p) for p in["sec_text_","sec_ban_","sec_btns_"]):
             await query.answer()
@@ -740,7 +749,7 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             txt_ok="✅" if responses.get(key,"") not in ("","تنظیم نشده") else "❌"
             ban_ok="✅ فعال" if get_banner(key).get("active") and get_banner(key).get("file_id") else "❌"
             btn_ok=f"{len(get_sec_btns(key).get('items',[]))} {'✅' if get_sec_btns(key).get('enabled') else '❌'}"
-            try: await query.message.edit_text(
+            try: await safe_edit(query.message,
                 f"📋 بخش: {SECTION_NAMES.get(key,key)}\n{'─'*14}"
                 f"\n✏️ متن: {txt_ok}\n🖼 بنر: {ban_ok}\n🔘 دکمه: {btn_ok}",
                 reply_markup=section_kb(key))
@@ -754,7 +763,7 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         elif data.startswith("sec_ban_"):
             await query.answer()
             key=data[8:]; b=get_banner(key)
-            await query.message.edit_text(
+            await safe_edit(query.message,
                 f"🖼 بنر: {SECTION_NAMES.get(key,key)}\n"
                 f"{'✅ آپلود شده' if b.get('file_id') else '❌ ندارد'} | {'✅ فعال' if b.get('active') else '❌ غیرفعال'}",
                 reply_markup=banner_kb(key))
@@ -769,17 +778,17 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             if not b.get("file_id"): await query.answer("ابتدا عکس آپلود کنید!",show_alert=True); return
             b["active"]=not b.get("active",False); await save_banners()
             await query.answer("✅ فعال" if b["active"] else"❌ غیرفعال",show_alert=True)
-            await query.message.edit_text(f"🖼 {SECTION_NAMES.get(key,key)} | {'✅ فعال' if b['active'] else '❌ غیرفعال'}",reply_markup=banner_kb(key))
+            await safe_edit(query.message,f"🖼 {SECTION_NAMES.get(key,key)} | {'✅ فعال' if b['active'] else '❌ غیرفعال'}",reply_markup=banner_kb(key))
 
         elif data.startswith("ban_dl_"):
             key=data[7:]; banners[key]={"file_id":None,"active":False}; await save_banners()
             await query.answer("🗑 حذف شد.",show_alert=True)
-            await query.message.edit_text(f"🖼 {SECTION_NAMES.get(key,key)} | ❌",reply_markup=banner_kb(key))
+            await safe_edit(query.message,f"🖼 {SECTION_NAMES.get(key,key)} | ❌",reply_markup=banner_kb(key))
 
         elif data.startswith("sec_btns_"):
             await query.answer()
             key=data[9:]; sec=get_sec_btns(key)
-            await query.message.edit_text(
+            await safe_edit(query.message,
                 f"🔘 دکمه‌های {SECTION_NAMES.get(key,key)}\n"
                 f"{'✅ فعال' if sec.get('enabled') else '❌ غیرفعال'} | {to_fa(len(sec.get('items',[])))} عدد",
                 reply_markup=sec_btns_kb(key))
@@ -787,7 +796,7 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         elif data.startswith("btn_tg_"):
             key=data[7:]; sec=get_sec_btns(key); sec["enabled"]=not sec.get("enabled",False); await save_buttons()
             await query.answer("✅ فعال" if sec["enabled"] else"❌ غیرفعال",show_alert=True)
-            await query.message.edit_text(f"🔘 {SECTION_NAMES.get(key,key)} | {'✅' if sec['enabled'] else '❌'}",reply_markup=sec_btns_kb(key))
+            await safe_edit(query.message,f"🔘 {SECTION_NAMES.get(key,key)} | {'✅' if sec['enabled'] else '❌'}",reply_markup=sec_btns_kb(key))
 
         elif data.startswith("btn_add_"):
             await query.answer()
@@ -806,7 +815,7 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             parts=data[7:].split("_",1); key,bid=parts[0],parts[1]
             sec=get_sec_btns(key); sec["items"]=[x for x in sec.get("items",[]) if x["id"]!=bid]; await save_buttons()
             await query.answer("🗑 حذف شد.",show_alert=True)
-            await query.message.edit_text(f"🔘 {SECTION_NAMES.get(key,key)}",reply_markup=sec_btns_kb(key))
+            await safe_edit(query.message,f"🔘 {SECTION_NAMES.get(key,key)}",reply_markup=sec_btns_kb(key))
 
         # ── مدیریت محصولات (ادمین) — اسم تغییر کرد، باگ باز نشدن رفع شد
         elif data=="admin_catalog":
@@ -825,7 +834,7 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             btns=[[InlineKeyboardButton(f"{c[2]} {c[1]}",callback_data=f"aprd_qn_root_{c[0]}")] for c in roots]
             btns.append([InlineKeyboardButton("➕ دسته جدید بساز",callback_data="aprd_qn_newroot")])
             btns.append([InlineKeyboardButton("🔙",callback_data="admin_catalog")])
-            await query.message.edit_text("📦 دسته محصول را انتخاب کنید:",reply_markup=InlineKeyboardMarkup(btns))
+            await safe_edit(query.message,"📦 دسته محصول را انتخاب کنید:",reply_markup=InlineKeyboardMarkup(btns))
 
         elif data=="aprd_qn_newroot":
             await query.answer()
@@ -839,7 +848,7 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             btns=[[InlineKeyboardButton(f"{s[2]} {s[1]}",callback_data=f"aprd_qn_sub_{s[0]}")] for s in subs]
             btns.append([InlineKeyboardButton("➕ زیردسته جدید بساز",callback_data=f"aprd_qn_newsub_{root_id}")])
             btns.append([InlineKeyboardButton("🔙",callback_data="aprd_quick_new")])
-            await query.message.edit_text(f"📁 {root[2]} {root[1]}\nزیردسته را انتخاب کنید:",reply_markup=InlineKeyboardMarkup(btns))
+            await safe_edit(query.message,f"📁 {root[2]} {root[1]}\nزیردسته را انتخاب کنید:",reply_markup=InlineKeyboardMarkup(btns))
 
         elif data.startswith("aprd_qn_newsub_"):
             await query.answer()
@@ -891,7 +900,7 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             root_id=int(data[4:]); root=await get_cat(root_id)
             if not root: return
             subs=await get_subcats(root_id,active_only=False)
-            await query.message.edit_text(f"📁 {root[2]} {root[1]}\nزیردسته: {to_fa(len(subs))} عدد",reply_markup=acat_sub_kb(root_id,subs))
+            await safe_edit(query.message,f"📁 {root[2]} {root[1]}\nزیردسته: {to_fa(len(subs))} عدد",reply_markup=acat_sub_kb(root_id,subs))
 
         elif data.startswith("acs_new_"):
             await query.answer()
@@ -929,7 +938,7 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             sub_id=int(data[4:]); sub=await get_cat(sub_id)
             if not sub: return
             products=await get_products(sub_id,active_only=False); root_id=sub[3]
-            await query.message.edit_text(f"📦 {sub[2]} {sub[1]}\nمحصول: {to_fa(len(products))} عدد",reply_markup=acat_products_kb(sub_id,products,root_id))
+            await safe_edit(query.message,f"📦 {sub[2]} {sub[1]}\nمحصول: {to_fa(len(products))} عدد",reply_markup=acat_products_kb(sub_id,products,root_id))
 
         elif data.startswith("aprd_new_"):
             await query.answer()
@@ -1003,14 +1012,14 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         elif data=="admin_reqs":
             await query.answer()
             reqs=await get_requests()
-            if not reqs: await query.message.edit_text("📋 درخواستی وجود ندارد.",reply_markup=back_admin()); return
+            if not reqs: await safe_edit(query.message,"📋 درخواستی وجود ندارد.",reply_markup=back_admin()); return
             nc=sum(1 for r in reqs if r[6]=="new")
-            await query.message.edit_text(f"📋 درخواست‌ها\n🆕 جدید: {to_fa(nc)} | کل: {to_fa(len(reqs))}",reply_markup=reqs_kb(reqs))
+            await safe_edit(query.message,f"📋 درخواست‌ها\n🆕 جدید: {to_fa(nc)} | کل: {to_fa(len(reqs))}",reply_markup=reqs_kb(reqs))
 
         elif data.startswith("rq_done_"):
             rid=int(data[8:]); await done_request(rid)
             await query.answer("✅",show_alert=True)
-            await query.message.edit_text("✅ پیگیری شد.",reply_markup=back_admin())
+            await safe_edit(query.message,"✅ پیگیری شد.",reply_markup=back_admin())
 
         elif data.startswith("rq_"):
             await query.answer()
@@ -1027,30 +1036,30 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
                  f"\n🆔 {r[1]}  {'@'+r[2] if r[2] else ''}"
                  f"\n⏱ {r[7]}"
                  f"\n{sep}\n{st2}")
-            await query.message.edit_text(txt,reply_markup=req_kb(rid,r[6]))
+            await safe_edit(query.message,txt,reply_markup=req_kb(rid,r[6]))
 
         # ── ساعت کاری
         elif data=="wh_menu":
             await query.answer()
             en="✅ فعال" if workhours.get("enabled") else"❌ غیرفعال"
-            await query.message.edit_text(f"🕐 ساعت کاری — {en}\n\n{wh_full_table()}",reply_markup=wh_kb())
+            await safe_edit(query.message,f"🕐 ساعت کاری — {en}\n\n{wh_full_table()}",reply_markup=wh_kb())
 
         elif data=="wh_toggle":
             workhours["enabled"]=not workhours.get("enabled",True); await save_workhours()
             await query.answer("✅ فعال" if workhours["enabled"] else"❌ غیرفعال",show_alert=True)
-            await query.message.edit_text(f"🕐 ساعت کاری\n{wh_full_table()}",reply_markup=wh_kb())
+            await safe_edit(query.message,f"🕐 ساعت کاری\n{wh_full_table()}",reply_markup=wh_kb())
 
         elif data.startswith("wh_day_"):
             await query.answer()
             dk=data[7:]; day=workhours["schedule"].get(dk,{"open":False,"shifts":[]})
             st2="\n".join(f"  • {to_fa(s['from'])} تا {to_fa(s['to'])}" for s in day.get("shifts",[])) or"  ندارد"
-            await query.message.edit_text(f"🕐 {DAY_FA.get(dk,dk)}\n{'✅ باز' if day.get('open') else '❌ تعطیل'}\n{st2}",reply_markup=wh_day_kb(dk))
+            await safe_edit(query.message,f"🕐 {DAY_FA.get(dk,dk)}\n{'✅ باز' if day.get('open') else '❌ تعطیل'}\n{st2}",reply_markup=wh_day_kb(dk))
 
         elif data.startswith("wh_dtg_"):
             dk=data[7:]; day=workhours["schedule"].get(dk,{"open":False,"shifts":[]})
             day["open"]=not day.get("open",False); workhours["schedule"][dk]=day; await save_workhours()
             await query.answer("✅ باز" if day["open"] else"❌ تعطیل",show_alert=True)
-            await query.message.edit_text(f"🕐 {DAY_FA.get(dk,dk)} | {'✅ باز' if day['open'] else '❌ تعطیل'}",reply_markup=wh_day_kb(dk))
+            await safe_edit(query.message,f"🕐 {DAY_FA.get(dk,dk)} | {'✅ باز' if day['open'] else '❌ تعطیل'}",reply_markup=wh_day_kb(dk))
 
         elif data.startswith("wh_sh_"):
             await query.answer()
@@ -1070,18 +1079,18 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         # ── تنظیمات
         elif data=="settings_menu":
             await query.answer()
-            await query.message.edit_text("⚙️ تنظیمات:",reply_markup=settings_kb())
+            await safe_edit(query.message,"⚙️ تنظیمات:",reply_markup=settings_kb())
 
         elif data.startswith("stg_"):
             key=data[4:]; settings[key]=not get_setting(key); await save_settings()
             await query.answer("✅ ذخیره شد",show_alert=True)
-            await query.message.edit_text("⚙️ تنظیمات:",reply_markup=settings_kb())
+            await safe_edit(query.message,"⚙️ تنظیمات:",reply_markup=settings_kb())
 
         # ── کاربران
         elif data=="users_menu":
             await query.answer()
             t=await total_users(); bl=await blk_count()
-            await query.message.edit_text(f"👥 کاربران\nکل: {to_fa(t)} | بلاک: {to_fa(bl)}",reply_markup=users_menu_kb())
+            await safe_edit(query.message,f"👥 کاربران\nکل: {to_fa(t)} | بلاک: {to_fa(bl)}",reply_markup=users_menu_kb())
 
         elif data=="users_search":
             await query.answer()
@@ -1095,7 +1104,7 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             total=await _cnt(f"SELECT COUNT(*) FROM users {flt.get(ft,'')}")
             rows=await get_users_page(off,15,ft)
             label={"all":"همه","today":"امروز","week":"هفته","blocked":"بلاک"}.get(ft,"")
-            await query.message.edit_text(f"👥 {label}\n{to_fa(off+1)} تا {to_fa(min(off+15,total))} از {to_fa(total)}:",reply_markup=users_list_kb(rows,off,ft,total))
+            await safe_edit(query.message,f"👥 {label}\n{to_fa(off+1)} تا {to_fa(min(off+15,total))} از {to_fa(total)}:",reply_markup=users_list_kb(rows,off,ft,total))
 
         elif data.startswith("uv_"):
             uid2=int(data[3:])
@@ -1111,7 +1120,7 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
                   f"\n🕐 آخرین فعالیت: {row[4]}"
                   f"\n{sep}"
                   f"\n{'🚫 بلاک‌شده' if row[5] else '✅ فعال'}")
-            await query.message.edit_text(utxt,reply_markup=udetail_kb(uid2,bool(row[5])))
+            await safe_edit(query.message,utxt,reply_markup=udetail_kb(uid2,bool(row[5])))
 
         elif data.startswith("utog_"):
             uid2=int(data[5:])
@@ -1120,7 +1129,7 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             await set_block(uid2,0 if row[0] else 1)
             await query.answer("✅ رفع بلاک" if row[0] else"🚫 بلاک شد",show_alert=True)
             async with db.execute("SELECT user_id,first_name,username,joined_at,last_seen,is_blocked FROM users WHERE user_id=?",(uid2,)) as c: row=await c.fetchone()
-            await query.message.edit_text(f"👤 {row[1] or'—'}\n🆔 {row[0]}\n{'🚫 بلاک' if row[5] else '✅ فعال'}",reply_markup=udetail_kb(uid2,bool(row[5])))
+            await safe_edit(query.message,f"👤 {row[1] or'—'}\n🆔 {row[0]}\n{'🚫 بلاک' if row[5] else '✅ فعال'}",reply_markup=udetail_kb(uid2,bool(row[5])))
 
         else:
             await query.answer()
