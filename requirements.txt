@@ -1,4 +1,5 @@
-python-telegram-bot==21.6
+#python-telegram-bot==21.6
+python-telegram-bot==21.11.1
 aiosqlite==0.20.0
 aiofiles==24.1.0
 jdatetime==5.0.0
