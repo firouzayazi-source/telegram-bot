@@ -37,9 +37,10 @@ def gregorian_now(): return datetime.now(IRAN_TZ).strftime("%Y-%m-%d %H:%M:%S")
 # ── منو
 MENU_ITEMS = {"1":"🌐 شبکه‌های اجتماعی","2":"🌐 سایت استوک لند",
               "3":"💰 شرایط اقساط","4":"📞 پشتیبانی","5":"📍 آدرس فروشگاه"}
-SECTION_NAMES = {"welcome":"🏠 خوش‌آمدگویی","1":"🌐 شبکه‌های اجتماعی",
-                 "2":"🌐 سایت استوک لند","3":"💰 شرایط اقساط",
-                 "4":"📞 پشتیبانی","5":"📍 آدرس فروشگاه"}
+SECTION_NAMES = {"welcome":"🏠 خوش‌آمدگویی",
+                 "catalog":"🛍 محصولات","workhours":"🕐 ساعت کاری",
+                 "1":"🌐 شبکه‌های اجتماعی","2":"🌐 سایت استوک لند",
+                 "3":"💰 شرایط اقساط","4":"📞 پشتیبانی","5":"📍 آدرس فروشگاه"}
 
 # ── state
 responses=None; banners={}; workhours={}; buttons={}; settings={}; stats={}
@@ -775,8 +776,11 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         elif data=="admin_catalog":
             await query.answer()
             roots=await get_root_cats(active_only=False)
-            kb=acat_root_kb(roots); btns=kb.inline_keyboard[:]
-            btns.insert(0,[InlineKeyboardButton("✨ افزودن محصول جدید",callback_data="aprd_quick_new")])
+            btns=[[InlineKeyboardButton("✨ افزودن محصول جدید",callback_data="aprd_quick_new")]]
+            for c in roots:
+                btns.append([InlineKeyboardButton(f"{'✅' if c[4] else '❌'} {c[2]} {c[1]}",callback_data=f"acr_{c[0]}")])
+            btns.append([InlineKeyboardButton("➕ دسته اصلی جدید",callback_data="acr_new")])
+            btns.append([InlineKeyboardButton("🔙",callback_data="back_to_admin")])
             await safe_edit(query.message,"🛍 مدیریت محصولات:",reply_markup=InlineKeyboardMarkup(btns))
 
         elif data=="aprd_quick_new":
@@ -1183,15 +1187,25 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         if not workhours.get("enabled",True): await update.message.reply_text("🕐 ساعت کاری تنظیم نشده.",reply_markup=main_menu()); return
         wh=wh_today_block() or""
         ft=("\n"+"─"*17+f"\n⏱ {shamsi_now()}") if get_setting("show_datetime_footer") else""
-        msg=f"🕐 ساعت کاری استوک لند\n{wh}{ft}"
+        sec_txt=responses.get("workhours","") if responses else ""
+        intro=f"{sec_txt}\n\n" if sec_txt and sec_txt not in("","تنظیم نشده") else ""
+        msg=f"🕐 ساعت کاری استوک لند\n{intro}{wh}{ft}"
         if len(msg)>4000: msg=msg[:3990]+"..."
-        kb=InlineKeyboardMarkup([[InlineKeyboardButton("📆 ساعت کار هفتگی مجموعه",callback_data="wh_weekly")]])
-        await update.message.reply_text(msg,reply_markup=kb); return
+        wh_rows=[[InlineKeyboardButton("📆 ساعت کار هفتگی مجموعه",callback_data="wh_weekly")]]
+        sec_kb=user_sec_kb("workhours")
+        if sec_kb: wh_rows+=[list(r) for r in sec_kb.inline_keyboard]
+        await send_banner(update.message,msg,"workhours",kb=InlineKeyboardMarkup(wh_rows)); return
 
     if text=="🛍 محصولات":
         await record_stat("catalog"); cats=await get_root_cats()
         if not cats: await update.message.reply_text("📫 محصولی موجود نیست.",reply_markup=main_menu()); return
-        await update.message.reply_text("🛍 محصولات استوک لند\nدسته‌بندی را انتخاب کنید:",reply_markup=cat_root_kb(cats)); return
+        sec_txt=responses.get("catalog","") if responses else ""
+        intro=f"{sec_txt}\n\n" if sec_txt and sec_txt not in("","تنظیم نشده") else ""
+        msg=f"🛍 محصولات استوک لند\n{intro}دسته‌بندی را انتخاب کنید:"
+        cat_rows=[list(r) for r in cat_root_kb(cats).inline_keyboard]
+        sec_kb=user_sec_kb("catalog")
+        if sec_kb: cat_rows+=[list(r) for r in sec_kb.inline_keyboard]
+        await send_banner(update.message,msg,"catalog",kb=InlineKeyboardMarkup(cat_rows)); return
 
     # تمام بخش‌های منو یکپارچه — user_sec_kb برای همه بخش‌ها
     for k,v in MENU_ITEMS.items():
