@@ -54,8 +54,8 @@ DEFAULT_WH = {"enabled":True,"schedule":{
     "5":{"open":True,"shifts":[{"from":"11:00","to":"14:00"},{"from":"17:00","to":"23:00"}]},
     "6":{"open":True,"shifts":[{"from":"17:00","to":"23:00"}]}},
     "msg_open":"✅ هم‌اکنون باز است","msg_closed":"🔴 هم‌اکنون بسته است"}
-DEFAULT_SETTINGS = {"show_datetime_footer":True,"show_workhours_menu":True,
-                    "show_catalog_menu":True,"notify_new_user":True,"store_open":True}
+DEFAULT_SETTINGS = {"show_workhours_menu":True,"show_catalog_menu":True,
+                    "notify_new_user":True,"store_open":True}
 DEFAULT_SEC_WH = {k:True for k in SECTION_NAMES}
 
 # ── helpers
@@ -99,9 +99,7 @@ def wh_full_table():
     return "\n".join(rows)
 
 def build_msg(title,content,sec_key):
-    ft=f"⏱ {shamsi_now()}" if get_setting("show_datetime_footer") else ""
-    lines=[f"✦ {title}","",content,""]
-    if ft: lines+=["─"*18,"",ft]
+    lines=[f"✦ {title}","",content]
     msg="\n".join(lines)
     return msg[:4000]+"..." if len(msg)>4000 else msg
 
@@ -169,6 +167,12 @@ async def save_stats(): await _wj(STATS_FILE,stats)
 db=None
 
 async def safe_edit(msg,text,**kw):
+    # اگر پیام عکس/کپشن دارد، edit_text کار نمی‌کند → پیام را حذف و پیام متنی جدید بفرست
+    if getattr(msg,"photo",None) or getattr(msg,"caption",None) is not None:
+        try: await msg.delete()
+        except: pass
+        try: await msg.reply_text(text,**kw); return
+        except Exception as e: logger.error(f"safe_edit(photo): {e}"); return
     try: await msg.edit_text(text,**kw)
     except Exception as e:
         if "not modified" in str(e).lower(): return
@@ -270,6 +274,23 @@ async def get_requests():
     async with db.execute("SELECT id,user_id,username,first_name,phone,product_name,status,created_at FROM requests ORDER BY id DESC LIMIT 30") as c: return await c.fetchall()
 
 async def done_request(rid): await db.execute("UPDATE requests SET status='done' WHERE id=?",(rid,)); await db.commit()
+
+# ── cascade delete helpers
+async def delete_root_cat(root_id):
+    """حذف دسته اصلی + همه زیردسته‌ها + همه محصولات زیرمجموعه"""
+    subs=await get_subcats(root_id,active_only=False)
+    for s in subs:
+        await db.execute("DELETE FROM products WHERE category_id=?",(s[0],))
+        await db.execute("DELETE FROM categories WHERE id=?",(s[0],))
+    await db.execute("DELETE FROM products WHERE category_id=?",(root_id,))
+    await db.execute("DELETE FROM categories WHERE id=?",(root_id,))
+    await db.commit()
+
+async def delete_sub_cat(sub_id):
+    """حذف زیردسته + همه محصولاتش"""
+    await db.execute("DELETE FROM products WHERE category_id=?",(sub_id,))
+    await db.execute("DELETE FROM categories WHERE id=?",(sub_id,))
+    await db.commit()
 
 # ── anti-spam
 _W,_L,_B=10,7,60; _spam=defaultdict(lambda:deque(maxlen=_L)); _blk={}
@@ -423,7 +444,6 @@ def wh_day_kb(dk):
 def settings_kb():
     def t(k): return"🟢" if get_setting(k) else"⚫️"
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"{t('show_datetime_footer')} تاریخ و ساعت",callback_data="stg_show_datetime_footer")],
         [InlineKeyboardButton(f"{t('show_workhours_menu')} ساعت کاری در منو",callback_data="stg_show_workhours_menu"),
          InlineKeyboardButton(f"{t('show_catalog_menu')} محصولات در منو",callback_data="stg_show_catalog_menu")],
         [InlineKeyboardButton(f"{t('notify_new_user')} اعلان عضو جدید",callback_data="stg_notify_new_user")],
@@ -581,15 +601,14 @@ async def user_cb(query,ctx):
 
     if data=="wh_back_today":
         wh=wh_today_block() or""
-        ft=("\n"+"─"*17+f"\n⏱ {shamsi_now()}") if get_setting("show_datetime_footer") else""
-        msg=f"🕐 ساعت کاری استوک لند\n{wh}{ft}"
+        msg=f"🕐 ساعت کاری استوک لند\n{wh}"
         kb=InlineKeyboardMarkup([[InlineKeyboardButton("📆 ساعت کار هفتگی مجموعه",callback_data="wh_weekly")]])
         await query.message.edit_text(msg,reply_markup=kb); return
 
     if data=="cat_back":
         cats=await get_root_cats()
         if not cats: await safe_edit(query.message,"📫 محصولی موجود نیست."); return
-        await safe_edit(query.message,"🛍 محصولات استوک لند\nدسته‌بندی را انتخاب کنید:",reply_markup=cat_root_kb(cats)); return
+        await safe_edit(query.message,"🛍 محصولات استوک لند\nیک دسته‌بندی را انتخاب کنید:",reply_markup=cat_root_kb(cats)); return
 
     if data=="cat_search":
         ctx.user_data["mode"]="cat_search"
@@ -599,43 +618,42 @@ async def user_cb(query,ctx):
         sub_id=int(data[8:]); sub=await get_cat(sub_id)
         if not sub: return
         root=await get_cat(sub[3]); subs=await get_subcats(sub[3])
-        await query.message.edit_text(f"📁 {root[2] if root else ''} {root[1] if root else ''}",reply_markup=cat_sub_kb(subs,sub[3])); return
+        await safe_edit(query.message,f"📁 {root[2] if root else ''} {root[1] if root else ''}\nزیردسته را انتخاب کنید:",reply_markup=cat_sub_kb(subs,sub[3])); return
 
     if data.startswith("cr_"):
         root_id=int(data[3:]); root=await get_cat(root_id)
         if not root: return
         subs=await get_subcats(root_id)
         if not subs:
-            await query.message.edit_text(f"📁 {root[2]} {root[1]}\n📫 زیردسته‌ای موجود نیست.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙",callback_data="cat_back")]])); return
-        await query.message.edit_text(f"📁 {root[2]} {root[1]}\nزیردسته را انتخاب کنید:",reply_markup=cat_sub_kb(subs,root_id)); return
+            await safe_edit(query.message,f"📁 {root[2]} {root[1]}\n\n📫 هنوز زیردسته‌ای ثبت نشده.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 برگشت",callback_data="cat_back")]])); return
+        await safe_edit(query.message,f"📁 {root[2]} {root[1]}\nزیردسته را انتخاب کنید:",reply_markup=cat_sub_kb(subs,root_id)); return
 
     if data.startswith("cs_back_"):
         sub_id=int(data[8:]); sub=await get_cat(sub_id)
         if not sub: return
         products=await get_products(sub_id); title=f"📦 {sub[2]} {sub[1]}"
         if not products:
-            await query.message.edit_text(f"{title}\n📫 محصولی موجود نیست.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙",callback_data=f"cr_{sub[3]}")]])); return
-        await query.message.edit_text(f"{title}\n{to_fa(len(products))} محصول:",reply_markup=cat_products_kb(products,sub_id)); return
+            await safe_edit(query.message,f"{title}\n\n📫 محصولی موجود نیست.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 برگشت",callback_data=f"cr_{sub[3]}")]])); return
+        await safe_edit(query.message,f"{title}\n{to_fa(len(products))} محصول:",reply_markup=cat_products_kb(products,sub_id)); return
 
     if data.startswith("cs_"):
         sub_id=int(data[3:]); sub=await get_cat(sub_id)
         if not sub: return
         products=await get_products(sub_id); title=f"📦 {sub[2]} {sub[1]}"
         if not products:
-            await query.message.edit_text(f"{title}\n📫 محصولی موجود نیست.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙",callback_data=f"cr_{sub[3]}")]])); return
-        await query.message.edit_text(f"{title}\n{to_fa(len(products))} محصول:",reply_markup=cat_products_kb(products,sub_id)); return
+            await safe_edit(query.message,f"{title}\n\n📫 محصولی موجود نیست.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 برگشت",callback_data=f"cr_{sub[3]}")]])); return
+        await safe_edit(query.message,f"{title}\n{to_fa(len(products))} محصول:",reply_markup=cat_products_kb(products,sub_id)); return
 
     if data.startswith("prd_"):
         pid=int(data[4:]); p=await get_product(pid)
         if not p: return
         await record_stat(f"prd_{pid}")
-        ft=("\n\n─"*9+f"\n⏱ {shamsi_now()}") if get_setting("show_datetime_footer") else ""
         text=f"📱 {p[1]}\n{'─'*18}\n💰 قیمت:  {p[2]}"
         if p[3]: text+=f"\n\n📝 {p[3]}"
-        text+=ft; kb=product_kb(p)
+        kb=product_kb(p)
         if p[4]:
             try: await query.message.reply_photo(photo=p[4],caption=text[:1024],reply_markup=kb); return
             except Exception as e: logger.error(f"prd photo {pid}: {e}")
@@ -844,14 +862,29 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             rid=int(data[7:]); ctx.user_data.update({"mode":"acr_edit","cat_id":rid})
             await query.message.reply_text("✏️ نام جدید دسته اصلی:",reply_markup=cancel_menu())
 
-        elif data.startswith("acr_dl_"):
-            rid=int(data[7:]); await db.execute("UPDATE categories SET is_active=0 WHERE id=?",(rid,)); await db.commit()
-            await query.answer("🗑 غیرفعال شد.",show_alert=True)
+        elif data.startswith("acr_delok_"):
+            rid=int(data[10:]); root=await get_cat(rid)
+            await delete_root_cat(rid)
+            await query.answer("🗑 دسته و تمام محتوایش حذف شد.",show_alert=True)
             roots=await get_root_cats(active_only=False)
             btns=[[InlineKeyboardButton("✨ افزودن محصول جدید",callback_data="aprd_quick_new")]]
             for c in roots: btns.append([InlineKeyboardButton(f"{'✅' if c[4] else '❌'} {c[2]} {c[1]}",callback_data=f"acr_{c[0]}")])
             btns+=[[InlineKeyboardButton("➕ دسته اصلی جدید",callback_data="acr_new")],[InlineKeyboardButton("🔙 پنل اصلی",callback_data="back_to_admin")]]
-            await query.message.edit_text("🛍 مدیریت محصولات:",reply_markup=InlineKeyboardMarkup(btns))
+            await safe_edit(query.message,"🛍 مدیریت محصولات:",reply_markup=InlineKeyboardMarkup(btns))
+
+        elif data.startswith("acr_dl_"):
+            await query.answer()
+            rid=int(data[7:]); root=await get_cat(rid)
+            subs=await get_subcats(rid,active_only=False)
+            ncount=0
+            for s in subs:
+                ps=await get_products(s[0],active_only=False); ncount+=len(ps)
+            await safe_edit(query.message,
+                f"⚠️ حذف دسته «{root[2] if root else ''} {root[1] if root else ''}»\n\n"
+                f"این کار {to_fa(len(subs))} زیردسته و {to_fa(ncount)} محصول را برای همیشه حذف می‌کند.\n\nمطمئن هستید؟",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🗑 بله، حذف کن",callback_data=f"acr_delok_{rid}")],
+                    [InlineKeyboardButton("↩️ انصراف",callback_data=f"acr_{rid}")]]))
 
         elif data.startswith("acr_"):
             await query.answer()
@@ -870,13 +903,26 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             sid=int(data[7:]); ctx.user_data.update({"mode":"acs_edit","cat_id":sid})
             await query.message.reply_text("✏️ نام جدید زیردسته:",reply_markup=cancel_menu())
 
-        elif data.startswith("acs_dl_"):
-            sid=int(data[7:]); sub=await get_cat(sid); root_id=sub[3] if sub else None
-            await db.execute("UPDATE categories SET is_active=0 WHERE id=?",(sid,)); await db.commit()
-            await query.answer("🗑 غیرفعال شد.",show_alert=True)
+        elif data.startswith("acs_delok_"):
+            sid=int(data[10:]); sub=await get_cat(sid); root_id=sub[3] if sub else None
+            await delete_sub_cat(sid)
+            await query.answer("🗑 زیردسته و محصولاتش حذف شد.",show_alert=True)
             if root_id:
                 subs=await get_subcats(root_id,active_only=False); root=await get_cat(root_id)
-                await query.message.edit_text(f"📁 {root[2] if root else ''} {root[1] if root else ''}",reply_markup=acat_sub_kb(root_id,subs))
+                await safe_edit(query.message,f"📁 {root[2] if root else ''} {root[1] if root else ''}\nزیردسته: {to_fa(len(subs))} عدد",reply_markup=acat_sub_kb(root_id,subs))
+            else:
+                await safe_edit(query.message,"🛍 مدیریت محصولات:",reply_markup=acat_root_kb(await get_root_cats(active_only=False)))
+
+        elif data.startswith("acs_dl_"):
+            await query.answer()
+            sid=int(data[7:]); sub=await get_cat(sid)
+            ps=await get_products(sid,active_only=False)
+            await safe_edit(query.message,
+                f"⚠️ حذف زیردسته «{sub[2] if sub else ''} {sub[1] if sub else ''}»\n\n"
+                f"این کار {to_fa(len(ps))} محصول را برای همیشه حذف می‌کند.\n\nمطمئن هستید؟",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🗑 بله، حذف کن",callback_data=f"acs_delok_{sid}")],
+                    [InlineKeyboardButton("↩️ انصراف",callback_data=f"acs_{sid}")]]))
 
         elif data.startswith("acs_"):
             await query.answer()
@@ -894,25 +940,29 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             pid=int(data[9:]); p=await get_product(pid)
             if not p: return
             await db.execute("UPDATE products SET is_active=? WHERE id=?",(0 if p[6] else 1,pid)); await db.commit()
-            await query.answer("✅ فعال" if not p[6] else"❌ غیرفعال",show_alert=True)
+            await query.answer("✅ فعال شد" if not p[6] else"❌ غیرفعال شد",show_alert=True)
             p=await get_product(pid)
-            await query.message.edit_text(f"📱 {p[1]}\n💰 {p[2]}\n{'✅' if p[6] else '❌'}",reply_markup=aprd_kb(pid,p[7],bool(p[6])))
+            await safe_edit(query.message,fmt_product(p),reply_markup=aprd_kb(pid,p[7] or 0,bool(p[6])))
 
-        elif data.startswith("aprd_del_"):
-            pid=int(data[9:]); p=await get_product(pid); sub_id=p[7] if p else None
+        elif data.startswith("aprd_delok_"):
+            pid=int(data[11:]); p=await get_product(pid); sub_id=p[7] if p else None
             await db.execute("DELETE FROM products WHERE id=?",(pid,)); await db.commit()
             await query.answer("🗑 محصول حذف شد.",show_alert=True)
             if sub_id:
                 sub=await get_cat(sub_id); products=await get_products(sub_id,active_only=False)
                 if sub:
-                    await safe_edit(query.message,
-                        f"📦 {sub[2]} {sub[1]}\nمحصول: {to_fa(len(products))} عدد",
-                        reply_markup=acat_products_kb(sub_id,products,sub[3])); return
-            roots=await get_root_cats(active_only=False)
-            btns=[[InlineKeyboardButton("✨ افزودن محصول جدید",callback_data="aprd_quick_new")]]
-            for c in roots: btns.append([InlineKeyboardButton(f"{'✅' if c[4] else '❌'} {c[2]} {c[1]}",callback_data=f"acr_{c[0]}")])
-            btns+=[[InlineKeyboardButton("➕ دسته اصلی جدید",callback_data="acr_new")],[InlineKeyboardButton("🔙 پنل اصلی",callback_data="back_to_admin")]]
-            await safe_edit(query.message,"🛍 مدیریت محصولات:",reply_markup=InlineKeyboardMarkup(btns))
+                    await safe_edit(query.message,f"📦 {sub[2]} {sub[1]}\nمحصول: {to_fa(len(products))} عدد",reply_markup=acat_products_kb(sub_id,products,sub[3])); return
+            await safe_edit(query.message,"🛍 مدیریت محصولات:",reply_markup=acat_root_kb(await get_root_cats(active_only=False)))
+
+        elif data.startswith("aprd_del_"):
+            await query.answer()
+            pid=int(data[9:]); p=await get_product(pid)
+            if not p: await query.message.reply_text("❌ محصول یافت نشد.",reply_markup=back_admin()); return
+            await safe_edit(query.message,
+                f"⚠️ حذف محصول «{p[1]}»\n\nاین محصول برای همیشه حذف می‌شود. مطمئن هستید؟",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🗑 بله، حذف کن",callback_data=f"aprd_delok_{pid}")],
+                    [InlineKeyboardButton("↩️ انصراف",callback_data=f"aprd_{pid}")]]))
 
         elif data.startswith("aprd_en_"):
             await query.answer()
@@ -1265,7 +1315,7 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         await save_request(user.id,user.username,user.first_name,text,pid,pname)
         try:
             await ctx.bot.send_message(ADMIN_ID,
-                f"📋 درخواست خرید!\n📱 {pname}\n👤 {user.first_name or'—'} | {'@'+user.username if user.username else'—'}\n📞 {text}\n🆔 {user.id}\n⏱ {shamsi_now()}")
+                f"📋 درخواست خرید!\n📱 {pname}\n👤 {user.first_name or'—'} | {'@'+user.username if user.username else'—'}\n📞 {text}\n🆔 {user.id}")
         except Exception as e: logger.error(f"req notify: {e}")
         await update.message.reply_text(f"✅ درخواست خرید «{pname}» ثبت شد!\nپشتیبانی به زودی تماس می‌گیرد.",reply_markup=main_menu()); return
 
@@ -1274,26 +1324,16 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         await record_stat("wh_page")
         if not workhours.get("enabled",True): await update.message.reply_text("🕐 ساعت کاری تنظیم نشده.",reply_markup=main_menu()); return
         wh=wh_today_block() or""
-        ft=("\n"+"─"*17+f"\n⏱ {shamsi_now()}") if get_setting("show_datetime_footer") else""
-        sec_txt=responses.get("workhours","") if responses else ""
-        intro=f"{sec_txt}\n\n" if sec_txt and sec_txt not in("","تنظیم نشده") else ""
-        msg=f"🕐 ساعت کاری استوک لند\n{intro}{wh}{ft}"
+        msg=f"🕐 ساعت کاری استوک لند\n{wh}"
         if len(msg)>4000: msg=msg[:3990]+"..."
-        wh_rows=[[InlineKeyboardButton("📆 ساعت کار هفتگی مجموعه",callback_data="wh_weekly")]]
-        sec_kb=user_sec_kb("workhours")
-        if sec_kb: wh_rows+=[list(r) for r in sec_kb.inline_keyboard]
-        await send_banner(update.message,msg,"workhours",kb=InlineKeyboardMarkup(wh_rows)); return
+        kb=InlineKeyboardMarkup([[InlineKeyboardButton("📆 ساعت کار هفتگی مجموعه",callback_data="wh_weekly")]])
+        await send_banner(update.message,msg,"workhours",kb=kb); return
 
     if text=="🛍 محصولات":
         await record_stat("catalog"); cats=await get_root_cats()
-        if not cats: await update.message.reply_text("📫 محصولی موجود نیست.",reply_markup=main_menu()); return
-        sec_txt=responses.get("catalog","") if responses else ""
-        intro=f"{sec_txt}\n\n" if sec_txt and sec_txt not in("","تنظیم نشده") else ""
-        msg=f"🛍 محصولات استوک لند\n{intro}دسته‌بندی را انتخاب کنید:"
-        cat_rows=[list(r) for r in cat_root_kb(cats).inline_keyboard]
-        sec_kb=user_sec_kb("catalog")
-        if sec_kb: cat_rows+=[list(r) for r in sec_kb.inline_keyboard]
-        await send_banner(update.message,msg,"catalog",kb=InlineKeyboardMarkup(cat_rows)); return
+        if not cats: await update.message.reply_text("📫 در حال حاضر محصولی موجود نیست.",reply_markup=main_menu()); return
+        msg="🛍 محصولات استوک لند\nیک دسته‌بندی را انتخاب کنید:"
+        await send_banner(update.message,msg,"catalog",kb=cat_root_kb(cats)); return
 
     # تمام بخش‌های منو یکپارچه — user_sec_kb برای همه بخش‌ها
     for k,v in MENU_ITEMS.items():
