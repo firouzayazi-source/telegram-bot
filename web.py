@@ -10,13 +10,12 @@ import asyncio
 
 # ── مسیرها (هماهنگ با bot.py) ───────────────────
 BASE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(BASE)
-DB_FILE       = os.path.join(ROOT, "users.db")
-DATA_FILE     = os.path.join(ROOT, "data.json")
-WORKHOURS_FILE= os.path.join(ROOT, "workhours.json")
-BUTTONS_FILE  = os.path.join(ROOT, "buttons.json")
-SETTINGS_FILE = os.path.join(ROOT, "settings.json")
-BANNER_FILE   = os.path.join(ROOT, "banner.json")
+DB_FILE       = os.path.join(BASE, "users.db")
+DATA_FILE     = os.path.join(BASE, "data.json")
+WORKHOURS_FILE= os.path.join(BASE, "workhours.json")
+BUTTONS_FILE  = os.path.join(BASE, "buttons.json")
+SETTINGS_FILE = os.path.join(BASE, "settings.json")
+BANNER_FILE   = os.path.join(BASE, "banner.json")
 UPLOAD_DIR    = os.path.join(BASE, "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
