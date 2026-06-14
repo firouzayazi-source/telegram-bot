@@ -232,45 +232,35 @@ async def month_users(): return await _cnt("SELECT COUNT(*) FROM users WHERE las
 async def new_today():   return await _cnt("SELECT COUNT(*) FROM users WHERE DATE(joined_at)=DATE('now','localtime')")
 async def blk_count():   return await _cnt("SELECT COUNT(*) FROM users WHERE is_blocked=1")
 
-# ── catalog — از ووکامرس خوانده می‌شود (woo.py)
-# خروجی به فرمت tuple سازگار با کد موجود تبدیل می‌شود:
+# ── catalog — از SQLite خوانده می‌شود
 #   دسته:   id(0),name(1),icon(2),parent_id(3),is_active(4)
-#   محصول:  id(0),name(1),price(2),description(3),photo_url(4),site_url(5),is_active(6),category_id(7)
-import woo
-
-def _cat_tuple(c):
-    # ووکامرس آیکون ندارد → از 📁/📦 استفاده می‌کنیم
-    icon = "📂" if c["parent"]==0 else "📦"
-    return (c["id"], c["name"], icon, c["parent"], 1)
-
-def _prod_tuple(p, cat_id=None):
-    return (p["id"], p["name"], p["price"], p["description"],
-            p["image"], p["permalink"], 1 if p["in_stock"] else 0,
-            cat_id if cat_id is not None else (p["category_ids"][0] if p["category_ids"] else 0))
+#   محصول:  id(0),name(1),price(2),description(3),photo_id(4),site_url(5),is_active(6),category_id(7)
 
 async def get_root_cats(active_only=True):
-    cats = await woo.get_root_categories()
-    return [_cat_tuple(c) for c in cats]
+    async with db.execute("SELECT id,name,icon,parent_id,is_active FROM categories WHERE parent_id IS NULL AND is_active=1 ORDER BY id") as c:
+        return await c.fetchall()
 
-async def get_subcats(parent_id,active_only=True):
-    cats = await woo.get_subcategories(parent_id)
-    return [_cat_tuple(c) for c in cats]
+async def get_subcats(parent_id, active_only=True):
+    async with db.execute("SELECT id,name,icon,parent_id,is_active FROM categories WHERE parent_id=? AND is_active=1 ORDER BY id", (parent_id,)) as c:
+        return await c.fetchall()
 
 async def get_cat(cat_id):
-    c = await woo.get_category(cat_id)
-    return _cat_tuple(c) if c else None
+    async with db.execute("SELECT id,name,icon,parent_id,is_active FROM categories WHERE id=?", (cat_id,)) as c:
+        return await c.fetchone()
 
-async def get_products(cat_id,active_only=True):
-    prods = await woo.get_products_by_category(cat_id)
-    return [_prod_tuple(p, cat_id) for p in prods]
+async def get_products(cat_id, active_only=True):
+    q = "SELECT id,name,price,description,photo_id,site_url,is_active,category_id FROM products WHERE category_id=? AND is_active=1 ORDER BY id" if active_only else "SELECT id,name,price,description,photo_id,site_url,is_active,category_id FROM products WHERE category_id=? ORDER BY id"
+    async with db.execute(q, (cat_id,)) as c:
+        return await c.fetchall()
 
 async def get_product(pid):
-    p = await woo.get_product(pid)
-    return _prod_tuple(p) if p else None
+    async with db.execute("SELECT id,name,price,description,photo_id,site_url,is_active,category_id FROM products WHERE id=?", (pid,)) as c:
+        return await c.fetchone()
 
 async def search_products(q):
-    prods = await woo.search_products(q)
-    return [_prod_tuple(p) for p in prods]
+    like = f"%{q}%"
+    async with db.execute("SELECT id,name,price,description,photo_id,site_url,is_active,category_id FROM products WHERE (name LIKE ? OR description LIKE ?) AND is_active=1 LIMIT 20", (like, like)) as c:
+        return await c.fetchall()
 
 # ── requests db
 async def save_request(uid,username,first_name,phone,pid,pname):
@@ -662,39 +652,21 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
 
         elif data=="woo_status":
             await query.answer()
-            import woo
-            if not woo.is_configured():
-                await safe_edit(query.message,
-                    "🛍 محصولات سایت\n" + "─"*18 +
-                    "\n\n⚠️ اتصال به سایت تنظیم نشده.\n\n"
-                    "برای فعال‌سازی، متغیرهای WOO_URL، WOO_KEY و WOO_SECRET را در تنظیمات سرور وارد کنید.",
-                    reply_markup=back_admin()); return
-            await safe_edit(query.message,"🛍 در حال اتصال به سایت...",reply_markup=None)
-            ok,msg = await woo.test_connection()
-            if not ok:
-                await safe_edit(query.message,f"🛍 محصولات سایت\n{'─'*18}\n\n❌ {msg}",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🔄 تلاش مجدد",callback_data="woo_status")],
-                        [InlineKeyboardButton("🔙 پنل اصلی",callback_data="back_to_admin")]])); return
-            roots = await woo.get_root_categories()
-            cats = await woo.get_categories()
-            total_prod = sum(c["count"] for c in roots)
-            txt = (f"🛍 محصولات سایت (ووکامرس)\n{'─'*18}"
-                   f"\n✅ اتصال برقرار است"
-                   f"\n\n📂 دسته اصلی: {to_fa(len(roots))}"
-                   f"\n📁 کل دسته‌ها: {to_fa(len(cats))}"
-                   f"\n📦 مجموع محصولات: {to_fa(total_prod)}"
-                   f"\n\n💡 محصولات از سایت stland.ir خوانده می‌شوند."
-                   f"\nبرای افزودن یا ویرایش محصول، به پنل وردپرس مراجعه کنید.")
+            root_count = await _cnt("SELECT COUNT(*) FROM categories WHERE parent_id IS NULL AND is_active=1")
+            cat_count = await _cnt("SELECT COUNT(*) FROM categories WHERE is_active=1")
+            prod_count = await _cnt("SELECT COUNT(*) FROM products WHERE is_active=1")
+            txt = (f"🛍 محصولات سایت (push-based)\n{'─'*18}"
+                   f"\n✅ داده‌ها از وردپرس دریافت می‌شوند"
+                   f"\n\n📂 دسته اصلی: {to_fa(root_count)}"
+                   f"\n📁 کل دسته‌ها: {to_fa(cat_count)}"
+                   f"\n📦 محصولات فعال: {to_fa(prod_count)}"
+                   f"\n\n💡 برای بروزرسانی، از پنل وردپرس Sync Now بزنید.")
             await safe_edit(query.message,txt,reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔄 بروزرسانی فوری",callback_data="woo_refresh")],
                 [InlineKeyboardButton("🔙 پنل اصلی",callback_data="back_to_admin")]]))
 
         elif data=="woo_refresh":
-            await query.answer("کش پاک شد، در حال دریافت...",show_alert=False)
-            import woo
-            woo.clear_cache()
-            await safe_edit(query.message,"🔄 محصولات بروزرسانی شد.",
+            await query.answer("اطلاعات push-based است، نیاز به رفرش نیست.",show_alert=True)
+            await safe_edit(query.message,"🛍 محصولات از وردپرس push می‌شوند. برای sync، از پنل وردپرس استفاده کنید.",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("🛍 مشاهده وضعیت",callback_data="woo_status")],
                     [InlineKeyboardButton("🔙 پنل اصلی",callback_data="back_to_admin")]]))
