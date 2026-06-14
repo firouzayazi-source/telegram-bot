@@ -7,7 +7,6 @@ from datetime import datetime
 from flask import (Flask, request, session, redirect, url_for, jsonify,
                    render_template_string, send_from_directory, abort)
 import asyncio
-import woo
 
 # ── مسیرها (هماهنگ با bot.py) ───────────────────
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -41,14 +40,31 @@ SECTION_ORDER = ["welcome","1","2","3","4","5","catalog","workhours"]
 DAY_FA = {"0":"شنبه","1":"یکشنبه","2":"دوشنبه","3":"سه‌شنبه","4":"چهارشنبه","5":"پنجشنبه","6":"جمعه"}
 
 
-def run_async(coro):
-    """اجرای تابع async ووکامرس در محیط sync فلسک."""
-    try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        return loop.run_until_complete(coro)
-    finally:
-        loop.close()
+def _verify_sig(req):
+    if not WOO_WEBHOOK_SECRET:
+        return True
+    sig = req.headers.get("X-Webhook-Signature", "")
+    body = req.get_data()
+    expected = "sha256=" + hmac.new(WOO_WEBHOOK_SECRET.encode(), body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(sig, expected)
+
+def _upsert_product(p):
+    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    cat_id = p.get('category_ids', [None])[0] if p.get('category_ids') else None
+    price = p.get('price') or p.get('regular_price') or ''
+    if price and str(price).replace('.','').isdigit():
+        price = f"{int(float(price)):,} تومان"
+    dbq("""INSERT OR REPLACE INTO products(id, category_id, name, price, description, photo_id, site_url, is_active, created_at)
+           VALUES(?,?,?,?,?,?,?,?,?)""",
+        (p['id'], cat_id, p['name'], price, p.get('description',''),
+         p.get('image_url'), p.get('permalink'),
+         1 if p.get('stock_status')=='instock' and p.get('status')=='publish' else 0,
+         now), commit=True)
+
+def _upsert_category(c):
+    icon = '📂' if not c.get('parent_id') else '📦'
+    dbq("""INSERT OR REPLACE INTO categories(id, name, icon, parent_id, is_active) VALUES(?,?,?,?,1)""",
+        (c['id'], c['name'], icon, c.get('parent_id') or None), commit=True)
 
 # ── دیتابیس ───────────────────────────────────
 def dbq(sql, args=(), one=False, commit=False):
@@ -79,55 +95,39 @@ def login_required(f):
     return wrap
 
 # ════════════════════════════════════════════════
-#  API — محصولات
-# ════════════════════════════════════════════════
-#  API — محصولات (از ووکامرس، فقط‌خواندنی)
+#  API — محصولات (از SQLite)
 # ════════════════════════════════════════════════
 @app.get("/api/tree")
 @login_required
 def api_tree():
-    if not woo.is_configured():
-        return jsonify({"error":"woo_not_configured"}), 200
-    cats = run_async(woo.get_categories())
-    roots = [c for c in cats if c["parent"]==0]
+    roots = dbq("SELECT id,name,icon FROM categories WHERE parent_id IS NULL AND is_active=1 ORDER BY id")
     out = []
     for r in roots:
-        subs = [c for c in cats if c["parent"]==r["id"]]
-        sub_list = [{"id":s["id"],"name":s["name"],"icon":"📦","active":True,"product_count":s["count"]} for s in subs]
-        out.append({"id":r["id"],"name":r["name"],"icon":"📂","active":True,"subs":sub_list})
+        subs = dbq("SELECT id,name,icon,is_active FROM categories WHERE parent_id=? AND is_active=1 ORDER BY id", (r["id"],))
+        sub_list = [{"id":s["id"],"name":s["name"],"icon":s["icon"],"active":bool(s["is_active"]),
+                     "product_count": dbq("SELECT COUNT(*) c FROM products WHERE category_id=? AND is_active=1",(s["id"],),one=True)["c"]} for s in subs]
+        out.append({"id":r["id"],"name":r["name"],"icon":r["icon"],"active":True,"subs":sub_list})
     return jsonify(out)
 
 @app.get("/api/products/<int:sub_id>")
 @login_required
 def api_products(sub_id):
-    if not woo.is_configured(): return jsonify([])
-    prods = run_async(woo.get_products_by_category(sub_id))
+    prods = dbq("SELECT id,name,price,description,site_url,is_active,photo_id FROM products WHERE category_id=? ORDER BY id", (sub_id,))
     out = []
     for p in prods:
         out.append({"id":p["id"],"name":p["name"],"price":p["price"],"description":p["description"],
-                    "site_url":p["permalink"],"active":p["in_stock"],"photo_url":p["image"]})
+                    "site_url":p["site_url"],"active":bool(p["is_active"]),"photo_url":p["photo_id"]})
     return jsonify(out)
 
 @app.get("/api/woo-status")
 @login_required
 def api_woo_status():
-    if not woo.is_configured():
-        return jsonify({"configured":False})
-    ok, msg = run_async(woo.test_connection())
-    if not ok:
-        return jsonify({"configured":True,"connected":False,"message":msg})
-    cats = run_async(woo.get_categories())
-    roots = [c for c in cats if c["parent"]==0]
-    total = sum(c["count"] for c in roots)
-    return jsonify({"configured":True,"connected":True,
-                    "roots":len(roots),"categories":len(cats),"products":total,
-                    "url":woo.WOO_URL})
+    return jsonify({"status": "push-based", "ok": True})
 
 @app.post("/api/woo-refresh")
 @login_required
 def api_woo_refresh():
-    woo.clear_cache()
-    return jsonify({"ok":True})
+    return jsonify({"ok": True, "message": "push-based, no refresh needed"})
 
 def _handle_photo(req):
     """عکس آپلودی را ذخیره می‌کند؛ اگر uploader تلگرام تنظیم شده، file_id می‌گیرد."""
@@ -386,61 +386,36 @@ def api_tg_cats_put():
 #  WooCommerce webhooks — public but HMAC-signed
 # ════════════════════════════════════════════════
 
-def _verify_woo_signature():
-    """Verify X-Webhook-Signature: sha256=<hmac> header.
-
-    Returns True if valid (or no secret is configured — permissive fallback).
-    Returns False if a secret is set but the signature is wrong/missing.
-    """
-    if not WOO_WEBHOOK_SECRET:
-        # No secret configured → accept all (useful during initial setup)
-        return True
-    sig_header = request.headers.get("X-Webhook-Signature", "")
-    if not sig_header.startswith("sha256="):
-        return False
-    raw_body = request.get_data()
-    expected = "sha256=" + hmac.new(
-        WOO_WEBHOOK_SECRET.encode(), raw_body, hashlib.sha256
-    ).hexdigest()
-    return hmac.compare_digest(expected, sig_header)
-
-
 @app.post("/webhook/woo")
 def webhook_woo():
-    """Receive a product change event from the WordPress plugin.
-
-    Clears the relevant category caches so the bot sees fresh data instantly.
-    """
-    if not _verify_woo_signature():
-        return jsonify({"error": "invalid signature"}), 401
-
-    payload = request.get_json(silent=True) or {}
-
-    # Update allowed-cats list if the plugin sent one
-    if "allowed_cats" in payload and isinstance(payload["allowed_cats"], list):
-        _write_tg_cats(payload["allowed_cats"])
-
-    # Invalidate the category-level product caches affected by this product.
-    cat_ids = payload.get("categories", [])
-    for cat_id in cat_ids:
-        try:
-            woo.clear_category_cache(int(cat_id))
-        except (ValueError, TypeError):
-            pass
-
-    # Always bust the top-level categories cache so new/deleted cats propagate.
-    woo._cache.pop("cats", None)
-
+    if not _verify_sig(request):
+        return jsonify({"error": "invalid signature"}), 403
+    data = request.get_json(force=True, silent=True) or {}
+    event = data.get('event', '')
+    if event == 'product.updated':
+        _upsert_product(data['product'])
+    elif event == 'product.deleted':
+        pid = data.get('product', {}).get('id')
+        if pid:
+            dbq("DELETE FROM products WHERE id=?", (pid,), commit=True)
+    elif event == 'categories.sync':
+        for c in data.get('categories', []):
+            _upsert_category(c)
     return jsonify({"ok": True})
-
 
 @app.post("/webhook/woo/clear-all")
 def webhook_woo_clear_all():
-    """Force a full WooCommerce cache clear (triggered by the WordPress "Sync Now" button)."""
-    if not _verify_woo_signature():
-        return jsonify({"error": "invalid signature"}), 401
+    if not _verify_sig(request):
+        return jsonify({"error": "invalid signature"}), 403
+    return jsonify({"ok": True})
 
-    woo.clear_cache()
+@app.post("/webhook/woo/sync-cats")
+def webhook_woo_sync_cats():
+    if not _verify_sig(request):
+        return jsonify({"error": "invalid signature"}), 403
+    data = request.get_json(force=True, silent=True) or {}
+    for c in data.get('categories', []):
+        _upsert_category(c)
     return jsonify({"ok": True})
 
 
