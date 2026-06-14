@@ -34,6 +34,11 @@ def _set_cache(key, data):
 def clear_cache():
     _cache.clear()
 
+def clear_category_cache(cat_id):
+    """Remove only the product cache for a specific category, leaving everything else intact."""
+    key = f"prods_{cat_id}"
+    _cache.pop(key, None)
+
 # ── درخواست به API ──────────────────────────────────
 async def _fetch(path, params=None):
     if not is_configured():

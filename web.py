@@ -2,7 +2,7 @@
 پنل وب مدیریت استوک لند
 به همان دیتابیس و فایل‌های بات وصل است.
 """
-import os, json, sqlite3, time, secrets, functools, io
+import os, json, sqlite3, time, secrets, functools, io, hmac, hashlib
 from datetime import datetime
 from flask import (Flask, request, session, redirect, url_for, jsonify,
                    render_template_string, send_from_directory, abort)
@@ -21,8 +21,9 @@ BANNER_FILE   = os.path.join(ROOT, "banner.json")
 UPLOAD_DIR    = os.path.join(BASE, "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-PANEL_USER = os.environ.get("PANEL_USER", "admin")
-PANEL_PASS = os.environ.get("PANEL_PASS", "stockland")
+PANEL_USER         = os.environ.get("PANEL_USER", "admin")
+WOO_WEBHOOK_SECRET = os.environ.get("WOO_WEBHOOK_SECRET", "")
+PANEL_PASS         = os.environ.get("PANEL_PASS", "stockland")
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("PANEL_SECRET", secrets.token_hex(16))
@@ -347,6 +348,101 @@ def index():
 
 # HTML در فایل جدا import می‌شود
 from templates import LOGIN_HTML, PANEL_HTML
+
+# ════════════════════════════════════════════════
+#  Telegram-visible categories — JSON file storage
+# ════════════════════════════════════════════════
+TG_CATS_FILE = os.path.join(BASE, "tg_cats.json")
+
+def _read_tg_cats():
+    """Return list of allowed category IDs (ints)."""
+    return rj(TG_CATS_FILE, [])
+
+def _write_tg_cats(cat_ids):
+    """Persist allowed category IDs."""
+    wj(TG_CATS_FILE, [int(c) for c in cat_ids])
+
+@app.get("/api/tg-categories")
+@login_required
+def api_tg_cats_get():
+    """Return the list of Telegram-visible WooCommerce category IDs."""
+    return jsonify({"cat_ids": _read_tg_cats()})
+
+@app.put("/api/tg-categories")
+@login_required
+def api_tg_cats_put():
+    """Replace the list of Telegram-visible category IDs.
+
+    Body: {"cat_ids": [1, 2, 3]}
+    """
+    data = request.get_json(silent=True) or {}
+    cat_ids = data.get("cat_ids", [])
+    if not isinstance(cat_ids, list):
+        return jsonify({"error": "cat_ids must be an array"}), 400
+    _write_tg_cats(cat_ids)
+    return jsonify({"ok": True, "cat_ids": _read_tg_cats()})
+
+# ════════════════════════════════════════════════
+#  WooCommerce webhooks — public but HMAC-signed
+# ════════════════════════════════════════════════
+
+def _verify_woo_signature():
+    """Verify X-Webhook-Signature: sha256=<hmac> header.
+
+    Returns True if valid (or no secret is configured — permissive fallback).
+    Returns False if a secret is set but the signature is wrong/missing.
+    """
+    if not WOO_WEBHOOK_SECRET:
+        # No secret configured → accept all (useful during initial setup)
+        return True
+    sig_header = request.headers.get("X-Webhook-Signature", "")
+    if not sig_header.startswith("sha256="):
+        return False
+    raw_body = request.get_data()
+    expected = "sha256=" + hmac.new(
+        WOO_WEBHOOK_SECRET.encode(), raw_body, hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(expected, sig_header)
+
+
+@app.post("/webhook/woo")
+def webhook_woo():
+    """Receive a product change event from the WordPress plugin.
+
+    Clears the relevant category caches so the bot sees fresh data instantly.
+    """
+    if not _verify_woo_signature():
+        return jsonify({"error": "invalid signature"}), 401
+
+    payload = request.get_json(silent=True) or {}
+
+    # Update allowed-cats list if the plugin sent one
+    if "allowed_cats" in payload and isinstance(payload["allowed_cats"], list):
+        _write_tg_cats(payload["allowed_cats"])
+
+    # Invalidate the category-level product caches affected by this product.
+    cat_ids = payload.get("categories", [])
+    for cat_id in cat_ids:
+        try:
+            woo.clear_category_cache(int(cat_id))
+        except (ValueError, TypeError):
+            pass
+
+    # Always bust the top-level categories cache so new/deleted cats propagate.
+    woo._cache.pop("cats", None)
+
+    return jsonify({"ok": True})
+
+
+@app.post("/webhook/woo/clear-all")
+def webhook_woo_clear_all():
+    """Force a full WooCommerce cache clear (triggered by the WordPress "Sync Now" button)."""
+    if not _verify_woo_signature():
+        return jsonify({"error": "invalid signature"}), 401
+
+    woo.clear_cache()
+    return jsonify({"ok": True})
+
 
 def run_web(host="0.0.0.0", port=None):
     port = port or int(os.environ.get("PORT", 8080))
