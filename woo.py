@@ -1,0 +1,169 @@
+"""
+ماژول اتصال به ووکامرس (WooCommerce REST API)
+محصولات و دسته‌ها را زنده از stland.ir می‌خواند و cache می‌کند.
+فقط خواندنی — هیچ چیزی روی سایت تغییر نمی‌دهد.
+"""
+import os, time, logging, asyncio
+import aiohttp
+
+logger = logging.getLogger("woo")
+
+WOO_URL    = os.environ.get("WOO_URL", "").strip().rstrip("/")   # مثل https://stland.ir
+WOO_KEY    = os.environ.get("WOO_KEY", "").strip()               # ck_xxx
+WOO_SECRET = os.environ.get("WOO_SECRET", "").strip()            # cs_xxx
+CACHE_TTL  = int(os.environ.get("WOO_CACHE_TTL", "3600"))        # ۱ ساعت
+HIDE_OUT_OF_STOCK = os.environ.get("WOO_HIDE_OOS", "1") == "1"   # مخفی‌سازی ناموجود
+
+def is_configured():
+    return bool(WOO_URL and WOO_KEY and WOO_SECRET)
+
+# ── cache ساده در حافظه ────────────────────────────
+_cache = {}   # key -> (timestamp, data)
+_locks = {}
+
+def _get_cache(key):
+    if key in _cache:
+        ts, data = _cache[key]
+        if time.time() - ts < CACHE_TTL:
+            return data
+    return None
+
+def _set_cache(key, data):
+    _cache[key] = (time.time(), data)
+
+def clear_cache():
+    _cache.clear()
+
+# ── درخواست به API ──────────────────────────────────
+async def _fetch(path, params=None):
+    if not is_configured():
+        logger.warning("WooCommerce تنظیم نشده")
+        return None
+    url = f"{WOO_URL}/wp-json/wc/v3/{path}"
+    p = dict(params or {})
+    p.update({"consumer_key": WOO_KEY, "consumer_secret": WOO_SECRET})
+    try:
+        timeout = aiohttp.ClientTimeout(total=20)
+        async with aiohttp.ClientSession(timeout=timeout) as s:
+            async with s.get(url, params=p) as r:
+                if r.status != 200:
+                    logger.error(f"woo {path}: HTTP {r.status}")
+                    return None
+                return await r.json()
+    except Exception as e:
+        logger.error(f"woo fetch {path}: {e}")
+        return None
+
+async def _fetch_all(path, params=None):
+    """همه صفحات را می‌گیرد (pagination)."""
+    out = []
+    page = 1
+    while True:
+        p = dict(params or {}); p.update({"per_page": 100, "page": page})
+        data = await _fetch(path, p)
+        if not data: break
+        out.extend(data)
+        if len(data) < 100: break
+        page += 1
+        if page > 20: break  # سقف ایمنی
+    return out
+
+# ── دسته‌بندی‌ها ────────────────────────────────────
+async def get_categories():
+    """تمام دسته‌ها را با ساختار parent/child برمی‌گرداند."""
+    cached = _get_cache("cats")
+    if cached is not None: return cached
+    raw = await _fetch_all("products/categories", {"hide_empty": True, "orderby": "menu_order"})
+    if raw is None: return []
+    cats = []
+    for c in raw:
+        cats.append({
+            "id": c["id"], "name": c["name"], "parent": c["parent"],
+            "count": c.get("count", 0),
+            "image": (c.get("image") or {}).get("src") if c.get("image") else None,
+        })
+    _set_cache("cats", cats)
+    return cats
+
+async def get_root_categories():
+    cats = await get_categories()
+    return [c for c in cats if c["parent"] == 0]
+
+async def get_subcategories(parent_id):
+    cats = await get_categories()
+    return [c for c in cats if c["parent"] == parent_id]
+
+async def get_category(cat_id):
+    cats = await get_categories()
+    return next((c for c in cats if c["id"] == cat_id), None)
+
+# ── محصولات ─────────────────────────────────────────
+def _map_product(p):
+    """محصول ووکامرس → فرمت ساده ربات."""
+    img = None
+    if p.get("images"):
+        img = p["images"][0].get("src")
+    # قیمت: ترجیحاً price_html ساده‌شده، یا price خام
+    price = p.get("price") or ""
+    price_fmt = f"{price} تومان" if price and price.isdigit() else (price or "تماس بگیرید")
+    # توضیح کوتاه بدون تگ HTML
+    desc = p.get("short_description") or p.get("description") or ""
+    desc = _strip_html(desc)[:500]
+    return {
+        "id": p["id"], "name": p["name"], "price": price_fmt,
+        "price_raw": price, "description": desc,
+        "image": img, "permalink": p.get("permalink"),
+        "in_stock": p.get("stock_status") == "instock",
+        "category_ids": [c["id"] for c in p.get("categories", [])],
+    }
+
+def _strip_html(s):
+    import re
+    s = re.sub(r"<[^>]+>", " ", s)
+    s = re.sub(r"&nbsp;", " ", s)
+    s = re.sub(r"&zwnj;", "\u200c", s)
+    s = re.sub(r"&[a-z]+;", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+async def get_products_by_category(cat_id):
+    """محصولات یک دسته (شامل ناموجود طبق تنظیم)."""
+    key = f"prods_{cat_id}"
+    cached = _get_cache(key)
+    if cached is not None: return cached
+    params = {"category": cat_id, "status": "publish", "orderby": "menu_order"}
+    if HIDE_OUT_OF_STOCK:
+        params["stock_status"] = "instock"
+    raw = await _fetch_all("products", params)
+    if raw is None: return []
+    prods = [_map_product(p) for p in raw]
+    _set_cache(key, prods)
+    return prods
+
+async def get_product(pid):
+    # اول از cache محصولات
+    for k, (ts, data) in list(_cache.items()):
+        if k.startswith("prods_"):
+            for p in data:
+                if p["id"] == pid: return p
+    # وگرنه مستقیم بگیر
+    raw = await _fetch(f"products/{pid}")
+    return _map_product(raw) if raw else None
+
+async def search_products(query):
+    """جستجوی محصول."""
+    params = {"search": query, "status": "publish", "per_page": 20}
+    if HIDE_OUT_OF_STOCK:
+        params["stock_status"] = "instock"
+    raw = await _fetch("products", params)
+    if raw is None: return []
+    return [_map_product(p) for p in raw]
+
+# ── تست اتصال ───────────────────────────────────────
+async def test_connection():
+    """برای بررسی صحت کلیدها."""
+    if not is_configured():
+        return False, "متغیرهای WOO_URL / WOO_KEY / WOO_SECRET تنظیم نشده‌اند"
+    data = await _fetch("products", {"per_page": 1})
+    if data is None:
+        return False, "اتصال برقرار نشد — URL یا کلیدها را بررسی کنید"
+    return True, "اتصال موفق بود"

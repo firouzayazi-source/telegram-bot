@@ -6,6 +6,8 @@ import os, json, sqlite3, time, secrets, functools, io
 from datetime import datetime
 from flask import (Flask, request, session, redirect, url_for, jsonify,
                    render_template_string, send_from_directory, abort)
+import asyncio
+import woo
 
 # ── مسیرها (هماهنگ با bot.py) ───────────────────
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -36,6 +38,16 @@ SECTION_NAMES = {"welcome":"🏠 خوش‌آمدگویی","1":"🌐 شبکه‌�
                  "catalog":"🛍 محصولات","workhours":"🕐 ساعت کاری"}
 SECTION_ORDER = ["welcome","1","2","3","4","5","catalog","workhours"]
 DAY_FA = {"0":"شنبه","1":"یکشنبه","2":"دوشنبه","3":"سه‌شنبه","4":"چهارشنبه","5":"پنجشنبه","6":"جمعه"}
+
+
+def run_async(coro):
+    """اجرای تابع async ووکامرس در محیط sync فلسک."""
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
 
 # ── دیتابیس ───────────────────────────────────
 def dbq(sql, args=(), one=False, commit=False):
@@ -68,103 +80,52 @@ def login_required(f):
 # ════════════════════════════════════════════════
 #  API — محصولات
 # ════════════════════════════════════════════════
+#  API — محصولات (از ووکامرس، فقط‌خواندنی)
+# ════════════════════════════════════════════════
 @app.get("/api/tree")
 @login_required
 def api_tree():
-    roots = dbq("SELECT id,name,icon,is_active FROM categories WHERE parent_id IS NULL ORDER BY id")
+    if not woo.is_configured():
+        return jsonify({"error":"woo_not_configured"}), 200
+    cats = run_async(woo.get_categories())
+    roots = [c for c in cats if c["parent"]==0]
     out = []
     for r in roots:
-        subs = dbq("SELECT id,name,icon,is_active FROM categories WHERE parent_id=? ORDER BY id", (r["id"],))
-        sub_list = []
-        for s in subs:
-            pc = dbq("SELECT COUNT(*) c FROM products WHERE category_id=?", (s["id"],), one=True)["c"]
-            sub_list.append({"id":s["id"],"name":s["name"],"icon":s["icon"],"active":bool(s["is_active"]),"product_count":pc})
-        out.append({"id":r["id"],"name":r["name"],"icon":r["icon"],"active":bool(r["is_active"]),"subs":sub_list})
+        subs = [c for c in cats if c["parent"]==r["id"]]
+        sub_list = [{"id":s["id"],"name":s["name"],"icon":"📦","active":True,"product_count":s["count"]} for s in subs]
+        out.append({"id":r["id"],"name":r["name"],"icon":"📂","active":True,"subs":sub_list})
     return jsonify(out)
 
 @app.get("/api/products/<int:sub_id>")
 @login_required
 def api_products(sub_id):
-    rows = dbq("SELECT id,name,price,description,photo_id,site_url,is_active FROM products WHERE category_id=? ORDER BY id", (sub_id,))
+    if not woo.is_configured(): return jsonify([])
+    prods = run_async(woo.get_products_by_category(sub_id))
     out = []
-    for p in rows:
+    for p in prods:
         out.append({"id":p["id"],"name":p["name"],"price":p["price"],"description":p["description"],
-                    "photo_id":p["photo_id"],"site_url":p["site_url"],"active":bool(p["is_active"]),
-                    "photo_url":f"/uploads/{p['photo_id']}" if p["photo_id"] and not str(p["photo_id"]).startswith("AgAC") and os.path.exists(os.path.join(UPLOAD_DIR,str(p['photo_id']))) else None})
+                    "site_url":p["permalink"],"active":p["in_stock"],"photo_url":p["image"]})
     return jsonify(out)
 
-@app.post("/api/category")
+@app.get("/api/woo-status")
 @login_required
-def api_cat_add():
-    d = request.json
-    icon = d.get("icon","📦").strip() or "📦"
-    name = d.get("name","").strip()
-    parent = d.get("parent_id")
-    if not name: return jsonify({"error":"نام لازم است"}), 400
-    rid = dbq("INSERT INTO categories(name,icon,parent_id,is_active) VALUES(?,?,?,1)", (name,icon,parent), commit=True)
-    return jsonify({"id":rid,"ok":True})
+def api_woo_status():
+    if not woo.is_configured():
+        return jsonify({"configured":False})
+    ok, msg = run_async(woo.test_connection())
+    if not ok:
+        return jsonify({"configured":True,"connected":False,"message":msg})
+    cats = run_async(woo.get_categories())
+    roots = [c for c in cats if c["parent"]==0]
+    total = sum(c["count"] for c in roots)
+    return jsonify({"configured":True,"connected":True,
+                    "roots":len(roots),"categories":len(cats),"products":total,
+                    "url":woo.WOO_URL})
 
-@app.put("/api/category/<int:cid>")
+@app.post("/api/woo-refresh")
 @login_required
-def api_cat_edit(cid):
-    d = request.json
-    if "name" in d: dbq("UPDATE categories SET name=? WHERE id=?", (d["name"].strip(),cid), commit=True)
-    if "icon" in d: dbq("UPDATE categories SET icon=? WHERE id=?", (d["icon"].strip() or "📦",cid), commit=True)
-    if "active" in d: dbq("UPDATE categories SET is_active=? WHERE id=?", (1 if d["active"] else 0,cid), commit=True)
-    return jsonify({"ok":True})
-
-@app.delete("/api/category/<int:cid>")
-@login_required
-def api_cat_del(cid):
-    # cascade: زیردسته‌ها و محصولاتشان
-    subs = dbq("SELECT id FROM categories WHERE parent_id=?", (cid,))
-    for s in subs:
-        dbq("DELETE FROM products WHERE category_id=?", (s["id"],), commit=True)
-        dbq("DELETE FROM categories WHERE id=?", (s["id"],), commit=True)
-    dbq("DELETE FROM products WHERE category_id=?", (cid,), commit=True)
-    dbq("DELETE FROM categories WHERE id=?", (cid,), commit=True)
-    return jsonify({"ok":True})
-
-@app.post("/api/product")
-@login_required
-def api_prod_add():
-    d = request.form
-    sub_id = d.get("category_id")
-    name = (d.get("name") or "").strip()
-    price = (d.get("price") or "").strip()
-    desc = (d.get("description") or "").strip() or None
-    url = (d.get("site_url") or "").strip() or None
-    if not (sub_id and name and price): return jsonify({"error":"نام، قیمت و دسته لازم است"}), 400
-    photo_id = _handle_photo(request)
-    rid = dbq("""INSERT INTO products(category_id,name,price,description,photo_id,site_url,is_active,created_at)
-                 VALUES(?,?,?,?,?,?,1,?)""",
-              (sub_id,name,price,desc,photo_id,url,datetime.now().strftime("%Y-%m-%d %H:%M:%S")), commit=True)
-    return jsonify({"id":rid,"ok":True})
-
-@app.put("/api/product/<int:pid>")
-@login_required
-def api_prod_edit(pid):
-    d = request.form
-    fields, vals = [], []
-    for k_form,k_db in [("name","name"),("price","price"),("description","description"),("site_url","site_url")]:
-        if k_form in d:
-            v = (d.get(k_form) or "").strip()
-            if k_form in ("description","site_url") and not v: v = None
-            fields.append(f"{k_db}=?"); vals.append(v)
-    if "active" in d:
-        fields.append("is_active=?"); vals.append(1 if d.get("active")=="true" else 0)
-    photo_id = _handle_photo(request)
-    if photo_id:
-        fields.append("photo_id=?"); vals.append(photo_id)
-    if fields:
-        vals.append(pid)
-        dbq(f"UPDATE products SET {','.join(fields)} WHERE id=?", vals, commit=True)
-    return jsonify({"ok":True})
-
-@app.delete("/api/product/<int:pid>")
-@login_required
-def api_prod_del(pid):
-    dbq("DELETE FROM products WHERE id=?", (pid,), commit=True)
+def api_woo_refresh():
+    woo.clear_cache()
     return jsonify({"ok":True})
 
 def _handle_photo(req):

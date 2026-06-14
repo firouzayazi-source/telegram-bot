@@ -252,9 +252,7 @@ tr:hover td{background:rgba(31,198,107,.03)}
 
     <!-- محصولات -->
     <section class="page" id="page-catalog">
-      <div style="display:flex;gap:10px;margin-bottom:18px;flex-wrap:wrap">
-        <button class="btn btn-pri" onclick="openCatModal(null)">➕ دسته اصلی جدید</button>
-      </div>
+      <div id="wooBar"></div>
       <div id="treeWrap"></div>
     </section>
 
@@ -344,26 +342,40 @@ async function loadDash(){
   else $('#reqBadge').style.display='none';
 }
 
-// ── Catalog tree ──
+// ── Catalog (read-only از ووکامرس) ──
 async function loadTree(){
+  const status=await api('/api/woo-status');
+  const bar=$('#wooBar'); const w=$('#treeWrap');
+  if(!status.configured){
+    bar.innerHTML='';
+    w.innerHTML=`<div class="empty"><div class="em">🔌</div>
+      اتصال به سایت تنظیم نشده.<br><span style="font-size:13px;color:var(--muted2)">متغیرهای WOO_URL، WOO_KEY و WOO_SECRET را در تنظیمات سرور وارد کنید.</span></div>`;
+    return;
+  }
+  if(!status.connected){
+    bar.innerHTML='';
+    w.innerHTML=`<div class="empty"><div class="em">⚠️</div>اتصال به سایت برقرار نشد<br><span style="font-size:13px;color:var(--muted2)">${status.message||''}</span><br><br><button class="btn btn-ghost btn-sm" onclick="loadTree()">🔄 تلاش مجدد</button></div>`;
+    return;
+  }
+  bar.innerHTML=`<div class="card" style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:18px">
+    <div style="display:flex;align-items:center;gap:10px"><span style="font-size:22px">🛍</span>
+      <div><b style="font-size:15px">محصولات از سایت</b><div style="font-size:12px;color:var(--muted2)">${status.url||'ووکامرس'}</div></div></div>
+    <div style="margin-inline-start:auto;display:flex;gap:18px;align-items:center;flex-wrap:wrap">
+      <div style="text-align:center"><div style="font-size:20px;font-weight:800;color:var(--green)">${fa(status.products)}</div><div style="font-size:11px;color:var(--muted2)">محصول</div></div>
+      <div style="text-align:center"><div style="font-size:20px;font-weight:800;color:var(--green)">${fa(status.roots)}</div><div style="font-size:11px;color:var(--muted2)">دسته اصلی</div></div>
+      <button class="btn btn-ghost btn-sm" onclick="refreshWoo()">🔄 بروزرسانی</button>
+    </div>
+  </div>
+  <div style="font-size:12.5px;color:var(--muted2);margin:0 4px 14px">💡 برای افزودن یا ویرایش محصول، به پنل وردپرس سایت مراجعه کنید. این‌جا فقط نمایش است.</div>`;
   const tree=await api('/api/tree');
-  const w=$('#treeWrap');
-  if(!tree.length){w.innerHTML=`<div class="empty"><div class="em">📦</div>هنوز دسته‌ای ثبت نشده. اولین دسته را بسازید.</div>`;return}
+  if(!tree.length){w.innerHTML=`<div class="empty"><div class="em">📦</div>دسته‌ای در سایت یافت نشد</div>`;return}
   w.innerHTML=tree.map(r=>`
     <div class="tree-root">
       <div class="tree-head" onclick="this.nextElementSibling.classList.toggle('open')">
         <span class="ico">${r.icon}</span><span class="nm">${r.name}</span>
-        <span class="meta">
-          <span class="chip ${r.active?'':'off'}">${r.active?'فعال':'غیرفعال'}</span>
-          <span>${fa(r.subs.length)} زیردسته</span>
-        </span>
+        <span class="meta"><span>${fa(r.subs.length)} زیردسته</span></span>
       </div>
       <div class="tree-body">
-        <div class="row-actions" style="margin:8px 4px 12px">
-          <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();openSubModal(${r.id},null)">➕ زیردسته</button>
-          <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();openCatModal(${r.id},'${r.icon}','${r.name.replace(/'/g,"\\'")}')">✏️ ویرایش</button>
-          <button class="btn btn-danger btn-sm" onclick="event.stopPropagation();delCat(${r.id},'${r.name.replace(/'/g,"\\'")}',true)">🗑 حذف دسته</button>
-        </div>
         ${r.subs.map(s=>`
           <div class="sub-row" onclick="openProducts(${s.id},'${s.icon} ${s.name.replace(/'/g,"\\'")}',${r.id})">
             <span>${s.icon}</span><span class="nm">${s.name}</span>
@@ -373,119 +385,26 @@ async function loadTree(){
     </div>`).join('');
 }
 
-// ── Products of a sub ──
+async function refreshWoo(){
+  await api('/api/woo-refresh',{method:'POST'});
+  toast('در حال دریافت محصولات تازه...');loadTree();
+}
+
+// نمایش محصولات یک زیردسته (فقط‌خواندنی)
 async function openProducts(subId,title,rootId){
   const prods=await api('/api/products/'+subId);
   showModal(`
     <h3>📦 ${title}</h3>
-    <button class="btn btn-pri" style="width:100%;justify-content:center;margin-bottom:16px" onclick="openProdModal(${subId},null)">➕ افزودن محصول</button>
     <div class="prod-grid">
       ${prods.length?prods.map(p=>`
         <div class="prod">
-          <div class="ph">${p.photo_url?`<img src="${p.photo_url}">`:'📱'}<span class="tag ${p.active?'on':'off'}">${p.active?'فعال':'غیرفعال'}</span></div>
+          <div class="ph">${p.photo_url?`<img src="${p.photo_url}">`:'📱'}<span class="tag ${p.active?'on':'off'}">${p.active?'موجود':'ناموجود'}</span></div>
           <div class="body">
             <div class="nm">${p.name}</div><div class="pr">💰 ${p.price}</div>
-            <div class="acts">
-              <button class="btn btn-ghost btn-sm" style="flex:1;justify-content:center" onclick='openProdModal(${subId},${JSON.stringify(p)})'>✏️</button>
-              <button class="btn btn-danger btn-sm" onclick="delProd(${p.id},'${p.name.replace(/'/g,"\\'")}',${subId},'${title.replace(/'/g,"\\'")}',${rootId})">🗑</button>
-            </div>
+            ${p.site_url?`<a class="btn btn-ghost btn-sm" style="width:100%;justify-content:center;text-decoration:none" href="${p.site_url}" target="_blank">🌐 مشاهده در سایت</a>`:''}
           </div>
         </div>`).join(''):'<div class="empty" style="grid-column:1/-1"><div class="em">📱</div>محصولی در این زیردسته نیست</div>'}
-    </div>
-    <div class="row-actions" style="margin-top:16px;border-top:1px solid var(--line);padding-top:16px">
-      <button class="btn btn-ghost btn-sm" onclick="openSubModal(${rootId},{id:${subId},name:'${title.replace(/'/g,"\\'")}'})">✏️ نام زیردسته</button>
-      <button class="btn btn-danger btn-sm" onclick="delCat(${subId},'${title.replace(/'/g,"\\'")}',false)">🗑 حذف زیردسته</button>
     </div>`);
-}
-
-// ── Category modal ──
-function openCatModal(id,icon='',name=''){
-  const edit=id&&icon!=='';
-  showModal(`<h3>${edit?'✏️ ویرایش دسته':'➕ دسته اصلی جدید'}</h3>
-    <div class="field"><label>آیکون (ایموجی)</label><input id="cIcon" value="${icon||'📱'}" maxlength="4"></div>
-    <div class="field"><label>نام دسته</label><input id="cName" value="${name}" placeholder="مثلاً موبایل"></div>
-    <div class="modal-acts">
-      <button class="btn btn-ghost" onclick="closeModal()">انصراف</button>
-      <button class="btn btn-pri" onclick="saveCat(${edit?id:'null'})">${edit?'ذخیره':'افزودن'}</button>
-    </div>`);
-}
-async function saveCat(id){
-  const icon=$('#cIcon').value.trim(),name=$('#cName').value.trim();
-  if(!name)return toast('نام دسته را وارد کنید',true);
-  if(id){await api('/api/category/'+id,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({icon,name})});toast('دسته ویرایش شد')}
-  else{await api('/api/category',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({icon,name})});toast('دسته اضافه شد')}
-  closeModal();loadTree();
-}
-
-// ── Sub modal ──
-function openSubModal(rootId,sub){
-  const edit=sub&&sub.id;
-  showModal(`<h3>${edit?'✏️ ویرایش زیردسته':'➕ زیردسته جدید'}</h3>
-    <div class="field"><label>آیکون</label><input id="sIcon" value="${edit&&sub.icon?sub.icon:'📲'}" maxlength="4"></div>
-    <div class="field"><label>نام زیردسته</label><input id="sName" value="${edit?(sub.name||'').replace(/^.*?\s/,''):''}" placeholder="مثلاً سامسونگ"></div>
-    <div class="modal-acts">
-      <button class="btn btn-ghost" onclick="closeModal()">انصراف</button>
-      <button class="btn btn-pri" onclick="saveSub(${rootId},${edit?sub.id:'null'})">${edit?'ذخیره':'افزودن'}</button>
-    </div>`);
-}
-async function saveSub(rootId,id){
-  const icon=$('#sIcon').value.trim(),name=$('#sName').value.trim();
-  if(!name)return toast('نام زیردسته را وارد کنید',true);
-  if(id){await api('/api/category/'+id,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({icon,name})});toast('زیردسته ویرایش شد')}
-  else{await api('/api/category',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({icon,name,parent_id:rootId})});toast('زیردسته اضافه شد')}
-  closeModal();loadTree();
-}
-
-async function delCat(id,name,isRoot){
-  if(!confirm(`«${name}» و تمام محتوای داخلش برای همیشه حذف شود؟`))return;
-  await api('/api/category/'+id,{method:'DELETE'});
-  toast('حذف شd'.replace('d','شد'));closeModal();loadTree();
-}
-
-// ── Product modal ──
-let _photoFile=null;
-function openProdModal(subId,p){
-  _photoFile=null;
-  const edit=p&&p.id;
-  showModal(`<h3>${edit?'✏️ ویرایش محصول':'➕ محصول جدید'}</h3>
-    <div class="field"><label>نام محصول</label><input id="pName" value="${edit?p.name:''}"></div>
-    <div class="field"><label>قیمت</label><input id="pPrice" value="${edit?p.price:''}" placeholder="مثلاً ۱۲٬۵۰۰٬۰۰۰ تومان"></div>
-    <div class="field"><label>توضیحات</label><textarea id="pDesc">${edit&&p.description?p.description:''}</textarea></div>
-    <div class="field"><label>لینک سایت (اختیاری)</label><input id="pUrl" value="${edit&&p.site_url?p.site_url:''}" dir="ltr" placeholder="https://stland.ir/..."></div>
-    <div class="field"><label>عکس محصول</label>
-      <div class="filepick" onclick="$('#pPhoto').click()" id="pickBox">
-        ${edit&&p.photo_url?`<img src="${p.photo_url}" id="prevImg">`:'📷 برای انتخاب عکس کلیک کنید'}
-      </div>
-      <input type="file" id="pPhoto" accept="image/*" style="display:none" onchange="onPhoto(this)">
-    </div>
-    <div class="modal-acts">
-      <button class="btn btn-ghost" onclick="closeModal()">انصراف</button>
-      <button class="btn btn-pri" onclick="saveProd(${subId},${edit?p.id:'null'})">${edit?'ذخیره':'افزودن'}</button>
-    </div>`);
-}
-function onPhoto(inp){
-  if(!inp.files[0])return;_photoFile=inp.files[0];
-  const r=new FileReader();r.onload=e=>{$('#pickBox').innerHTML=`<img src="${e.target.result}">`};r.readAsDataURL(inp.files[0]);
-}
-async function saveProd(subId,id){
-  const fd=new FormData();
-  fd.append('name',$('#pName').value.trim());
-  fd.append('price',$('#pPrice').value.trim());
-  fd.append('description',$('#pDesc').value.trim());
-  fd.append('site_url',$('#pUrl').value.trim());
-  if(!id)fd.append('category_id',subId);
-  if(_photoFile)fd.append('photo',_photoFile);
-  if(!$('#pName').value.trim()||!$('#pPrice').value.trim())return toast('نام و قیمت لازم است',true);
-  const url=id?'/api/product/'+id:'/api/product';
-  const method=id?'PUT':'POST';
-  const r=await fetch(url,{method,body:fd});
-  if(r.ok){toast(id?'محصول ویرایش شد':'محصول اضافه شد');closeModal();loadTree()}
-  else toast('خطا در ذخیره',true);
-}
-async function delProd(id,name,subId,title,rootId){
-  if(!confirm(`محصول «${name}» حذف شود؟`))return;
-  await api('/api/product/'+id,{method:'DELETE'});
-  toast('محصول حذف شد');openProducts(subId,title,rootId);loadTree();
 }
 
 // ── Requests ──
