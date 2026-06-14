@@ -107,14 +107,6 @@ def progress_bar(v,t,n=8):
     if t==0: return "░"*n
     f=int(n*v/t); return "▓"*f+"░"*(n-f)
 
-def fmt_product(p):
-    """فرمت نمایش محصول برای ادمین — p: id(0),name(1),price(2),desc(3),photo(4),url(5),active(6),cat_id(7)"""
-    lines=[f"📱 {p[1]}","─"*18,f"💰 قیمت:  {p[2]}"]
-    if p[3]: lines+=["",f"📝 {p[3]}"]
-    if p[5]: lines+=["",f"🌐 {p[5]}"]
-    lines+=["","─"*18,f"وضعیت: {'✅ فعال' if p[6] else '❌ غیرفعال'}"]
-    return "\n".join(lines)
-
 async def record_stat(k): stats[k]=stats.get(k,0)+1; await save_stats()
 
 # ── load/save
@@ -240,29 +232,45 @@ async def month_users(): return await _cnt("SELECT COUNT(*) FROM users WHERE las
 async def new_today():   return await _cnt("SELECT COUNT(*) FROM users WHERE DATE(joined_at)=DATE('now','localtime')")
 async def blk_count():   return await _cnt("SELECT COUNT(*) FROM users WHERE is_blocked=1")
 
-# ── catalog db  — Schema: id(0),name(1),icon(2),parent_id(3),is_active(4)
+# ── catalog — از ووکامرس خوانده می‌شود (woo.py)
+# خروجی به فرمت tuple سازگار با کد موجود تبدیل می‌شود:
+#   دسته:   id(0),name(1),icon(2),parent_id(3),is_active(4)
+#   محصول:  id(0),name(1),price(2),description(3),photo_url(4),site_url(5),is_active(6),category_id(7)
+import woo
+
+def _cat_tuple(c):
+    # ووکامرس آیکون ندارد → از 📁/📦 استفاده می‌کنیم
+    icon = "📂" if c["parent"]==0 else "📦"
+    return (c["id"], c["name"], icon, c["parent"], 1)
+
+def _prod_tuple(p, cat_id=None):
+    return (p["id"], p["name"], p["price"], p["description"],
+            p["image"], p["permalink"], 1 if p["in_stock"] else 0,
+            cat_id if cat_id is not None else (p["category_ids"][0] if p["category_ids"] else 0))
+
 async def get_root_cats(active_only=True):
-    w="AND is_active=1" if active_only else ""
-    async with db.execute(f"SELECT id,name,icon,parent_id,is_active FROM categories WHERE parent_id IS NULL {w} ORDER BY id") as c: return await c.fetchall()
+    cats = await woo.get_root_categories()
+    return [_cat_tuple(c) for c in cats]
 
 async def get_subcats(parent_id,active_only=True):
-    w="AND is_active=1" if active_only else ""
-    async with db.execute(f"SELECT id,name,icon,parent_id,is_active FROM categories WHERE parent_id=? {w} ORDER BY id",(parent_id,)) as c: return await c.fetchall()
+    cats = await woo.get_subcategories(parent_id)
+    return [_cat_tuple(c) for c in cats]
 
 async def get_cat(cat_id):
-    async with db.execute("SELECT id,name,icon,parent_id,is_active FROM categories WHERE id=?",(cat_id,)) as c: return await c.fetchone()
+    c = await woo.get_category(cat_id)
+    return _cat_tuple(c) if c else None
 
-# ── product db — Schema: id(0),name(1),price(2),description(3),photo_id(4),site_url(5),is_active(6),category_id(7)
 async def get_products(cat_id,active_only=True):
-    w="AND is_active=1" if active_only else ""
-    async with db.execute(f"SELECT id,name,price,description,photo_id,site_url,is_active,category_id FROM products WHERE category_id=? {w} ORDER BY id",(cat_id,)) as c: return await c.fetchall()
+    prods = await woo.get_products_by_category(cat_id)
+    return [_prod_tuple(p, cat_id) for p in prods]
 
 async def get_product(pid):
-    async with db.execute("SELECT id,name,price,description,photo_id,site_url,is_active,category_id FROM products WHERE id=?",(pid,)) as c: return await c.fetchone()
+    p = await woo.get_product(pid)
+    return _prod_tuple(p) if p else None
 
 async def search_products(q):
-    q=f"%{q}%"
-    async with db.execute("SELECT id,name,price,description,photo_id,site_url,is_active,category_id FROM products WHERE(name LIKE ? OR description LIKE ?) AND is_active=1 ORDER BY name LIMIT 20",(q,q)) as c: return await c.fetchall()
+    prods = await woo.search_products(q)
+    return [_prod_tuple(p) for p in prods]
 
 # ── requests db
 async def save_request(uid,username,first_name,phone,pid,pname):
@@ -274,23 +282,6 @@ async def get_requests():
     async with db.execute("SELECT id,user_id,username,first_name,phone,product_name,status,created_at FROM requests ORDER BY id DESC LIMIT 30") as c: return await c.fetchall()
 
 async def done_request(rid): await db.execute("UPDATE requests SET status='done' WHERE id=?",(rid,)); await db.commit()
-
-# ── cascade delete helpers
-async def delete_root_cat(root_id):
-    """حذف دسته اصلی + همه زیردسته‌ها + همه محصولات زیرمجموعه"""
-    subs=await get_subcats(root_id,active_only=False)
-    for s in subs:
-        await db.execute("DELETE FROM products WHERE category_id=?",(s[0],))
-        await db.execute("DELETE FROM categories WHERE id=?",(s[0],))
-    await db.execute("DELETE FROM products WHERE category_id=?",(root_id,))
-    await db.execute("DELETE FROM categories WHERE id=?",(root_id,))
-    await db.commit()
-
-async def delete_sub_cat(sub_id):
-    """حذف زیردسته + همه محصولاتش"""
-    await db.execute("DELETE FROM products WHERE category_id=?",(sub_id,))
-    await db.execute("DELETE FROM categories WHERE id=?",(sub_id,))
-    await db.commit()
 
 # ── anti-spam
 _W,_L,_B=10,7,60; _spam=defaultdict(lambda:deque(maxlen=_L)); _blk={}
@@ -368,7 +359,7 @@ def admin_menu():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 داشبورد",callback_data="dash"),
          InlineKeyboardButton("👥 کاربران",callback_data="users_menu")],
-        [InlineKeyboardButton("🛍 محصولات",callback_data="admin_catalog"),
+        [InlineKeyboardButton("🛍 محصولات سایت",callback_data="woo_status"),
          InlineKeyboardButton("📬 درخواست‌ها",callback_data="admin_reqs")],
         [InlineKeyboardButton("✏️ مدیریت بخش‌ها",callback_data="sections")],
         [InlineKeyboardButton("🕐 ساعت کاری",callback_data="wh_menu"),
@@ -478,38 +469,6 @@ def users_list_kb(rows,off,ft,total):
 def udetail_kb(uid,is_bl): return InlineKeyboardMarkup([
     [InlineKeyboardButton("✅ رفع بلاک" if is_bl else "🚫 بلاک",callback_data=f"utog_{uid}")],
     [InlineKeyboardButton("🔙",callback_data="users_menu")]])
-
-# ── catalog admin keyboards
-def acat_root_kb(roots):
-    btns=[[InlineKeyboardButton(f"{'✅' if c[4] else '❌'} {c[2]} {c[1]}",callback_data=f"acr_{c[0]}")] for c in roots]
-    btns.append([InlineKeyboardButton("➕ دسته اصلی جدید",callback_data="acr_new")])
-    btns.append([InlineKeyboardButton("🔙",callback_data="back_to_admin")]); return InlineKeyboardMarkup(btns)
-
-def acat_sub_kb(root_id,subs):
-    btns=[[InlineKeyboardButton(f"{'✅' if s[4] else '❌'} {s[2]} {s[1]}",callback_data=f"acs_{s[0]}")] for s in subs]
-    btns.append([InlineKeyboardButton("➕ زیردسته جدید",callback_data=f"acs_new_{root_id}")])
-    btns.append([InlineKeyboardButton("✏️ نام",callback_data=f"acr_ed_{root_id}"),
-                 InlineKeyboardButton("🗑 حذف",callback_data=f"acr_dl_{root_id}")])
-    btns.append([InlineKeyboardButton("🔙",callback_data="admin_catalog")]); return InlineKeyboardMarkup(btns)
-
-def acat_products_kb(sub_id,products,root_id):
-    btns=[[InlineKeyboardButton(f"{'✅' if p[6] else '❌'} 📱 {p[1]}",callback_data=f"aprd_{p[0]}")] for p in products]
-    btns.append([InlineKeyboardButton("➕ محصول جدید",callback_data=f"aprd_new_{sub_id}")])
-    btns.append([InlineKeyboardButton("✏️ نام",callback_data=f"acs_ed_{sub_id}"),
-                 InlineKeyboardButton("🗑 حذف",callback_data=f"acs_dl_{sub_id}")])
-    btns.append([InlineKeyboardButton("🔙",callback_data=f"acr_{root_id}")]); return InlineKeyboardMarkup(btns)
-
-def aprd_kb(pid,sub_id,is_active):
-    tg="🔴 غیرفعال‌سازی" if is_active else "🟢 فعال‌سازی"
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✏️ ویرایش نام",callback_data=f"aprd_en_{pid}"),
-         InlineKeyboardButton("💰 ویرایش قیمت",callback_data=f"aprd_ep_{pid}")],
-        [InlineKeyboardButton("📝 ویرایش توضیح",callback_data=f"aprd_ed_{pid}"),
-         InlineKeyboardButton("📸 ویرایش عکس",callback_data=f"aprd_ei_{pid}")],
-        [InlineKeyboardButton("🌐 ویرایش لینک",callback_data=f"aprd_eu_{pid}")],
-        [InlineKeyboardButton(tg,callback_data=f"aprd_etg_{pid}")],
-        [InlineKeyboardButton("🗑 حذف محصول",callback_data=f"aprd_del_{pid}")],
-        [InlineKeyboardButton("🔙 بازگشت",callback_data=f"acs_{sub_id}")]])
 
 def reqs_kb(reqs):
     btns=[[InlineKeyboardButton(f"{'🆕' if r[6]=='new' else '✅'} {r[5]} — {r[3]}",callback_data=f"rq_{r[0]}")] for r in reqs]
@@ -701,6 +660,45 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             await query.answer()
             await safe_edit(query.message,"👑 پنل مدیریت استوک لند",reply_markup=admin_menu())
 
+        elif data=="woo_status":
+            await query.answer()
+            import woo
+            if not woo.is_configured():
+                await safe_edit(query.message,
+                    "🛍 محصولات سایت\n" + "─"*18 +
+                    "\n\n⚠️ اتصال به سایت تنظیم نشده.\n\n"
+                    "برای فعال‌سازی، متغیرهای WOO_URL، WOO_KEY و WOO_SECRET را در تنظیمات سرور وارد کنید.",
+                    reply_markup=back_admin()); return
+            await safe_edit(query.message,"🛍 در حال اتصال به سایت...",reply_markup=None)
+            ok,msg = await woo.test_connection()
+            if not ok:
+                await safe_edit(query.message,f"🛍 محصولات سایت\n{'─'*18}\n\n❌ {msg}",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔄 تلاش مجدد",callback_data="woo_status")],
+                        [InlineKeyboardButton("🔙 پنل اصلی",callback_data="back_to_admin")]])); return
+            roots = await woo.get_root_categories()
+            cats = await woo.get_categories()
+            total_prod = sum(c["count"] for c in roots)
+            txt = (f"🛍 محصولات سایت (ووکامرس)\n{'─'*18}"
+                   f"\n✅ اتصال برقرار است"
+                   f"\n\n📂 دسته اصلی: {to_fa(len(roots))}"
+                   f"\n📁 کل دسته‌ها: {to_fa(len(cats))}"
+                   f"\n📦 مجموع محصولات: {to_fa(total_prod)}"
+                   f"\n\n💡 محصولات از سایت stland.ir خوانده می‌شوند."
+                   f"\nبرای افزودن یا ویرایش محصول، به پنل وردپرس مراجعه کنید.")
+            await safe_edit(query.message,txt,reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 بروزرسانی فوری",callback_data="woo_refresh")],
+                [InlineKeyboardButton("🔙 پنل اصلی",callback_data="back_to_admin")]]))
+
+        elif data=="woo_refresh":
+            await query.answer("کش پاک شد، در حال دریافت...",show_alert=False)
+            import woo
+            woo.clear_cache()
+            await safe_edit(query.message,"🔄 محصولات بروزرسانی شد.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🛍 مشاهده وضعیت",callback_data="woo_status")],
+                    [InlineKeyboardButton("🔙 پنل اصلی",callback_data="back_to_admin")]]))
+
         elif data=="dash":
             await query.answer()
             t,d,w,m,nt,bl=(await total_users(),await today_users(),await week_users(),
@@ -816,197 +814,6 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             sec=get_sec_btns(key); sec["items"]=[x for x in sec.get("items",[]) if x["id"]!=bid]; await save_buttons()
             await query.answer("🗑 حذف شد.",show_alert=True)
             await safe_edit(query.message,f"🔘 {SECTION_NAMES.get(key,key)}",reply_markup=sec_btns_kb(key))
-
-        # ── مدیریت محصولات (ادمین) — اسم تغییر کرد، باگ باز نشدن رفع شد
-        elif data=="admin_catalog":
-            await query.answer()
-            roots=await get_root_cats(active_only=False)
-            btns=[[InlineKeyboardButton("✨ افزودن محصول جدید",callback_data="aprd_quick_new")]]
-            for c in roots:
-                btns.append([InlineKeyboardButton(f"{'✅' if c[4] else '❌'} {c[2]} {c[1]}",callback_data=f"acr_{c[0]}")])
-            btns.append([InlineKeyboardButton("➕ دسته اصلی جدید",callback_data="acr_new")])
-            btns.append([InlineKeyboardButton("🔙",callback_data="back_to_admin")])
-            await safe_edit(query.message,"🛍 مدیریت محصولات:",reply_markup=InlineKeyboardMarkup(btns))
-
-        elif data=="aprd_quick_new":
-            await query.answer()
-            roots=await get_root_cats(active_only=False)
-            btns=[[InlineKeyboardButton(f"{c[2]} {c[1]}",callback_data=f"aprd_qn_root_{c[0]}")] for c in roots]
-            btns.append([InlineKeyboardButton("➕ دسته جدید بساز",callback_data="aprd_qn_newroot")])
-            btns.append([InlineKeyboardButton("🔙",callback_data="admin_catalog")])
-            await safe_edit(query.message,"📦 دسته محصول را انتخاب کنید:",reply_markup=InlineKeyboardMarkup(btns))
-
-        elif data=="aprd_qn_newroot":
-            await query.answer()
-            ctx.user_data.update({"mode":"acr_new_ic","coming_from_prod":True})
-            await query.message.reply_text("🎨 آیکون دسته (مثال: 📱):",reply_markup=cancel_menu())
-
-        elif data.startswith("aprd_qn_root_"):
-            await query.answer()
-            root_id=int(data[13:]); root=await get_cat(root_id)
-            subs=await get_subcats(root_id,active_only=False)
-            btns=[[InlineKeyboardButton(f"{s[2]} {s[1]}",callback_data=f"aprd_qn_sub_{s[0]}")] for s in subs]
-            btns.append([InlineKeyboardButton("➕ زیردسته جدید بساز",callback_data=f"aprd_qn_newsub_{root_id}")])
-            btns.append([InlineKeyboardButton("🔙",callback_data="aprd_quick_new")])
-            await safe_edit(query.message,f"📁 {root[2]} {root[1]}\nزیردسته را انتخاب کنید:",reply_markup=InlineKeyboardMarkup(btns))
-
-        elif data.startswith("aprd_qn_newsub_"):
-            await query.answer()
-            root_id=int(data[15:])
-            ctx.user_data.update({"mode":"acs_new_ic","root_id":root_id,"coming_from_prod":True})
-            await query.message.reply_text("🎨 آیکون زیردسته:",reply_markup=cancel_menu())
-
-        elif data.startswith("aprd_qn_sub_"):
-            await query.answer()
-            sub_id=int(data[12:]); ctx.user_data.update({"mode":"aprd_n_name","sub_id":sub_id})
-            await query.message.reply_text("📱 نام محصول:",reply_markup=cancel_menu())
-
-        elif data=="acr_new":
-            await query.answer()
-            ctx.user_data.update({"mode":"acr_new_ic"})
-            await query.message.reply_text("🎨 آیکون (مثال: 📱 💻 🎧):",reply_markup=cancel_menu())
-
-        elif data.startswith("acr_ed_"):
-            await query.answer()
-            rid=int(data[7:]); ctx.user_data.update({"mode":"acr_edit","cat_id":rid})
-            await query.message.reply_text("✏️ نام جدید دسته اصلی:",reply_markup=cancel_menu())
-
-        elif data.startswith("acr_delok_"):
-            rid=int(data[10:]); root=await get_cat(rid)
-            await delete_root_cat(rid)
-            await query.answer("🗑 دسته و تمام محتوایش حذف شد.",show_alert=True)
-            roots=await get_root_cats(active_only=False)
-            btns=[[InlineKeyboardButton("✨ افزودن محصول جدید",callback_data="aprd_quick_new")]]
-            for c in roots: btns.append([InlineKeyboardButton(f"{'✅' if c[4] else '❌'} {c[2]} {c[1]}",callback_data=f"acr_{c[0]}")])
-            btns+=[[InlineKeyboardButton("➕ دسته اصلی جدید",callback_data="acr_new")],[InlineKeyboardButton("🔙 پنل اصلی",callback_data="back_to_admin")]]
-            await safe_edit(query.message,"🛍 مدیریت محصولات:",reply_markup=InlineKeyboardMarkup(btns))
-
-        elif data.startswith("acr_dl_"):
-            await query.answer()
-            rid=int(data[7:]); root=await get_cat(rid)
-            subs=await get_subcats(rid,active_only=False)
-            ncount=0
-            for s in subs:
-                ps=await get_products(s[0],active_only=False); ncount+=len(ps)
-            await safe_edit(query.message,
-                f"⚠️ حذف دسته «{root[2] if root else ''} {root[1] if root else ''}»\n\n"
-                f"این کار {to_fa(len(subs))} زیردسته و {to_fa(ncount)} محصول را برای همیشه حذف می‌کند.\n\nمطمئن هستید؟",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🗑 بله، حذف کن",callback_data=f"acr_delok_{rid}")],
-                    [InlineKeyboardButton("↩️ انصراف",callback_data=f"acr_{rid}")]]))
-
-        elif data.startswith("acr_"):
-            await query.answer()
-            root_id=int(data[4:]); root=await get_cat(root_id)
-            if not root: return
-            subs=await get_subcats(root_id,active_only=False)
-            await safe_edit(query.message,f"📁 {root[2]} {root[1]}\nزیردسته: {to_fa(len(subs))} عدد",reply_markup=acat_sub_kb(root_id,subs))
-
-        elif data.startswith("acs_new_"):
-            await query.answer()
-            root_id=int(data[8:]); ctx.user_data.update({"mode":"acs_new_ic","root_id":root_id})
-            await query.message.reply_text("🎨 آیکون زیردسته:",reply_markup=cancel_menu())
-
-        elif data.startswith("acs_ed_"):
-            await query.answer()
-            sid=int(data[7:]); ctx.user_data.update({"mode":"acs_edit","cat_id":sid})
-            await query.message.reply_text("✏️ نام جدید زیردسته:",reply_markup=cancel_menu())
-
-        elif data.startswith("acs_delok_"):
-            sid=int(data[10:]); sub=await get_cat(sid); root_id=sub[3] if sub else None
-            await delete_sub_cat(sid)
-            await query.answer("🗑 زیردسته و محصولاتش حذف شد.",show_alert=True)
-            if root_id:
-                subs=await get_subcats(root_id,active_only=False); root=await get_cat(root_id)
-                await safe_edit(query.message,f"📁 {root[2] if root else ''} {root[1] if root else ''}\nزیردسته: {to_fa(len(subs))} عدد",reply_markup=acat_sub_kb(root_id,subs))
-            else:
-                await safe_edit(query.message,"🛍 مدیریت محصولات:",reply_markup=acat_root_kb(await get_root_cats(active_only=False)))
-
-        elif data.startswith("acs_dl_"):
-            await query.answer()
-            sid=int(data[7:]); sub=await get_cat(sid)
-            ps=await get_products(sid,active_only=False)
-            await safe_edit(query.message,
-                f"⚠️ حذف زیردسته «{sub[2] if sub else ''} {sub[1] if sub else ''}»\n\n"
-                f"این کار {to_fa(len(ps))} محصول را برای همیشه حذف می‌کند.\n\nمطمئن هستید؟",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🗑 بله، حذف کن",callback_data=f"acs_delok_{sid}")],
-                    [InlineKeyboardButton("↩️ انصراف",callback_data=f"acs_{sid}")]]))
-
-        elif data.startswith("acs_"):
-            await query.answer()
-            sub_id=int(data[4:]); sub=await get_cat(sub_id)
-            if not sub: return
-            products=await get_products(sub_id,active_only=False); root_id=sub[3]
-            await safe_edit(query.message,f"📦 {sub[2]} {sub[1]}\nمحصول: {to_fa(len(products))} عدد",reply_markup=acat_products_kb(sub_id,products,root_id))
-
-        elif data.startswith("aprd_new_"):
-            await query.answer()
-            sub_id=int(data[9:]); ctx.user_data.update({"mode":"aprd_n_name","sub_id":sub_id})
-            await query.message.reply_text("📱 نام محصول:",reply_markup=cancel_menu())
-
-        elif data.startswith("aprd_etg_"):
-            pid=int(data[9:]); p=await get_product(pid)
-            if not p: return
-            await db.execute("UPDATE products SET is_active=? WHERE id=?",(0 if p[6] else 1,pid)); await db.commit()
-            await query.answer("✅ فعال شد" if not p[6] else"❌ غیرفعال شد",show_alert=True)
-            p=await get_product(pid)
-            await safe_edit(query.message,fmt_product(p),reply_markup=aprd_kb(pid,p[7] or 0,bool(p[6])))
-
-        elif data.startswith("aprd_delok_"):
-            pid=int(data[11:]); p=await get_product(pid); sub_id=p[7] if p else None
-            await db.execute("DELETE FROM products WHERE id=?",(pid,)); await db.commit()
-            await query.answer("🗑 محصول حذف شد.",show_alert=True)
-            if sub_id:
-                sub=await get_cat(sub_id); products=await get_products(sub_id,active_only=False)
-                if sub:
-                    await safe_edit(query.message,f"📦 {sub[2]} {sub[1]}\nمحصول: {to_fa(len(products))} عدد",reply_markup=acat_products_kb(sub_id,products,sub[3])); return
-            await safe_edit(query.message,"🛍 مدیریت محصولات:",reply_markup=acat_root_kb(await get_root_cats(active_only=False)))
-
-        elif data.startswith("aprd_del_"):
-            await query.answer()
-            pid=int(data[9:]); p=await get_product(pid)
-            if not p: await query.message.reply_text("❌ محصول یافت نشد.",reply_markup=back_admin()); return
-            await safe_edit(query.message,
-                f"⚠️ حذف محصول «{p[1]}»\n\nاین محصول برای همیشه حذف می‌شود. مطمئن هستید؟",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🗑 بله، حذف کن",callback_data=f"aprd_delok_{pid}")],
-                    [InlineKeyboardButton("↩️ انصراف",callback_data=f"aprd_{pid}")]]))
-
-        elif data.startswith("aprd_en_"):
-            await query.answer()
-            pid=int(data[8:]); ctx.user_data.update({"mode":"aprd_e_name","edit_pid":pid})
-            await query.message.reply_text("✏️ نام جدید:",reply_markup=cancel_menu())
-
-        elif data.startswith("aprd_ep_"):
-            await query.answer()
-            pid=int(data[8:]); ctx.user_data.update({"mode":"aprd_e_price","edit_pid":pid})
-            await query.message.reply_text("💰 قیمت جدید:",reply_markup=cancel_menu())
-
-        elif data.startswith("aprd_ed_"):
-            await query.answer()
-            pid=int(data[8:]); ctx.user_data.update({"mode":"aprd_e_desc","edit_pid":pid})
-            await query.message.reply_text("📝 توضیح جدید (یا . حذف):",reply_markup=cancel_menu())
-
-        elif data.startswith("aprd_ei_"):
-            await query.answer()
-            pid=int(data[8:]); ctx.user_data.update({"mode":"aprd_e_photo","edit_pid":pid})
-            await query.message.reply_text("📸 عکس جدید:",reply_markup=cancel_menu())
-
-        elif data.startswith("aprd_eu_"):
-            await query.answer()
-            pid=int(data[8:]); ctx.user_data.update({"mode":"aprd_e_url","edit_pid":pid})
-            await query.message.reply_text("🌐 لینک جدید (یا . حذف):",reply_markup=cancel_menu())
-
-        elif data.startswith("aprd_"):
-            await query.answer()
-            pid=int(data[5:]); p=await get_product(pid)
-            if not p: await query.message.reply_text("❌ محصول یافت نشد.",reply_markup=back_admin()); return
-            txt=fmt_product(p); kb=aprd_kb(pid,p[7] or 0,bool(p[6]))
-            if p[4]:
-                try: await query.message.reply_photo(photo=p[4],caption=txt[:1024],reply_markup=kb); return
-                except: pass
-            await safe_edit(query.message,txt,reply_markup=kb)
 
         # ── درخواست‌ها
         elif data=="admin_reqs":
@@ -1202,110 +1009,6 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         if mode=="wh_mcl":
             ctx.user_data.pop("mode",None); workhours["msg_closed"]=text; await save_workhours()
             await update.message.reply_text("✅",reply_markup=main_menu()); return
-        if mode=="acr_new_ic":
-            ctx.user_data.update({"acr_ic":text,"mode":"acr_new_nm"})
-            await update.message.reply_text("✏️ نام دسته اصلی:",reply_markup=cancel_menu()); return
-        if mode=="acr_new_nm":
-            ic=ctx.user_data.pop("acr_ic","📦"); coming_from_prod=ctx.user_data.pop("coming_from_prod",False)
-            ctx.user_data.pop("mode",None)
-            await db.execute("INSERT INTO categories(name,icon,parent_id,is_active) VALUES(?,?,NULL,1)",(text,ic)); await db.commit()
-            async with db.execute("SELECT id FROM categories WHERE name=? AND parent_id IS NULL ORDER BY id DESC LIMIT 1",(text,)) as c: row=await c.fetchone()
-            new_rid=row[0] if row else None
-            if coming_from_prod and new_rid:
-                ctx.user_data.update({"mode":"acs_new_ic","root_id":new_rid})
-                await update.message.reply_text(f"✅ دسته «{ic} {text}» ساخته شد.\n➕ حالا زیردسته بسازید:\n🎨 آیکون زیردسته:",reply_markup=cancel_menu()); return
-            roots=await get_root_cats(active_only=False)
-            btns=[[InlineKeyboardButton("✨ افزودن محصول جدید",callback_data="aprd_quick_new")]]
-            for c in roots: btns.append([InlineKeyboardButton(f"{'✅' if c[4] else '❌'} {c[2]} {c[1]}",callback_data=f"acr_{c[0]}")])
-            btns+=[[InlineKeyboardButton("➕ دسته اصلی جدید",callback_data="acr_new")],[InlineKeyboardButton("🔙 پنل اصلی",callback_data="back_to_admin")]]
-            await update.message.reply_text(f"✅ دسته «{ic} {text}» اضافه شد.",reply_markup=main_menu())
-            await update.message.reply_text("🛍 مدیریت محصولات:",reply_markup=InlineKeyboardMarkup(btns)); return
-        if mode=="acr_edit":
-            cat_id=ctx.user_data.pop("cat_id",None); ctx.user_data.pop("mode",None)
-            await db.execute("UPDATE categories SET name=? WHERE id=?",(text,cat_id)); await db.commit()
-            await update.message.reply_text("✅ ذخیره شد.",reply_markup=main_menu()); return
-        if mode=="acs_new_ic":
-            ctx.user_data.update({"acs_ic":text,"mode":"acs_new_nm"})
-            await update.message.reply_text("✏️ نام زیردسته:",reply_markup=cancel_menu()); return
-        if mode=="acs_new_nm":
-            ic=ctx.user_data.pop("acs_ic","📦"); root_id=ctx.user_data.pop("root_id",None)
-            coming_from_prod=ctx.user_data.pop("coming_from_prod",False); ctx.user_data.pop("mode",None)
-            await db.execute("INSERT INTO categories(name,icon,parent_id,is_active) VALUES(?,?,?,1)",(text,ic,root_id)); await db.commit()
-            async with db.execute("SELECT id FROM categories WHERE name=? AND parent_id=? ORDER BY id DESC LIMIT 1",(text,root_id)) as c: row=await c.fetchone()
-            new_sid=row[0] if row else None
-            if coming_from_prod and new_sid:
-                ctx.user_data.update({"mode":"aprd_n_name","sub_id":new_sid})
-                await update.message.reply_text(f"✅ زیردسته «{ic} {text}» ساخته شد.\n➕ حالا محصول بسازید:\n📱 نام محصول:",reply_markup=cancel_menu()); return
-            if root_id:
-                root=await get_cat(root_id); subs=await get_subcats(root_id,active_only=False)
-                if root:
-                    await update.message.reply_text(f"✅ زیردسته «{ic} {text}» اضافه شد.",reply_markup=main_menu())
-                    await update.message.reply_text(f"📁 {root[2]} {root[1]}\nزیردسته: {to_fa(len(subs))} عدد",reply_markup=acat_sub_kb(root_id,subs)); return
-            await update.message.reply_text(f"✅ زیردسته «{ic} {text}» اضافه شد.",reply_markup=main_menu()); return
-        if mode=="acs_edit":
-            cat_id=ctx.user_data.pop("cat_id",None); ctx.user_data.pop("mode",None)
-            await db.execute("UPDATE categories SET name=? WHERE id=?",(text,cat_id)); await db.commit()
-            await update.message.reply_text("✅ ذخیره شد.",reply_markup=main_menu()); return
-        if mode=="aprd_n_name":
-            ctx.user_data.update({"prd_name":text,"mode":"aprd_n_price"})
-            await update.message.reply_text("💰 قیمت:",reply_markup=cancel_menu()); return
-        if mode=="aprd_n_price":
-            ctx.user_data.update({"prd_price":text,"mode":"aprd_n_desc"})
-            await update.message.reply_text("📝 توضیح (یا . بدون توضیح):",reply_markup=cancel_menu()); return
-        if mode=="aprd_n_desc":
-            ctx.user_data.update({"prd_desc":None if text=="." else text,"mode":"aprd_n_url"})
-            await update.message.reply_text("🌐 لینک (یا . بدون):",reply_markup=cancel_menu()); return
-        if mode=="aprd_n_url":
-            ctx.user_data.update({"prd_url":None if text=="." else text,"mode":"aprd_n_photo"})
-            await update.message.reply_text("📸 عکس (یا . بدون):",reply_markup=cancel_menu()); return
-        if mode=="aprd_n_photo" and text==".":
-            sub_id=ctx.user_data.pop("sub_id",None); name=ctx.user_data.pop("prd_name",""); price=ctx.user_data.pop("prd_price","")
-            desc=ctx.user_data.pop("prd_desc",None); url=ctx.user_data.pop("prd_url",None); ctx.user_data.pop("mode",None)
-            await db.execute("INSERT INTO products(category_id,name,price,description,photo_id,site_url,is_active,created_at) VALUES(?,?,?,?,?,?,1,?)",(sub_id,name,price,desc,None,url,gregorian_now())); await db.commit()
-            await update.message.reply_text(f"✅ محصول «{name}» اضافه شد.",reply_markup=main_menu())
-            if sub_id:
-                sub=await get_cat(sub_id); products=await get_products(sub_id,active_only=False)
-                if sub: await update.message.reply_text(f"📦 {sub[2]} {sub[1]}\nمحصول: {to_fa(len(products))} عدد",reply_markup=acat_products_kb(sub_id,products,sub[3]))
-            return
-        if mode=="aprd_e_name":
-            pid=ctx.user_data.pop("edit_pid",None); ctx.user_data.pop("mode",None)
-            if pid:
-                await db.execute("UPDATE products SET name=? WHERE id=?",(text,pid)); await db.commit()
-                p=await get_product(pid)
-                if p:
-                    await update.message.reply_text(f"✅ نام به «{text}» تغییر کرد.",reply_markup=main_menu())
-                    await update.message.reply_text(fmt_product(p),reply_markup=aprd_kb(pid,p[7] or 0,bool(p[6]))); return
-            await update.message.reply_text("✅",reply_markup=main_menu()); return
-        if mode=="aprd_e_price":
-            pid=ctx.user_data.pop("edit_pid",None); ctx.user_data.pop("mode",None)
-            if pid:
-                await db.execute("UPDATE products SET price=? WHERE id=?",(text,pid)); await db.commit()
-                p=await get_product(pid)
-                if p:
-                    await update.message.reply_text(f"✅ قیمت به «{text}» تغییر کرد.",reply_markup=main_menu())
-                    await update.message.reply_text(fmt_product(p),reply_markup=aprd_kb(pid,p[7] or 0,bool(p[6]))); return
-            await update.message.reply_text("✅",reply_markup=main_menu()); return
-        if mode=="aprd_e_desc":
-            pid=ctx.user_data.pop("edit_pid",None); ctx.user_data.pop("mode",None)
-            if pid:
-                val=None if text=="." else text
-                await db.execute("UPDATE products SET description=? WHERE id=?",(val,pid)); await db.commit()
-                p=await get_product(pid)
-                if p:
-                    await update.message.reply_text("✅ توضیح ذخیره شد.",reply_markup=main_menu())
-                    await update.message.reply_text(fmt_product(p),reply_markup=aprd_kb(pid,p[7] or 0,bool(p[6]))); return
-            await update.message.reply_text("✅",reply_markup=main_menu()); return
-        if mode=="aprd_e_url":
-            pid=ctx.user_data.pop("edit_pid",None); ctx.user_data.pop("mode",None)
-            if pid:
-                val=None if text=="." else text
-                await db.execute("UPDATE products SET site_url=? WHERE id=?",(val,pid)); await db.commit()
-                p=await get_product(pid)
-                if p:
-                    await update.message.reply_text("✅ لینک ذخیره شد.",reply_markup=main_menu())
-                    await update.message.reply_text(fmt_product(p),reply_markup=aprd_kb(pid,p[7] or 0,bool(p[6]))); return
-            await update.message.reply_text("✅",reply_markup=main_menu()); return
-
     # ════ catalog search ════
     if mode=="cat_search":
         ctx.user_data.pop("mode",None); results=await search_products(text)
@@ -1370,24 +1073,6 @@ async def photo_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         ctx.user_data.pop("mode",None); caption=update.message.caption or""
         await update.message.reply_text("📤 در حال ارسال...")
         await broadcast(ctx,caption,photo=photo.file_id); return
-    if mode=="aprd_n_photo":
-        sub_id=ctx.user_data.pop("sub_id",None); name=ctx.user_data.pop("prd_name",""); price=ctx.user_data.pop("prd_price","")
-        desc=ctx.user_data.pop("prd_desc",None); url=ctx.user_data.pop("prd_url",None); ctx.user_data.pop("mode",None)
-        await db.execute("INSERT INTO products(category_id,name,price,description,photo_id,site_url,is_active,created_at) VALUES(?,?,?,?,?,?,1,?)",(sub_id,name,price,desc,photo.file_id,url,gregorian_now())); await db.commit()
-        await update.message.reply_text(f"✅ محصول «{name}» با عکس اضافه شد.",reply_markup=main_menu())
-        if sub_id:
-            sub=await get_cat(sub_id); products=await get_products(sub_id,active_only=False)
-            if sub: await update.message.reply_text(f"📦 {sub[2]} {sub[1]}\nمحصول: {to_fa(len(products))} عدد",reply_markup=acat_products_kb(sub_id,products,sub[3]))
-        return
-    if mode=="aprd_e_photo":
-        pid=ctx.user_data.pop("edit_pid",None); ctx.user_data.pop("mode",None)
-        if pid:
-            await db.execute("UPDATE products SET photo_id=? WHERE id=?",(photo.file_id,pid)); await db.commit()
-            p=await get_product(pid)
-            if p:
-                await update.message.reply_text("✅ عکس محصول ذخیره شد.",reply_markup=main_menu())
-                await update.message.reply_photo(photo=p[4],caption=fmt_product(p)[:1024],reply_markup=aprd_kb(pid,p[7] or 0,bool(p[6]))); return
-        await update.message.reply_text("✅ عکس ذخیره شد.",reply_markup=main_menu()); return
 
 # ════════════════════════════════════════════════
 #  DOCUMENT HANDLER (backup import)
