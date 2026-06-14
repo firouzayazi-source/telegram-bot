@@ -12,8 +12,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger("app")
 
 # ── آپلودر عکس به تلگرام ─────────────────────────
-# پنل وب وقتی عکس می‌گیرد، آن را به تلگرام می‌فرستد تا file_id بگیرد
-# تا بات هم بتواند همان عکس را نشان دهد.
 import requests
 
 def make_tg_uploader(token, admin_id):
@@ -29,7 +27,7 @@ def make_tg_uploader(token, admin_id):
             if j.get("ok"):
                 photos = j["result"].get("photo", [])
                 if photos:
-                    return photos[-1]["file_id"]  # بزرگ‌ترین سایز
+                    return photos[-1]["file_id"]
         except Exception as e:
             logger.error(f"tg upload error: {e}")
         return None
@@ -41,7 +39,6 @@ def run_bot():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     import bot
-    # post_init بات دیتابیس و فایل‌ها را آماده می‌کند
     app = bot.ApplicationBuilder().token(bot.TOKEN).post_init(bot.post_init).build()
     app.add_handler(bot.CommandHandler("start", bot.cmd_start))
     app.add_handler(bot.CommandHandler("admin", bot.cmd_admin))
@@ -50,18 +47,16 @@ def run_bot():
     app.add_handler(bot.MessageHandler(bot.filters.Document.ZIP & ~bot.filters.COMMAND, bot.document_handler))
     app.add_handler(bot.MessageHandler(bot.filters.TEXT & ~bot.filters.COMMAND, bot.text_handler))
     logger.info("🤖 بات شروع شد")
-    app.run_polling(drop_pending_updates=True, close_loop=False)
+    app.run_polling(drop_pending_updates=True, close_loop=False, stop_signals=())  # ← تغییر اینجاست
 
 # ── Main ─────────────────────────────────────────
 def main():
     token = os.environ["BOT_TOKEN"].strip()
     admin_id = int(os.environ["ADMIN_ID"].strip())
 
-    # بات را در ترد پس‌زمینه اجرا کن
     bot_thread = threading.Thread(target=run_bot, daemon=True)
     bot_thread.start()
 
-    # uploader را به پنل وب وصل کن
     import web
     web.set_tg_uploader(make_tg_uploader(token, admin_id))
 
