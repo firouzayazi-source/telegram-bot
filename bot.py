@@ -13,6 +13,7 @@ TOKEN = os.environ["BOT_TOKEN"].strip()
 ADMIN_ID = int(os.environ["ADMIN_ID"].strip())
 DATA_FILE = "data.json"; DB_FILE = "users.db"; BANNER_FILE = "banner.json"
 WORKHOURS_FILE = "workhours.json"; BUTTONS_FILE = "buttons.json"
+MENU_FILE = "menu.json"
 SETTINGS_FILE = "settings.json"; STATS_FILE = "stats.json"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -37,6 +38,19 @@ def gregorian_now(): return datetime.now(IRAN_TZ).strftime("%Y-%m-%d %H:%M:%S")
 # ── منو
 MENU_ITEMS = {"1":"🌐 شبکه‌های اجتماعی","2":"🌐 سایت استوک لند",
               "3":"💰 شرایط اقساط","4":"📞 پشتیبانی","5":"📍 آدرس فروشگاه"}
+# پیکربندی منوی اصلی — قابل تغییر از پنل ادمین (menu.json)
+# هر آیتم: key (ثابت), label (قابل تغییر), order (ترتیب), enabled (روشن/خاموش)
+DEFAULT_MENU = [
+    {"key":"1","label":"🌐 شبکه‌های اجتماعی","order":1,"enabled":True},
+    {"key":"2","label":"🌐 سایت استوک لند","order":2,"enabled":True},
+    {"key":"3","label":"💰 شرایط اقساط","order":3,"enabled":True},
+    {"key":"4","label":"📞 پشتیبانی","order":4,"enabled":True},
+    {"key":"5","label":"📍 آدرس فروشگاه","order":5,"enabled":True},
+    {"key":"catalog","label":"🛍 محصولات","order":6,"enabled":True},
+    {"key":"workhours","label":"🕐 ساعت کاری","order":7,"enabled":True},
+]
+menu_cfg = []
+
 SECTION_NAMES = {"welcome":"🏠 خوش‌آمدگویی",
                  "catalog":"🛍 محصولات","workhours":"🕐 ساعت کاری",
                  "1":"🌐 شبکه‌های اجتماعی","2":"🌐 سایت استوک لند",
@@ -144,6 +158,30 @@ async def load_buttons():
     for k in SECTION_NAMES: buttons.setdefault(k,{"enabled":True,"items":[]})
 async def save_buttons(): await _wj(BUTTONS_FILE,buttons)
 
+async def load_menu():
+    global menu_cfg
+    menu_cfg = await _rj(MENU_FILE, list)
+    if not menu_cfg:
+        menu_cfg = [dict(m) for m in DEFAULT_MENU]; await save_menu()
+    else:
+        # اطمینان از وجود همه کلیدها (اگر نسخه قدیمی بود)
+        existing = {m["key"] for m in menu_cfg}
+        for d in DEFAULT_MENU:
+            if d["key"] not in existing: menu_cfg.append(dict(d))
+
+async def save_menu(): await _wj(MENU_FILE, menu_cfg)
+
+def menu_sorted():
+    """آیتم‌های منو مرتب‌شده بر اساس order."""
+    return sorted(menu_cfg, key=lambda m: m.get("order", 99))
+
+def menu_item(key):
+    return next((m for m in menu_cfg if m["key"] == key), None)
+
+def menu_label(key, default=""):
+    m = menu_item(key)
+    return m["label"] if m else default
+
 async def load_settings():
     global settings
     settings=await _rj(SETTINGS_FILE,dict)
@@ -232,35 +270,45 @@ async def month_users(): return await _cnt("SELECT COUNT(*) FROM users WHERE las
 async def new_today():   return await _cnt("SELECT COUNT(*) FROM users WHERE DATE(joined_at)=DATE('now','localtime')")
 async def blk_count():   return await _cnt("SELECT COUNT(*) FROM users WHERE is_blocked=1")
 
-# ── catalog — از SQLite خوانده می‌شود
+# ── catalog — از ووکامرس خوانده می‌شود (woo.py)
+# خروجی به فرمت tuple سازگار با کد موجود تبدیل می‌شود:
 #   دسته:   id(0),name(1),icon(2),parent_id(3),is_active(4)
-#   محصول:  id(0),name(1),price(2),description(3),photo_id(4),site_url(5),is_active(6),category_id(7)
+#   محصول:  id(0),name(1),price(2),description(3),photo_url(4),site_url(5),is_active(6),category_id(7)
+import woo
+
+def _cat_tuple(c):
+    # ووکامرس آیکون ندارد → از 📁/📦 استفاده می‌کنیم
+    icon = "📂" if c["parent"]==0 else "📦"
+    return (c["id"], c["name"], icon, c["parent"], 1)
+
+def _prod_tuple(p, cat_id=None):
+    return (p["id"], p["name"], p["price"], p["description"],
+            p["image"], p["permalink"], 1 if p["in_stock"] else 0,
+            cat_id if cat_id is not None else (p["category_ids"][0] if p["category_ids"] else 0))
 
 async def get_root_cats(active_only=True):
-    async with db.execute("SELECT id,name,icon,parent_id,is_active FROM categories WHERE parent_id IS NULL AND is_active=1 ORDER BY id") as c:
-        return await c.fetchall()
+    cats = await woo.get_root_categories()
+    return [_cat_tuple(c) for c in cats]
 
-async def get_subcats(parent_id, active_only=True):
-    async with db.execute("SELECT id,name,icon,parent_id,is_active FROM categories WHERE parent_id=? AND is_active=1 ORDER BY id", (parent_id,)) as c:
-        return await c.fetchall()
+async def get_subcats(parent_id,active_only=True):
+    cats = await woo.get_subcategories(parent_id)
+    return [_cat_tuple(c) for c in cats]
 
 async def get_cat(cat_id):
-    async with db.execute("SELECT id,name,icon,parent_id,is_active FROM categories WHERE id=?", (cat_id,)) as c:
-        return await c.fetchone()
+    c = await woo.get_category(cat_id)
+    return _cat_tuple(c) if c else None
 
-async def get_products(cat_id, active_only=True):
-    q = "SELECT id,name,price,description,photo_id,site_url,is_active,category_id FROM products WHERE category_id=? AND is_active=1 ORDER BY id" if active_only else "SELECT id,name,price,description,photo_id,site_url,is_active,category_id FROM products WHERE category_id=? ORDER BY id"
-    async with db.execute(q, (cat_id,)) as c:
-        return await c.fetchall()
+async def get_products(cat_id,active_only=True):
+    prods = await woo.get_products_by_category(cat_id)
+    return [_prod_tuple(p, cat_id) for p in prods]
 
 async def get_product(pid):
-    async with db.execute("SELECT id,name,price,description,photo_id,site_url,is_active,category_id FROM products WHERE id=?", (pid,)) as c:
-        return await c.fetchone()
+    p = await woo.get_product(pid)
+    return _prod_tuple(p) if p else None
 
 async def search_products(q):
-    like = f"%{q}%"
-    async with db.execute("SELECT id,name,price,description,photo_id,site_url,is_active,category_id FROM products WHERE (name LIKE ? OR description LIKE ?) AND is_active=1 LIMIT 20", (like, like)) as c:
-        return await c.fetchall()
+    prods = await woo.search_products(q)
+    return [_prod_tuple(p) for p in prods]
 
 # ── requests db
 async def save_request(uid,username,first_name,phone,pid,pname):
@@ -289,15 +337,14 @@ async def anti_spam(uid):
 #  KEYBOARDS
 # ════════════════════════════════════════════════
 def main_menu():
-    keys=list(MENU_ITEMS.keys()); rows=[]
-    for i in range(0,len(keys),2):
-        row=[MENU_ITEMS[keys[i]]]
-        if i+1<len(keys): row.append(MENU_ITEMS[keys[i+1]])
+    # از پیکربندی menu_cfg خوانده می‌شود — فقط دکمه‌های فعال، به ترتیب order
+    labels=[m["label"] for m in menu_sorted() if m.get("enabled",True)]
+    rows=[]
+    for i in range(0,len(labels),2):
+        row=[labels[i]]
+        if i+1<len(labels): row.append(labels[i+1])
         rows.append(row)
-    extra=[]
-    if get_setting("show_workhours_menu"): extra.append("🕐 ساعت کاری")
-    if get_setting("show_catalog_menu"):   extra.append("🛍 محصولات")
-    if extra: rows.append(extra)
+    if not rows: rows=[["🏠 منو"]]
     return ReplyKeyboardMarkup(rows,resize_keyboard=True)
 
 def cancel_menu(): return ReplyKeyboardMarkup([["❌ لغو عملیات"]],resize_keyboard=True)
@@ -351,7 +398,8 @@ def admin_menu():
          InlineKeyboardButton("👥 کاربران",callback_data="users_menu")],
         [InlineKeyboardButton("🛍 محصولات سایت",callback_data="woo_status"),
          InlineKeyboardButton("📬 درخواست‌ها",callback_data="admin_reqs")],
-        [InlineKeyboardButton("✏️ مدیریت بخش‌ها",callback_data="sections")],
+        [InlineKeyboardButton("✏️ مدیریت بخش‌ها",callback_data="sections"),
+         InlineKeyboardButton("🎛 مدیریت منو",callback_data="menu_mgr")],
         [InlineKeyboardButton("🕐 ساعت کاری",callback_data="wh_menu"),
          InlineKeyboardButton("⚙️ تنظیمات",callback_data="settings_menu")],
         [InlineKeyboardButton("📣 پخش همگانی",callback_data="broadcast"),
@@ -431,6 +479,34 @@ def wh_day_kb(dk):
         [InlineKeyboardButton("✏️ ساعت‌ها",callback_data=f"wh_sh_{dk}")],
         [InlineKeyboardButton("🔙",callback_data="wh_menu")]])
 
+def menu_mgr_kb():
+    """لیست دکمه‌های منو با وضعیت، برای مدیریت."""
+    btns=[]
+    items=menu_sorted()
+    for idx,m in enumerate(items):
+        status="🟢" if m.get("enabled",True) else "⚫️"
+        btns.append([InlineKeyboardButton(f"{status} {m['label']}",callback_data=f"mi_{m['key']}")])
+    btns.append([InlineKeyboardButton("🔙 پنل اصلی",callback_data="back_to_admin")])
+    return InlineKeyboardMarkup(btns)
+
+def menu_item_kb(key):
+    """تنظیمات یک دکمه: روشن/خاموش، تغییر نام، جابجایی بالا/پایین."""
+    m=menu_item(key)
+    if not m: return menu_mgr_kb()
+    items=menu_sorted()
+    idx=next((i for i,x in enumerate(items) if x["key"]==key),0)
+    en=m.get("enabled",True)
+    rows=[
+        [InlineKeyboardButton("🔴 خاموش کردن" if en else "🟢 روشن کردن",callback_data=f"mtg_{key}")],
+        [InlineKeyboardButton("✏️ تغییر نام",callback_data=f"mnm_{key}")],
+    ]
+    move=[]
+    if idx>0: move.append(InlineKeyboardButton("⬆️ بالا",callback_data=f"mup_{key}"))
+    if idx<len(items)-1: move.append(InlineKeyboardButton("⬇️ پایین",callback_data=f"mdn_{key}"))
+    if move: rows.append(move)
+    rows.append([InlineKeyboardButton("🔙 بازگشت",callback_data="menu_mgr")])
+    return InlineKeyboardMarkup(rows)
+
 def settings_kb():
     def t(k): return"🟢" if get_setting(k) else"⚫️"
     return InlineKeyboardMarkup([
@@ -498,7 +574,7 @@ async def send_backup(bot):
     ts=shamsi_now().replace(" ","_").replace("—","-").replace(":","-")
     buf=io.BytesIO()
     files=[(DATA_FILE,"data.json"),(BANNER_FILE,"banner.json"),(WORKHOURS_FILE,"workhours.json"),
-           (BUTTONS_FILE,"buttons.json"),(SETTINGS_FILE,"settings.json"),(STATS_FILE,"stats.json"),(DB_FILE,"users.db")]
+           (BUTTONS_FILE,"buttons.json"),(SETTINGS_FILE,"settings.json"),(STATS_FILE,"stats.json"),(MENU_FILE,"menu.json"),(DB_FILE,"users.db")]
     with zipfile.ZipFile(buf,"w",zipfile.ZIP_DEFLATED) as zf:
         for fp,name in files:
             try:
@@ -514,14 +590,14 @@ async def restore_backup(bot,file_id):
         await f.download_to_memory(buf); buf.seek(0)
         with zipfile.ZipFile(buf,"r") as zf:
             mapping={"data.json":DATA_FILE,"banner.json":BANNER_FILE,"workhours.json":WORKHOURS_FILE,
-                     "buttons.json":BUTTONS_FILE,"settings.json":SETTINGS_FILE,"stats.json":STATS_FILE,"users.db":DB_FILE}
+                     "buttons.json":BUTTONS_FILE,"settings.json":SETTINGS_FILE,"stats.json":STATS_FILE,"menu.json":MENU_FILE,"users.db":DB_FILE}
             restored=[]
             for name in zf.namelist():
                 if name in mapping:
                     async with aiofiles.open(mapping[name],"wb") as out: await out.write(zf.read(name))
                     restored.append(name)
         await load_data(); await load_banners(); await load_workhours()
-        await load_buttons(); await load_settings(); await load_stats()
+        await load_buttons(); await load_settings(); await load_stats(); await load_menu()
         return True,restored
     except Exception as e:
         logger.error(f"restore: {e}"); return False,str(e)
@@ -652,21 +728,39 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
 
         elif data=="woo_status":
             await query.answer()
-            root_count = await _cnt("SELECT COUNT(*) FROM categories WHERE parent_id IS NULL AND is_active=1")
-            cat_count = await _cnt("SELECT COUNT(*) FROM categories WHERE is_active=1")
-            prod_count = await _cnt("SELECT COUNT(*) FROM products WHERE is_active=1")
-            txt = (f"🛍 محصولات سایت (push-based)\n{'─'*18}"
-                   f"\n✅ داده‌ها از وردپرس دریافت می‌شوند"
-                   f"\n\n📂 دسته اصلی: {to_fa(root_count)}"
-                   f"\n📁 کل دسته‌ها: {to_fa(cat_count)}"
-                   f"\n📦 محصولات فعال: {to_fa(prod_count)}"
-                   f"\n\n💡 برای بروزرسانی، از پنل وردپرس Sync Now بزنید.")
+            import woo
+            if not woo.is_configured():
+                await safe_edit(query.message,
+                    "🛍 محصولات سایت\n" + "─"*18 +
+                    "\n\n⚠️ اتصال به سایت تنظیم نشده.\n\n"
+                    "برای فعال‌سازی، متغیرهای WOO_URL، WOO_KEY و WOO_SECRET را در تنظیمات سرور وارد کنید.",
+                    reply_markup=back_admin()); return
+            await safe_edit(query.message,"🛍 در حال اتصال به سایت...",reply_markup=None)
+            ok,msg = await woo.test_connection()
+            if not ok:
+                await safe_edit(query.message,f"🛍 محصولات سایت\n{'─'*18}\n\n❌ {msg}",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔄 تلاش مجدد",callback_data="woo_status")],
+                        [InlineKeyboardButton("🔙 پنل اصلی",callback_data="back_to_admin")]])); return
+            roots = await woo.get_root_categories()
+            cats = await woo.get_categories()
+            total_prod = sum(c["count"] for c in roots)
+            txt = (f"🛍 محصولات سایت (ووکامرس)\n{'─'*18}"
+                   f"\n✅ اتصال برقرار است"
+                   f"\n\n📂 دسته اصلی: {to_fa(len(roots))}"
+                   f"\n📁 کل دسته‌ها: {to_fa(len(cats))}"
+                   f"\n📦 مجموع محصولات: {to_fa(total_prod)}"
+                   f"\n\n💡 محصولات از سایت stland.ir خوانده می‌شوند."
+                   f"\nبرای افزودن یا ویرایش محصول، به پنل وردپرس مراجعه کنید.")
             await safe_edit(query.message,txt,reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 بروزرسانی فوری",callback_data="woo_refresh")],
                 [InlineKeyboardButton("🔙 پنل اصلی",callback_data="back_to_admin")]]))
 
         elif data=="woo_refresh":
-            await query.answer("اطلاعات push-based است، نیاز به رفرش نیست.",show_alert=True)
-            await safe_edit(query.message,"🛍 محصولات از وردپرس push می‌شوند. برای sync، از پنل وردپرس استفاده کنید.",
+            await query.answer("کش پاک شد، در حال دریافت...",show_alert=False)
+            import woo
+            woo.clear_cache()
+            await safe_edit(query.message,"🔄 محصولات بروزرسانی شد.",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("🛍 مشاهده وضعیت",callback_data="woo_status")],
                     [InlineKeyboardButton("🔙 پنل اصلی",callback_data="back_to_admin")]]))
@@ -711,6 +805,54 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         elif data=="sections":
             await query.answer()
             await safe_edit(query.message,"📋 مدیریت بخش‌ها:",reply_markup=sections_kb())
+
+        # ── مدیریت منوی اصلی ──
+        elif data=="menu_mgr":
+            await query.answer()
+            en=sum(1 for m in menu_cfg if m.get("enabled",True))
+            await safe_edit(query.message,
+                f"🎛 مدیریت منوی اصلی\n{'─'*18}\n"
+                f"دکمه فعال: {to_fa(en)} از {to_fa(len(menu_cfg))}\n\n"
+                f"روی هر دکمه بزنید تا تنظیمش کنید:",
+                reply_markup=menu_mgr_kb())
+
+        elif data.startswith("mi_"):
+            await query.answer()
+            key=data[3:]; m=menu_item(key)
+            if not m: return
+            st="🟢 فعال" if m.get("enabled",True) else "⚫️ غیرفعال"
+            await safe_edit(query.message,
+                f"🎛 دکمه: {m['label']}\n{'─'*18}\nوضعیت: {st}",
+                reply_markup=menu_item_kb(key))
+
+        elif data.startswith("mtg_"):
+            key=data[4:]; m=menu_item(key)
+            if not m: return
+            m["enabled"]=not m.get("enabled",True); await save_menu()
+            await query.answer("🟢 روشن شد" if m["enabled"] else "⚫️ خاموش شد",show_alert=True)
+            st="🟢 فعال" if m["enabled"] else "⚫️ غیرفعال"
+            await safe_edit(query.message,f"🎛 دکمه: {m['label']}\n{'─'*18}\nوضعیت: {st}",reply_markup=menu_item_kb(key))
+
+        elif data.startswith("mnm_"):
+            await query.answer()
+            key=data[4:]; m=menu_item(key)
+            if not m: return
+            ctx.user_data.update({"mode":"menu_rename","menu_key":key})
+            await query.message.reply_text(
+                f"✏️ نام فعلی: {m['label']}\n\nنام جدید را بفرستید (با ایموجی دلخواه):",
+                reply_markup=cancel_menu())
+
+        elif data.startswith("mup_") or data.startswith("mdn_"):
+            key=data[4:]; up=data.startswith("mup_")
+            items=menu_sorted()
+            idx=next((i for i,x in enumerate(items) if x["key"]==key),None)
+            if idx is None: return
+            swap=idx-1 if up else idx+1
+            if 0<=swap<len(items):
+                items[idx]["order"],items[swap]["order"]=items[swap]["order"],items[idx]["order"]
+                await save_menu()
+            await query.answer("⬆️ بالا رفت" if up else "⬇️ پایین رفت")
+            await safe_edit(query.message,"🎛 مدیریت منوی اصلی\nترتیب بروزرسانی شد:",reply_markup=menu_mgr_kb())
 
         elif data.startswith("sec_") and not any(data.startswith(p) for p in["sec_text_","sec_ban_","sec_btns_"]):
             await query.answer()
@@ -937,6 +1079,16 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             key=ctx.user_data.pop("edit_key",None); ctx.user_data.pop("mode",None)
             if key: responses[key]=text; await save_data()
             await update.message.reply_text("✅ ذخیره شد.",reply_markup=main_menu()); return
+        if mode=="menu_rename":
+            key=ctx.user_data.pop("menu_key",None); ctx.user_data.pop("mode",None)
+            m=menu_item(key)
+            if m and text:
+                m["label"]=text; await save_menu()
+                await update.message.reply_text(f"✅ نام دکمه به «{text}» تغییر کرد.",reply_markup=main_menu())
+                await update.message.reply_text(f"🎛 دکمه: {m['label']}",reply_markup=menu_item_kb(key))
+            else:
+                await update.message.reply_text("✅ ذخیره شد.",reply_markup=main_menu())
+            return
         if mode=="broadcast":
             ctx.user_data.pop("mode",None); await update.message.reply_text("📤 در حال ارسال...")
             await broadcast(ctx,text); return
@@ -1004,7 +1156,11 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ درخواست خرید «{pname}» ثبت شد!\nپشتیبانی به زودی تماس می‌گیرد.",reply_markup=main_menu()); return
 
     # ════ user menu ════
-    if text=="🕐 ساعت کاری":
+    # تشخیص دکمه از روی label (که ممکن است ادمین تغییرش داده باشد)
+    pressed = next((m for m in menu_cfg if m["label"]==text and m.get("enabled",True)), None)
+    mkey = pressed["key"] if pressed else None
+
+    if mkey=="workhours":
         await record_stat("wh_page")
         if not workhours.get("enabled",True): await update.message.reply_text("🕐 ساعت کاری تنظیم نشده.",reply_markup=main_menu()); return
         wh=wh_today_block() or""
@@ -1013,19 +1169,18 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         kb=InlineKeyboardMarkup([[InlineKeyboardButton("📆 ساعت کار هفتگی مجموعه",callback_data="wh_weekly")]])
         await send_banner(update.message,msg,"workhours",kb=kb); return
 
-    if text=="🛍 محصولات":
+    if mkey=="catalog":
         await record_stat("catalog"); cats=await get_root_cats()
         if not cats: await update.message.reply_text("📫 در حال حاضر محصولی موجود نیست.",reply_markup=main_menu()); return
         msg="🛍 محصولات استوک لند\nیک دسته‌بندی را انتخاب کنید:"
         await send_banner(update.message,msg,"catalog",kb=cat_root_kb(cats)); return
 
-    # تمام بخش‌های منو یکپارچه — user_sec_kb برای همه بخش‌ها
-    for k,v in MENU_ITEMS.items():
-        if text==v:
-            await record_stat(k); content=responses.get(k,"تنظیم نشده")
-            full=build_msg(v,content,k)
-            kb=user_sec_kb(k)
-            await send_banner(update.message,full,k,kb=kb); return
+    # بخش‌های متنی (۱ تا ۵)
+    if mkey and mkey in MENU_ITEMS:
+        await record_stat(mkey); content=responses.get(mkey,"تنظیم نشده")
+        full=build_msg(text,content,mkey)
+        kb=user_sec_kb(mkey)
+        await send_banner(update.message,full,mkey,kb=kb); return
 
     await update.message.reply_text("⚠️ گزینه نامعتبر است.",reply_markup=main_menu())
 
@@ -1069,7 +1224,7 @@ async def document_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
 async def post_init(app):
     await init_db(); await load_data(); await load_banners()
     await load_workhours(); await load_buttons(); await load_settings()
-    await load_stats()
+    await load_stats(); await load_menu()
     logger.info("✅ ربات راه‌اندازی شد")
 
 def main():
