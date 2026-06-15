@@ -8,8 +8,7 @@ import aiohttp
 
 logger = logging.getLogger("woo")
 
-WOO_URL    = os.environ.get("WOO_URL", "").strip().rstrip("/")   # مثل https://stland.ir
-WOO_KEY    = os.environ.get("WOO_KEY", "").strip()               # ck_xxx
+WOO_URL    = os.environ.get("WOO_URL", "").strip().rstrip("/")   # مثل https:/
 WOO_SECRET = os.environ.get("WOO_SECRET", "").strip()            # cs_xxx
 CACHE_TTL  = int(os.environ.get("WOO_CACHE_TTL", "3600"))        # ۱ ساعت
 HIDE_OUT_OF_STOCK = os.environ.get("WOO_HIDE_OOS", "1") == "1"   # مخفی‌سازی ناموجود
