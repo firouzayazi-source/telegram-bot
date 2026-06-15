@@ -20,6 +20,7 @@ def is_configured():
 # ── cache ساده در حافظه ────────────────────────────
 _cache = {}   # key -> (timestamp, data)
 _locks = {}
+_last_sync_version = None   # آخرین نسخه سینک که دیدیم
 
 def _get_cache(key):
     if key in _cache:
@@ -33,11 +34,6 @@ def _set_cache(key, data):
 
 def clear_cache():
     _cache.clear()
-
-def clear_category_cache(cat_id):
-    """Remove only the product cache for a specific category, leaving everything else intact."""
-    key = f"prods_{cat_id}"
-    _cache.pop(key, None)
 
 # ── درخواست به API ──────────────────────────────────
 async def _fetch(path, params=None):
@@ -59,6 +55,44 @@ async def _fetch(path, params=None):
         logger.error(f"woo fetch {path}: {e}")
         return None
 
+async def _fetch_plugin(path):
+    """خواندن از endpoint افزونه استوک لند (نه ووکامرس استاندارد)."""
+    if not WOO_URL: return None
+    url = f"{WOO_URL}/wp-json/stockland/v1/{path}"
+    try:
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as s:
+            async with s.get(url) as r:
+                if r.status != 200: return None
+                return await r.json()
+    except Exception as e:
+        logger.error(f"plugin fetch {path}: {e}")
+        return None
+
+async def check_sync_version():
+    """نسخه سینک را از افزونه می‌خواند. اگر عوض شده باشد، کش را پاک می‌کند.
+    این کار باعث می‌شود زدن دکمه سینک در افزونه، فوراً ربات را تازه کند."""
+    global _last_sync_version
+    data = await _fetch_plugin("version")
+    if not data: return  # افزونه نصب نیست یا در دسترس نیست → عادی ادامه بده
+    v = data.get("version")
+    if v and v != _last_sync_version:
+        if _last_sync_version is not None:
+            clear_cache()  # نسخه عوض شده → کش را دور بریز
+            logger.info(f"sync version changed → cache cleared (v={v})")
+        _last_sync_version = v
+
+async def get_visible_category_ids():
+    """فهرست id دسته‌هایی که در افزونه تیک «نمایش در تلگرام» خورده‌اند.
+    اگر افزونه نصب نباشد، None برمی‌گرداند (یعنی همه دسته‌ها نمایش داده شوند)."""
+    cached = _get_cache("visible_cats")
+    if cached is not None: return cached
+    data = await _fetch_plugin("visible-categories")
+    if not data: return None  # افزونه نیست → بدون فیلتر
+    ids = data.get("category_ids", [])
+    _set_cache("visible_cats", ids)
+    return ids
+
 async def _fetch_all(path, params=None):
     """همه صفحات را می‌گیرد (pagination)."""
     out = []
@@ -75,13 +109,18 @@ async def _fetch_all(path, params=None):
 
 # ── دسته‌بندی‌ها ────────────────────────────────────
 async def get_categories():
-    """تمام دسته‌ها را با ساختار parent/child برمی‌گرداند."""
+    """تمام دسته‌های قابل‌نمایش (تیک‌خورده در افزونه) را برمی‌گرداند."""
+    await check_sync_version()  # اگر در افزونه سینک زده شده، کش تازه می‌شود
     cached = _get_cache("cats")
     if cached is not None: return cached
     raw = await _fetch_all("products/categories", {"hide_empty": True, "orderby": "menu_order"})
     if raw is None: return []
+    # فیلتر دسته‌های تیک‌خورده (اگر افزونه نصب باشد)
+    visible = await get_visible_category_ids()
     cats = []
     for c in raw:
+        if visible is not None and c["id"] not in visible:
+            continue  # این دسته در افزونه تیک نخورده → نمایش نده
         cats.append({
             "id": c["id"], "name": c["name"], "parent": c["parent"],
             "count": c.get("count", 0),
@@ -132,6 +171,7 @@ def _strip_html(s):
 
 async def get_products_by_category(cat_id):
     """محصولات یک دسته (شامل ناموجود طبق تنظیم)."""
+    await check_sync_version()
     key = f"prods_{cat_id}"
     cached = _get_cache(key)
     if cached is not None: return cached
