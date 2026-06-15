@@ -68,8 +68,7 @@ DEFAULT_WH = {"enabled":True,"schedule":{
     "5":{"open":True,"shifts":[{"from":"11:00","to":"14:00"},{"from":"17:00","to":"23:00"}]},
     "6":{"open":True,"shifts":[{"from":"17:00","to":"23:00"}]}},
     "msg_open":"✅ هم‌اکنون باز است","msg_closed":"🔴 هم‌اکنون بسته است"}
-DEFAULT_SETTINGS = {"show_workhours_menu":True,"show_catalog_menu":True,
-                    "notify_new_user":True,"store_open":True}
+DEFAULT_SETTINGS = {"notify_new_user":True,"store_open":True}
 DEFAULT_SEC_WH = {k:True for k in SECTION_NAMES}
 
 # ── helpers
@@ -398,8 +397,6 @@ def admin_menu():
          InlineKeyboardButton("👥 کاربران",callback_data="users_menu")],
         [InlineKeyboardButton("🛍 محصولات سایت",callback_data="woo_status"),
          InlineKeyboardButton("📬 درخواست‌ها",callback_data="admin_reqs")],
-        [InlineKeyboardButton("✏️ مدیریت بخش‌ها",callback_data="sections"),
-         InlineKeyboardButton("🎛 مدیریت منو",callback_data="menu_mgr")],
         [InlineKeyboardButton("🕐 ساعت کاری",callback_data="wh_menu"),
          InlineKeyboardButton("⚙️ تنظیمات",callback_data="settings_menu")],
         [InlineKeyboardButton("📣 پخش همگانی",callback_data="broadcast"),
@@ -424,7 +421,7 @@ def sections_kb():
         row.append(InlineKeyboardButton(label,callback_data=f"sec_{key}"))
         if len(row)==2: btns.append(row); row=[]
     if row: btns.append(row)
-    btns.append([InlineKeyboardButton("🔙 پنل اصلی",callback_data="back_to_admin")])
+    btns.append([InlineKeyboardButton("🔙 تنظیمات",callback_data="settings_menu")])
     return InlineKeyboardMarkup(btns)
 
 def section_kb(key):
@@ -486,7 +483,7 @@ def menu_mgr_kb():
     for idx,m in enumerate(items):
         status="🟢" if m.get("enabled",True) else "⚫️"
         btns.append([InlineKeyboardButton(f"{status} {m['label']}",callback_data=f"mi_{m['key']}")])
-    btns.append([InlineKeyboardButton("🔙 پنل اصلی",callback_data="back_to_admin")])
+    btns.append([InlineKeyboardButton("🔙 تنظیمات",callback_data="settings_menu")])
     return InlineKeyboardMarkup(btns)
 
 def menu_item_kb(key):
@@ -508,11 +505,11 @@ def menu_item_kb(key):
     return InlineKeyboardMarkup(rows)
 
 def settings_kb():
-    def t(k): return"🟢" if get_setting(k) else"⚫️"
+    notif="🟢" if get_setting("notify_new_user") else "⚫️"
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"{t('show_workhours_menu')} ساعت کاری در منو",callback_data="stg_show_workhours_menu"),
-         InlineKeyboardButton(f"{t('show_catalog_menu')} محصولات در منو",callback_data="stg_show_catalog_menu")],
-        [InlineKeyboardButton(f"{t('notify_new_user')} اعلان عضو جدید",callback_data="stg_notify_new_user")],
+        [InlineKeyboardButton("🎛 مدیریت منو",callback_data="menu_mgr")],
+        [InlineKeyboardButton("✏️ مدیریت بخش‌ها",callback_data="sections")],
+        [InlineKeyboardButton(f"{notif} اعلان عضو جدید",callback_data="stg_notify_new_user")],
         [InlineKeyboardButton("🔙 پنل اصلی",callback_data="back_to_admin")],
     ])
 
@@ -1000,12 +997,16 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         # ── تنظیمات
         elif data=="settings_menu":
             await query.answer()
-            await safe_edit(query.message,"⚙️ تنظیمات:",reply_markup=settings_kb())
+            await safe_edit(query.message,
+                "⚙️ تنظیمات\n" + "─"*18 + "\nمدیریت منو، بخش‌ها و اعلان‌ها:",
+                reply_markup=settings_kb())
 
         elif data.startswith("stg_"):
             key=data[4:]; settings[key]=not get_setting(key); await save_settings()
             await query.answer("✅ ذخیره شد",show_alert=True)
-            await safe_edit(query.message,"⚙️ تنظیمات:",reply_markup=settings_kb())
+            await safe_edit(query.message,
+                "⚙️ تنظیمات\n" + "─"*18 + "\nمدیریت منو، بخش‌ها و اعلان‌ها:",
+                reply_markup=settings_kb())
 
         # ── کاربران
         elif data=="users_menu":
