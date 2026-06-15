@@ -37,24 +37,28 @@ def gregorian_now(): return datetime.now(IRAN_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
 # ── منو
 MENU_ITEMS = {"1":"🌐 شبکه‌های اجتماعی","2":"🌐 سایت استوک لند",
-              "3":"💰 شرایط اقساط","4":"📞 پشتیبانی","5":"📍 آدرس فروشگاه"}
+              "3":"💰 شرایط اقساط","4":"📞 پشتیبانی","5":"📍 آدرس فروشگاه",
+              "6":"🔖 دکمه ذخیره ۱","7":"🔖 دکمه ذخیره ۲"}
 # پیکربندی منوی اصلی — قابل تغییر از پنل ادمین (menu.json)
 # هر آیتم: key (ثابت), label (قابل تغییر), order (ترتیب), enabled (روشن/خاموش)
 DEFAULT_MENU = [
     {"key":"1","label":"🌐 شبکه‌های اجتماعی","order":1,"enabled":True,"width":"half"},
     {"key":"2","label":"🌐 سایت استوک لند","order":2,"enabled":True,"width":"half"},
     {"key":"3","label":"💰 شرایط اقساط","order":3,"enabled":True,"width":"half"},
-    {"key":"4","label":"📞 پشتیبانی","order":4,"enabled":True,"width":"half"},
-    {"key":"5","label":"📍 آدرس فروشگاه","order":5,"enabled":True,"width":"half"},
-    {"key":"catalog","label":"🛍 محصولات","order":6,"enabled":True,"width":"half"},
-    {"key":"workhours","label":"🕐 ساعت کاری","order":7,"enabled":True,"width":"full"},
+    {"key":"5","label":"📍 آدرس فروشگاه","order":4,"enabled":True,"width":"half"},
+    {"key":"catalog","label":"🛍 محصولات","order":5,"enabled":True,"width":"full"},
+    {"key":"workhours","label":"🕐 ساعت کاری","order":6,"enabled":True,"width":"half"},
+    {"key":"4","label":"📞 پشتیبانی","order":7,"enabled":True,"width":"half"},
+    {"key":"6","label":"🔖 دکمه ذخیره ۱","order":8,"enabled":False,"width":"half"},
+    {"key":"7","label":"🔖 دکمه ذخیره ۲","order":9,"enabled":False,"width":"half"},
 ]
 menu_cfg = []
 
 SECTION_NAMES = {"welcome":"🏠 خوش‌آمدگویی",
                  "catalog":"🛍 محصولات","workhours":"🕐 ساعت کاری",
                  "1":"🌐 شبکه‌های اجتماعی","2":"🌐 سایت استوک لند",
-                 "3":"💰 شرایط اقساط","4":"📞 پشتیبانی","5":"📍 آدرس فروشگاه"}
+                 "3":"💰 شرایط اقساط","4":"📞 پشتیبانی","5":"📍 آدرس فروشگاه",
+                 "6":"🔖 دکمه ذخیره ۱","7":"🔖 دکمه ذخیره ۲"}
 
 # ── state
 responses=None; banners={}; workhours={}; buttons={}; settings={}; stats={}
@@ -172,6 +176,11 @@ async def load_menu():
 
 async def save_menu(): await _wj(MENU_FILE, menu_cfg)
 
+async def reset_menu():
+    global menu_cfg
+    menu_cfg=[dict(m) for m in DEFAULT_MENU]
+    await save_menu()
+
 def menu_sorted():
     """آیتم‌های منو مرتب‌شده بر اساس order."""
     return sorted(menu_cfg, key=lambda m: m.get("order", 99))
@@ -182,6 +191,26 @@ def menu_item(key):
 def menu_label(key, default=""):
     m = menu_item(key)
     return m["label"] if m else default
+
+def menu_row_partner(key):
+    """اگر این دکمه half باشد و در یک ردیف با دکمه half دیگری جفت شده،
+    کلید جفتش را برمی‌گرداند؛ وگرنه None. (فقط دکمه‌های فعال)"""
+    m = menu_item(key)
+    if not m or m.get("width","half")!="half" or not m.get("enabled",True): return None
+    items=[x for x in menu_sorted() if x.get("enabled",True)]
+    # شبیه‌سازی جفت‌سازی main_menu
+    pending=None
+    for x in items:
+        if x.get("width","half")=="full":
+            pending=None
+        else:
+            if pending:
+                if pending["key"]==key: return x["key"]
+                if x["key"]==key: return pending["key"]
+                pending=None
+            else:
+                pending=x
+    return None
 
 async def load_settings():
     global settings
@@ -340,18 +369,20 @@ async def anti_spam(uid):
 def main_menu():
     # به ترتیب order، با احترام به عرض هر دکمه:
     #   full → یک ردیف کامل | half → کنار دکمه half بعدی
+    # نکته RTL: تلگرام لیست را چپ‌به‌راست می‌چیند، پس برای اینکه
+    # دکمه اولِ هر جفت سمت راست بیفتد، ترتیب لیست را معکوس می‌کنیم.
     items=[m for m in menu_sorted() if m.get("enabled",True)]
-    rows=[]; pending=None  # دکمه half در انتظار جفت
+    rows=[]; pending=None
     for m in items:
         if m.get("width","half")=="full":
-            if pending: rows.append([pending]); pending=None  # half تنها‌مانده را تخلیه کن
+            if pending: rows.append([pending]); pending=None
             rows.append([m["label"]])
-        else:  # half
+        else:
             if pending:
-                rows.append([pending,m["label"]]); pending=None
+                rows.append([m["label"],pending]); pending=None  # دومی چپ، اولی(pending) راست
             else:
                 pending=m["label"]
-    if pending: rows.append([pending])  # آخرین half تنها
+    if pending: rows.append([pending])
     if not rows: rows=[["🏠 منو"]]
     return ReplyKeyboardMarkup(rows,resize_keyboard=True)
 
@@ -412,7 +443,7 @@ def admin_menu():
     ])
 
 # ترتیب نمایش بخش‌ها — دقیقاً مطابق منوی کاربر
-SECTION_ORDER = ["welcome","1","2","3","4","5","catalog","workhours"]
+SECTION_ORDER = ["welcome","1","2","3","4","5","catalog","workhours","6","7"]
 
 def sections_kb():
     btns=[]; row=[]
@@ -491,6 +522,7 @@ def menu_mgr_kb():
     for idx,m in enumerate(items):
         status="🟢" if m.get("enabled",True) else "⚫️"
         btns.append([InlineKeyboardButton(f"{status} {m['label']}",callback_data=f"mi_{m['key']}")])
+    btns.append([InlineKeyboardButton("♻️ بازگردانی به حالت پیش‌فرض",callback_data="menu_reset")])
     btns.append([InlineKeyboardButton("🔙 تنظیمات",callback_data="settings_menu")])
     return InlineKeyboardMarkup(btns)
 
@@ -512,6 +544,9 @@ def menu_item_kb(key):
     if idx>0: move.append(InlineKeyboardButton("⬆️ بالا",callback_data=f"mup_{key}"))
     if idx<len(items)-1: move.append(InlineKeyboardButton("⬇️ پایین",callback_data=f"mdn_{key}"))
     if move: rows.append(move)
+    # جابجایی چپ/راست فقط وقتی این نیم‌دکمه با دکمه دیگری هم‌ردیف باشد
+    if w=="half" and menu_row_partner(key):
+        rows.append([InlineKeyboardButton("↔️ جابجایی چپ و راست",callback_data=f"msw_{key}")])
     rows.append([InlineKeyboardButton("🔙 بازگشت",callback_data="menu_mgr")])
     return InlineKeyboardMarkup(rows)
 
@@ -872,6 +907,34 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
                 await save_menu()
             await query.answer("⬆️ بالا رفت" if up else "⬇️ پایین رفت")
             await safe_edit(query.message,"🎛 مدیریت منوی اصلی\nترتیب بروزرسانی شد:",reply_markup=menu_mgr_kb())
+
+        elif data.startswith("msw_"):
+            key=data[4:]; partner=menu_row_partner(key)
+            if not partner:
+                await query.answer("این دکمه جفت ندارد",show_alert=True); return
+            m=menu_item(key); p=menu_item(partner)
+            m["order"],p["order"]=p["order"],m["order"]; await save_menu()
+            await query.answer("↔️ جای دو دکمه عوض شد",show_alert=True)
+            st="🟢 فعال" if m.get("enabled",True) else "⚫️ غیرفعال"
+            w_txt="تمام‌صفحه" if m.get("width","half")=="full" else "نصف‌صفحه"
+            await safe_edit(query.message,f"🎛 دکمه: {m['label']}\n{'─'*18}\nوضعیت: {st}\nعرض: {w_txt}",reply_markup=menu_item_kb(key))
+
+        elif data=="menu_reset":
+            await query.answer()
+            await safe_edit(query.message,
+                "♻️ بازگردانی منو به حالت پیش‌فرض\n\n"
+                "نام، ترتیب و عرض همه دکمه‌ها به حالت اولیه برمی‌گردد.\nمطمئن هستید؟",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("♻️ بله، بازگردانی کن",callback_data="menu_reset_ok")],
+                    [InlineKeyboardButton("↩️ انصراف",callback_data="menu_mgr")]]))
+
+        elif data=="menu_reset_ok":
+            await reset_menu()
+            await query.answer("♻️ منو به حالت پیش‌فرض برگشت",show_alert=True)
+            en=sum(1 for m in menu_cfg if m.get("enabled",True))
+            await safe_edit(query.message,
+                f"🎛 مدیریت منوی اصلی\n{'─'*18}\nدکمه فعال: {to_fa(en)} از {to_fa(len(menu_cfg))}\n\n✅ به حالت پیش‌فرض بازگشت.",
+                reply_markup=menu_mgr_kb())
 
         elif data.startswith("sec_") and not any(data.startswith(p) for p in["sec_text_","sec_ban_","sec_btns_"]):
             await query.answer()
