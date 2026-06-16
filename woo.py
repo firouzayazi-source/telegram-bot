@@ -22,7 +22,7 @@ _cache = {}   # key -> (timestamp, data)
 _locks = {}
 _last_sync_version = None   # آخرین نسخه سینک که دیدیم
 _version_cache_time = 0     # آخرین باری که نسخه سینک چک شد
-VERSION_CHECK_INTERVAL = 120  # هر ۲ دقیقه یه بار چک کن (نه هر درخواست)
+VERSION_CHECK_INTERVAL = 600  # ۱۰ دقیقه — فقط هنگام ورود به بخش محصولات
 
 def _get_cache(key):
     if key in _cache:
@@ -85,13 +85,16 @@ async def _fetch_plugin(path):
         logger.error(f"plugin fetch {path}: {e}")
         return None
 
-async def check_sync_version():
-    """نسخه سینک را چک می‌کند — حداکثر هر VERSION_CHECK_INTERVAL ثانیه یک‌بار.
-    این جلوگیری می‌کند که ازاء هر درخواست کاربر به سایت وصل شویم."""
+async def check_sync_version(force=False):
+    """نسخه سینک را چک می‌کند.
+    force=True → همیشه چک کن (مثلاً هنگام /start)
+    force=False → فقط اگر بیشتر از VERSION_CHECK_INTERVAL گذشته باشد
+    این فقط در «نقطه ورود» (start و باز کردن محصولات) صدا زده می‌شود،
+    نه در هر کلیک. پس بار روی سایت حداقل است."""
     global _last_sync_version, _version_cache_time
     now = time.time()
-    if now - _version_cache_time < VERSION_CHECK_INTERVAL:
-        return  # اخیراً چک کردیم، نیازی نیست دوباره بزنیم
+    if not force and (now - _version_cache_time < VERSION_CHECK_INTERVAL):
+        return  # اخیراً چک کردیم
     _version_cache_time = now
     data = await _fetch_plugin("version")
     if not data: return
@@ -99,7 +102,6 @@ async def check_sync_version():
     if v and v != _last_sync_version:
         if _last_sync_version is not None:
             clear_cache()
-            _version_cache_time = 0  # بعد از clear، دفعه بعد فوری چک کن
             logger.info(f"sync version changed → cache cleared (v={v})")
         _last_sync_version = v
 
@@ -131,7 +133,6 @@ async def _fetch_all(path, params=None):
 # ── دسته‌بندی‌ها ────────────────────────────────────
 async def get_categories():
     """تمام دسته‌های قابل‌نمایش (تیک‌خورده در افزونه) را برمی‌گرداند."""
-    await check_sync_version()  # اگر در افزونه سینک زده شده، کش تازه می‌شود
     cached = _get_cache("cats")
     if cached is not None: return cached
     raw = await _fetch_all("products/categories", {"hide_empty": "false"})
@@ -192,7 +193,6 @@ def _strip_html(s):
 
 async def get_products_by_category(cat_id):
     """محصولات یک دسته (شامل ناموجود طبق تنظیم)."""
-    await check_sync_version()
     key = f"prods_{cat_id}"
     cached = _get_cache(key)
     if cached is not None: return cached
