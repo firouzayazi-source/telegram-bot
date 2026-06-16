@@ -21,6 +21,8 @@ def is_configured():
 _cache = {}   # key -> (timestamp, data)
 _locks = {}
 _last_sync_version = None   # آخرین نسخه سینک که دیدیم
+_version_cache_time = 0     # آخرین باری که نسخه سینک چک شد
+VERSION_CHECK_INTERVAL = 120  # هر ۲ دقیقه یه بار چک کن (نه هر درخواست)
 
 def _get_cache(key):
     if key in _cache:
@@ -34,6 +36,20 @@ def _set_cache(key, data):
 
 def clear_cache():
     _cache.clear()
+
+async def warm_cache():
+    """Cache گرم‌کردن هنگام استارت ربات — داده‌ها را از قبل می‌گیرد
+    تا اولین کاربر منتظر نماند."""
+    try:
+        logger.info("woo: گرم کردن cache شروع شد...")
+        cats = await get_categories()
+        if cats:
+            roots = [c for c in cats if c["parent"] == 0]
+            logger.info(f"woo: {len(cats)} دسته cache شد ({len(roots)} اصلی)")
+        else:
+            logger.warning("woo: دسته‌ای پیدا نشد (اتصال یا تنظیمات را بررسی کنید)")
+    except Exception as e:
+        logger.error(f"woo warm_cache: {e}")
 
 # ── درخواست به API ──────────────────────────────────
 async def _fetch(path, params=None):
@@ -70,15 +86,20 @@ async def _fetch_plugin(path):
         return None
 
 async def check_sync_version():
-    """نسخه سینک را از افزونه می‌خواند. اگر عوض شده باشد، کش را پاک می‌کند.
-    این کار باعث می‌شود زدن دکمه سینک در افزونه، فوراً ربات را تازه کند."""
-    global _last_sync_version
+    """نسخه سینک را چک می‌کند — حداکثر هر VERSION_CHECK_INTERVAL ثانیه یک‌بار.
+    این جلوگیری می‌کند که ازاء هر درخواست کاربر به سایت وصل شویم."""
+    global _last_sync_version, _version_cache_time
+    now = time.time()
+    if now - _version_cache_time < VERSION_CHECK_INTERVAL:
+        return  # اخیراً چک کردیم، نیازی نیست دوباره بزنیم
+    _version_cache_time = now
     data = await _fetch_plugin("version")
-    if not data: return  # افزونه نصب نیست یا در دسترس نیست → عادی ادامه بده
+    if not data: return
     v = data.get("version")
     if v and v != _last_sync_version:
         if _last_sync_version is not None:
-            clear_cache()  # نسخه عوض شده → کش را دور بریز
+            clear_cache()
+            _version_cache_time = 0  # بعد از clear، دفعه بعد فوری چک کن
             logger.info(f"sync version changed → cache cleared (v={v})")
         _last_sync_version = v
 
