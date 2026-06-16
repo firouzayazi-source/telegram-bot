@@ -259,6 +259,13 @@ async def init_db():
             username TEXT,first_name TEXT,phone TEXT,
             product_id INTEGER,product_name TEXT,
             status TEXT DEFAULT 'new',created_at TEXT);
+        CREATE TABLE IF NOT EXISTS categories(
+            id INTEGER PRIMARY KEY,name TEXT,icon TEXT,
+            parent_id INTEGER,is_active INTEGER DEFAULT 1);
+        CREATE TABLE IF NOT EXISTS products(
+            id INTEGER PRIMARY KEY,category_id INTEGER,name TEXT,
+            price TEXT,description TEXT,photo_id TEXT,site_url TEXT,
+            is_active INTEGER DEFAULT 1,created_at TEXT);
         CREATE INDEX IF NOT EXISTS idx_ls ON users(last_seen);
     """)
     for sql in ["ALTER TABLE users ADD COLUMN is_blocked INTEGER DEFAULT 0"]:
@@ -377,6 +384,18 @@ def _cb_try_lock(uid: int) -> bool:
 def _cb_release(uid: int):
     """آزادسازی lock پس از اتمام پردازش."""
     _user_active.discard(uid)
+
+async def _bg_woo_refresh(force: bool = False):
+    """فراخوانی پس‌زمینه‌ای: چک نسخه ووکامرس + گرم‌کردن cache در صورت نیاز.
+    کاربر هیچ تاخیری احساس نمی‌کند — کاملاً در پس‌زمینه اجرا می‌شود.
+    woo.check_sync_version خودش cooldown داخلی دارد (60 ثانیه) — پس
+    حتی اگر صدها بار فراخوانی شود، فقط یک بار در دقیقه به سایت وصل می‌شود."""
+    try:
+        await woo.check_sync_version(force=force)
+        if not woo.is_cats_cached():
+            await woo.warm_cache()
+    except Exception as e:
+        logger.debug(f"bg_woo_refresh: {e}")
 
 async def anti_spam(uid):
     if uid==ADMIN_ID: return True
@@ -707,7 +726,7 @@ async def loading_animation(chat, ctx):
     return msg, asyncio.ensure_future(animate())
 
 async def cmd_start(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
-    asyncio.ensure_future(woo.check_sync_version(force=True))  # چک تازگی در پس‌زمینه
+    asyncio.ensure_future(_bg_woo_refresh(force=True))  # فراخوان فوری + گرم‌کردن cache در پس‌زمینه
     user=update.effective_user; is_new=False
     async with db.execute("SELECT user_id FROM users WHERE user_id=?",(user.id,)) as c: is_new=(await c.fetchone()) is None
     await save_user(user)
@@ -834,17 +853,24 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
 
     # ── محافظت در برابر کلیک‌های تکراری و درخواست‌های همزمان (فقط کاربران عادی)
     if uid != ADMIN_ID:
-        # Debounce: کلیک خیلی سریع (double-click) نادیده گرفته شود
+        # لایه ۳: Sliding window — spammer واقعی را بلاک می‌کند
+        if not await anti_spam(uid):
+            await query.answer("🐢 لطفاً آرام‌تر کلیک کنید.")
+            return
+        # لایه ۱: Debounce — double-click فوری را رد می‌کند
         if _cb_is_debounced(uid):
             await query.answer("⏳ لطفاً لحظه‌ای صبر کنید…")
             return
-        # Processing lock: اگر درخواست قبلی هنوز در حال پردازش است
+        # لایه ۲: Processing lock — درخواست همزمان را رد می‌کند
         if not _cb_try_lock(uid):
             await query.answer("⏳ درخواست قبلی در حال پردازش است…")
             return
 
     # ── مسیریابی کاربران — answer یکبار اینجا فراخوانی می‌شه
     if data.startswith(_USER_CB_PREFIXES) or uid!=ADMIN_ID:
+        # فراخوان پس‌زمینه ووکامرس (حداکثر ۱ بار در دقیقه، بدون تاخیر برای کاربر)
+        if uid != ADMIN_ID:
+            asyncio.ensure_future(_bg_woo_refresh())
         await query.answer()
         try: await user_cb(query,ctx)
         except Exception as e:
@@ -1259,6 +1285,9 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     user=update.effective_user; text=update.message.text.strip()
     await save_user(user)
     if not await anti_spam(user.id): return await update.message.reply_text("🐢 لطفاً آرام‌تر پیام دهید.")
+    # فراخوان پس‌زمینه ووکامرس برای کاربران عادی (حداکثر ۱ بار در دقیقه)
+    if user.id != ADMIN_ID:
+        asyncio.ensure_future(_bg_woo_refresh())
     if text=="❌ لغو عملیات":
         ctx.user_data.clear(); return await update.message.reply_text("❌ لغو شد.",reply_markup=main_menu())
     mode=ctx.user_data.get("mode")
@@ -1434,8 +1463,8 @@ async def post_init(app):
     await init_db(); await load_data(); await load_banners()
     await load_workhours(); await load_buttons(); await load_settings()
     await load_stats(); await load_menu()
-    # Cache ووکامرس را گرم کن تا اولین کاربر منتظر نماند
-    asyncio.ensure_future(woo.warm_cache())
+    # گرم‌کردن cache ووکامرس در پس‌زمینه — اولین کاربر منتظر نمی‌ماند
+    asyncio.ensure_future(_bg_woo_refresh(force=True))
     logger.info("✅ ربات راه‌اندازی شد")
 
 def main():
