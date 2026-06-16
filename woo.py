@@ -21,7 +21,7 @@ def is_configured():
 _cache = {}   # key -> (timestamp, data)
 _last_sync_version = None   # آخرین نسخه سینک که دیدیم
 _version_cache_time = 0     # آخرین باری که نسخه سینک چک شد
-VERSION_CHECK_INTERVAL = 600  # ۱۰ دقیقه — فقط هنگام ورود به بخش محصولات
+VERSION_CHECK_INTERVAL = 60   # ۱ دقیقه — فعال می‌شود فقط با تعامل کاربر (نه polling)
 
 def _get_cache(key):
     if key in _cache:
