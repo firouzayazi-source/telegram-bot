@@ -99,24 +99,30 @@ def login_required(f):
 @app.get("/api/tree")
 @login_required
 def api_tree():
-    roots = dbq("SELECT id,name,icon FROM categories WHERE parent_id IS NULL AND is_active=1 ORDER BY id")
-    out = []
-    for r in roots:
-        subs = dbq("SELECT id,name,icon,is_active FROM categories WHERE parent_id=? AND is_active=1 ORDER BY id", (r["id"],))
-        sub_list = [{"id":s["id"],"name":s["name"],"icon":s["icon"],"active":bool(s["is_active"]),
-                     "product_count": dbq("SELECT COUNT(*) c FROM products WHERE category_id=? AND is_active=1",(s["id"],),one=True)["c"]} for s in subs]
-        out.append({"id":r["id"],"name":r["name"],"icon":r["icon"],"active":True,"subs":sub_list})
-    return jsonify(out)
+    try:
+        roots = dbq("SELECT id,name,icon FROM categories WHERE parent_id IS NULL AND is_active=1 ORDER BY id")
+        out = []
+        for r in roots:
+            subs = dbq("SELECT id,name,icon,is_active FROM categories WHERE parent_id=? AND is_active=1 ORDER BY id", (r["id"],))
+            sub_list = [{"id":s["id"],"name":s["name"],"icon":s["icon"],"active":bool(s["is_active"]),
+                         "product_count": dbq("SELECT COUNT(*) c FROM products WHERE category_id=? AND is_active=1",(s["id"],),one=True)["c"]} for s in subs]
+            out.append({"id":r["id"],"name":r["name"],"icon":r["icon"],"active":True,"subs":sub_list})
+        return jsonify(out)
+    except Exception as e:
+        return jsonify([])
 
 @app.get("/api/products/<int:sub_id>")
 @login_required
 def api_products(sub_id):
-    prods = dbq("SELECT id,name,price,description,site_url,is_active,photo_id FROM products WHERE category_id=? ORDER BY id", (sub_id,))
-    out = []
-    for p in prods:
-        out.append({"id":p["id"],"name":p["name"],"price":p["price"],"description":p["description"],
-                    "site_url":p["site_url"],"active":bool(p["is_active"]),"photo_url":p["photo_id"]})
-    return jsonify(out)
+    try:
+        prods = dbq("SELECT id,name,price,description,site_url,is_active,photo_id FROM products WHERE category_id=? ORDER BY id", (sub_id,))
+        out = []
+        for p in prods:
+            out.append({"id":p["id"],"name":p["name"],"price":p["price"],"description":p["description"],
+                        "site_url":p["site_url"],"active":bool(p["is_active"]),"photo_url":p["photo_id"]})
+        return jsonify(out)
+    except Exception:
+        return jsonify([])
 
 @app.get("/api/woo-status")
 @login_required
@@ -278,7 +284,9 @@ def api_user_block(uid):
 @app.get("/api/dashboard")
 @login_required
 def api_dashboard():
-    def c(sql): return dbq(sql, one=True)["c"]
+    def c(sql):
+        try: return dbq(sql, one=True)["c"]
+        except: return 0
     total = c("SELECT COUNT(*) c FROM users")
     today = c("SELECT COUNT(*) c FROM users WHERE DATE(last_seen)=DATE('now','localtime')")
     week  = c("SELECT COUNT(*) c FROM users WHERE last_seen>=datetime('now','-7 days','localtime')")
