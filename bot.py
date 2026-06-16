@@ -650,6 +650,8 @@ async def restore_backup(bot,file_id):
 #  HANDLERS — cmd_start / cmd_admin
 # ════════════════════════════════════════════════
 async def cmd_start(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
+    import asyncio
+    asyncio.ensure_future(woo.check_sync_version(force=True))  # چک تازگی در پس‌زمینه
     user=update.effective_user; is_new=False
     async with db.execute("SELECT user_id FROM users WHERE user_id=?",(user.id,)) as c: is_new=(await c.fetchone()) is None
     await save_user(user)
@@ -1256,7 +1258,9 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         await send_banner(update.message,msg,"workhours",kb=kb); return
 
     if mkey=="catalog":
-        await record_stat("catalog"); cats=await get_root_cats()
+        await record_stat("catalog")
+        await woo.check_sync_version()  # ورود به محصولات → چک تازگی (هر ۱۰ دقیقه)
+        cats=await get_root_cats()
         if not cats: await update.message.reply_text("📫 در حال حاضر محصولی موجود نیست.",reply_markup=main_menu()); return
         msg="🛍 محصولات استوک لند\nیک دسته‌بندی را انتخاب کنید:"
         await send_banner(update.message,msg,"catalog",kb=cat_root_kb(cats)); return
