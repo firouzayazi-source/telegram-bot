@@ -105,6 +105,18 @@ async def check_sync_version(force=False):
             logger.info(f"sync version changed → cache cleared (v={v})")
         _last_sync_version = v
 
+async def get_backorder_setting():
+    """آیا محصولات پیش‌خرید (onbackorder) باید نمایش داده شوند؟
+    از افزونه خوانده می‌شود. پیش‌فرض: True (نمایش بده)."""
+    cached = _get_cache("show_backorder")
+    if cached is not None: return cached
+    data = await _fetch_plugin("settings")
+    show = True  # پیش‌فرض
+    if data and "show_backorder" in data:
+        show = bool(data["show_backorder"])
+    _set_cache("show_backorder", show)
+    return show
+
 async def get_visible_category_ids():
     """فهرست id دسته‌هایی که در افزونه تیک «نمایش در تلگرام» خورده‌اند.
     اگر افزونه نصب نباشد، None برمی‌گرداند (یعنی همه دسته‌ها نمایش داده شوند)."""
@@ -180,6 +192,7 @@ def _map_product(p):
         "price_raw": price, "description": desc,
         "image": img, "permalink": p.get("permalink"),
         "in_stock": p.get("stock_status") in ("instock", "onbackorder"),
+        "is_backorder": p.get("stock_status") == "onbackorder",
         "category_ids": [c["id"] for c in p.get("categories", [])],
     }
 
@@ -199,9 +212,12 @@ async def get_products_by_category(cat_id):
     params = {"category": cat_id, "status": "publish", "orderby": "menu_order"}
     raw = await _fetch_all("products", params)
     if raw is None: return []
-    # ناموجود واقعی (outofstock) حذف می‌شود، ولی instock و onbackorder (پیش‌خرید) می‌مانند
+    # ناموجود واقعی (outofstock) همیشه حذف می‌شود
     if HIDE_OUT_OF_STOCK:
         raw = [p for p in raw if p.get("stock_status") != "outofstock"]
+    # پیش‌خرید (onbackorder) فقط اگر در افزونه فعال باشد
+    if not await get_backorder_setting():
+        raw = [p for p in raw if p.get("stock_status") != "onbackorder"]
     prods = [_map_product(p) for p in raw]
     _set_cache(key, prods)
     return prods
