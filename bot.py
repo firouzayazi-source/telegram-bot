@@ -1311,6 +1311,9 @@ async def post_init(app):
     await init_db(); await load_data(); await load_banners()
     await load_workhours(); await load_buttons(); await load_settings()
     await load_stats(); await load_menu()
+    # Cache ووکامرس را گرم کن تا اولین کاربر منتظر نماند
+    import asyncio
+    asyncio.ensure_future(woo.warm_cache())
     logger.info("✅ ربات راه‌اندازی شد")
 
 def main():
