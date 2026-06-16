@@ -19,7 +19,6 @@ def is_configured():
 
 # ── cache ساده در حافظه ────────────────────────────
 _cache = {}   # key -> (timestamp, data)
-_locks = {}
 _last_sync_version = None   # آخرین نسخه سینک که دیدیم
 _version_cache_time = 0     # آخرین باری که نسخه سینک چک شد
 VERSION_CHECK_INTERVAL = 600  # ۱۰ دقیقه — فقط هنگام ورود به بخش محصولات
