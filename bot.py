@@ -77,6 +77,9 @@ DEFAULT_SEC_WH = {k:True for k in SECTION_NAMES}
 
 # ── helpers
 def get_banner(k): banners.setdefault(k,{"file_id":None,"active":False}); return banners[k]
+
+# cache نگاشت URL عکس → file_id تلگرام (ارسال آنی در دفعات بعد)
+_photo_fileids = {}
 def get_sec_btns(k): buttons.setdefault(k,{"enabled":True,"items":[]}); return buttons[k]
 def get_setting(k): return settings.get(k,DEFAULT_SETTINGS.get(k,True))
 
@@ -188,10 +191,6 @@ def menu_sorted():
 def menu_item(key):
     return next((m for m in menu_cfg if m["key"] == key), None)
 
-def menu_label(key, default=""):
-    m = menu_item(key)
-    return m["label"] if m else default
-
 def menu_row_partner(key):
     """اگر این دکمه half باشد و در یک ردیف با دکمه half دیگری جفت شده،
     کلید جفتش را برمی‌گرداند؛ وگرنه None. (فقط دکمه‌های فعال)"""
@@ -247,13 +246,6 @@ async def init_db():
         CREATE TABLE IF NOT EXISTS users(
             user_id INTEGER PRIMARY KEY,username TEXT,first_name TEXT,
             joined_at TEXT,last_seen TEXT,is_blocked INTEGER DEFAULT 0);
-        CREATE TABLE IF NOT EXISTS categories(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT,icon TEXT DEFAULT '📦',
-            parent_id INTEGER DEFAULT NULL,is_active INTEGER DEFAULT 1);
-        CREATE TABLE IF NOT EXISTS products(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,category_id INTEGER,
-            name TEXT,price TEXT,description TEXT,photo_id TEXT,
-            site_url TEXT,is_active INTEGER DEFAULT 1,created_at TEXT);
         CREATE TABLE IF NOT EXISTS requests(
             id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER,
             username TEXT,first_name TEXT,phone TEXT,
@@ -261,8 +253,7 @@ async def init_db():
             status TEXT DEFAULT 'new',created_at TEXT);
         CREATE INDEX IF NOT EXISTS idx_ls ON users(last_seen);
     """)
-    for sql in ["ALTER TABLE users ADD COLUMN is_blocked INTEGER DEFAULT 0",
-                "ALTER TABLE categories ADD COLUMN parent_id INTEGER DEFAULT NULL"]:
+    for sql in ["ALTER TABLE users ADD COLUMN is_blocked INTEGER DEFAULT 0"]:
         try: await db.execute(sql)
         except: pass
     await db.commit()
@@ -656,6 +647,27 @@ async def restore_backup(bot,file_id):
 # ════════════════════════════════════════════════
 #  HANDLERS — cmd_start / cmd_admin
 # ════════════════════════════════════════════════
+async def loading_animation(chat, ctx):
+    """انیمیشن حرفه‌ای صبر: اکشن تایپ + پیام متحرک."""
+    try: await ctx.bot.send_chat_action(chat_id=chat.id, action="typing")
+    except Exception: pass
+    msg = await chat.send_message("🛍 در حال دریافت محصولات از سایت…")
+    async def animate():
+        frames = ["🛍 در حال دریافت محصولات از سایت ⏳",
+                  "🛍 در حال دریافت محصولات از سایت ⌛️",
+                  "🛍 لحظه‌ای صبر کنید، تقریباً آماده است…"]
+        i = 0
+        try:
+            while True:
+                await asyncio.sleep(0.8)
+                try:
+                    await ctx.bot.send_chat_action(chat_id=chat.id, action="typing")
+                    await msg.edit_text(frames[i % len(frames)])
+                except Exception: pass
+                i += 1
+        except asyncio.CancelledError: pass
+    return msg, asyncio.ensure_future(animate())
+
 async def cmd_start(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     import asyncio
     asyncio.ensure_future(woo.check_sync_version(force=True))  # چک تازگی در پس‌زمینه
@@ -736,11 +748,8 @@ async def user_cb(query,ctx):
 
     if data.startswith("prd_"):
         pid=int(data[4:])
-        # انیمیشن بارگذاری — کاربر می‌فهمد ربات در حال گرفتن اطلاعات است
-        loading=await query.message.reply_text("⏳ در حال بارگذاری محصول از سایت، شکیبا باشید…")
+        # محصول از cache می‌آید (سریع) — نیازی به انیمیشن نیست
         p=await get_product(pid)
-        try: await loading.delete()
-        except Exception: pass
         if not p: return
         await record_stat(f"prd_{pid}")
         is_backorder = len(p)>8 and p[8]==1
@@ -749,8 +758,17 @@ async def user_cb(query,ctx):
             text+="\n\n🔵 وضعیت: قابل سفارش (پیش‌خرید)\nاین محصول هم‌اکنون موجود نیست اما قابل سفارش است. برای پیش‌خرید با پشتیبانی هماهنگ کنید."
         if p[3]: text+=f"\n\n📝 {p[3]}"
         kb=product_kb(p)
+        # caption تلگرام حداکثر ۱۰۲۴ کاراکتر — اگر بلندتر بود، تا خط کامل ببر
+        cap = text
+        if len(cap) > 1024:
+            cut = text[:1000].rsplit("\n", 1)[0]  # تا آخرین خط کامل
+            cap = cut + "\n\n📖 ادامه در سایت…"
         if p[4]:
-            try: await query.message.reply_photo(photo=p[4],caption=text[:1024],reply_markup=kb); return
+            photo_ref = _photo_fileids.get(p[4], p[4])
+            try:
+                sent=await query.message.reply_photo(photo=photo_ref,caption=cap,reply_markup=kb)
+                if sent.photo: _photo_fileids[p[4]] = sent.photo[-1].file_id
+                return
             except Exception as e: logger.error(f"prd photo {pid}: {e}")
         if len(text)>4000: text=text[:3990]+"..."
         await query.message.reply_text(text,reply_markup=kb); return
@@ -1282,8 +1300,16 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
 
     if mkey=="catalog":
         await record_stat("catalog")
-        await woo.check_sync_version()  # ورود به محصولات → چک تازگی (هر ۱۰ دقیقه)
+        anim = None
+        if not woo.is_cats_cached():
+            anim = await loading_animation(update.message.chat, ctx)
+        await woo.check_sync_version()
         cats=await get_root_cats()
+        if anim:
+            msg_a, task_a = anim
+            task_a.cancel()
+            try: await msg_a.delete()
+            except Exception: pass
         if not cats: await update.message.reply_text("📫 در حال حاضر محصولی موجود نیست.",reply_markup=main_menu()); return
         msg="🛍 محصولات استوک لند\nیک دسته‌بندی را انتخاب کنید:"
         await send_banner(update.message,msg,"catalog",kb=cat_root_kb(cats)); return
@@ -1352,7 +1378,7 @@ def main():
     app.add_handler(MessageHandler(filters.Document.ZIP & ~filters.COMMAND,document_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,text_handler))
     print("🚀 ربات در حال اجراست...")
-    app.run_polling(drop_pending_updates=True)
+    app.run_polling(drop_pending_updates=True, poll_interval=0.0, timeout=30)
 
 if __name__=="__main__":
     main()
