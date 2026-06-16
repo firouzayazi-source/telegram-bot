@@ -113,7 +113,7 @@ async def get_categories():
     await check_sync_version()  # اگر در افزونه سینک زده شده، کش تازه می‌شود
     cached = _get_cache("cats")
     if cached is not None: return cached
-    raw = await _fetch_all("products/categories", {"hide_empty": "false", "orderby": "menu_order", "per_page": 100})
+    raw = await _fetch_all("products/categories", {"hide_empty": "false"})
     if raw is None: return []
     # فیلتر دسته‌های تیک‌خورده (اگر افزونه نصب باشد)
     visible = await get_visible_category_ids()
