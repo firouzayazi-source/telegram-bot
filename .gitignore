@@ -1,0 +1,55 @@
+# ── Runtime & database
+users.db
+users.db-shm
+users.db-wal
+bot.db
+bot.log
+*.log
+
+# ── Config & environment
+.env
+.env.*
+
+# ── Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# ── pip & virtual environments
+.cache/
+.local/
+.virtualenvs/
+venv/
+.venv/
+env/
+
+# ── Editor & OS
+.vimrc
+.bashrc
+.profile
+.python-version
+.python_history
+.pythonstartup.py
+.gitconfig
+.ipython/
+.DS_Store
+Thumbs.db
+
+# ── Bot runtime data (generated, not in repo)
+workhours.json
+buttons.json
+settings.json
+stats.json
+menu.json
+photomap.json
+tg_cats.json
+uploads/
+
+# ── Backup files
+backup_*.zip
+
+# ── Duplicate files
+readme.md
+railway.JSON
