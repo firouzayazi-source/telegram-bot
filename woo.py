@@ -179,7 +179,7 @@ def _map_product(p):
         "id": p["id"], "name": p["name"], "price": price_fmt,
         "price_raw": price, "description": desc,
         "image": img, "permalink": p.get("permalink"),
-        "in_stock": p.get("stock_status") == "instock",
+        "in_stock": p.get("stock_status") in ("instock", "onbackorder"),
         "category_ids": [c["id"] for c in p.get("categories", [])],
     }
 
@@ -197,10 +197,11 @@ async def get_products_by_category(cat_id):
     cached = _get_cache(key)
     if cached is not None: return cached
     params = {"category": cat_id, "status": "publish", "orderby": "menu_order"}
-    if HIDE_OUT_OF_STOCK:
-        params["stock_status"] = "instock"
     raw = await _fetch_all("products", params)
     if raw is None: return []
+    # ناموجود واقعی (outofstock) حذف می‌شود، ولی instock و onbackorder (پیش‌خرید) می‌مانند
+    if HIDE_OUT_OF_STOCK:
+        raw = [p for p in raw if p.get("stock_status") != "outofstock"]
     prods = [_map_product(p) for p in raw]
     _set_cache(key, prods)
     return prods
@@ -218,10 +219,10 @@ async def get_product(pid):
 async def search_products(query):
     """جستجوی محصول."""
     params = {"search": query, "status": "publish", "per_page": 20}
-    if HIDE_OUT_OF_STOCK:
-        params["stock_status"] = "instock"
     raw = await _fetch("products", params)
     if raw is None: return []
+    if HIDE_OUT_OF_STOCK:
+        raw = [p for p in raw if p.get("stock_status") != "outofstock"]
     return [_map_product(p) for p in raw]
 
 # ── تست اتصال ───────────────────────────────────────
