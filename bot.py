@@ -314,7 +314,8 @@ def _cat_tuple(c):
 def _prod_tuple(p, cat_id=None):
     return (p["id"], p["name"], p["price"], p["description"],
             p["image"], p["permalink"], 1 if p["in_stock"] else 0,
-            cat_id if cat_id is not None else (p["category_ids"][0] if p["category_ids"] else 0))
+            cat_id if cat_id is not None else (p["category_ids"][0] if p["category_ids"] else 0),
+            1 if p.get("is_backorder") else 0)  # عضو ۸: پیش‌خرید
 
 async def get_root_cats(active_only=True):
     cats = await woo.get_root_categories()
@@ -418,8 +419,14 @@ def cat_products_kb(products,sub_id):
 
 def product_kb(p):
     btns=[]
-    if p[5]: btns.append([InlineKeyboardButton("🌐 مشاهده / خرید از سایت",url=p[5])])
-    btns.append([InlineKeyboardButton("📋 درخواست خرید",callback_data=f"req_{p[0]}")])
+    is_backorder = len(p)>8 and p[8]==1
+    if is_backorder:
+        # محصول پیش‌خرید: لینک سایت نده، فقط درخواست پیش‌خرید
+        btns.append([InlineKeyboardButton("📝 درخواست پیش‌خرید",callback_data=f"pre_{p[0]}")])
+    else:
+        # محصول موجود: لینک سایت + درخواست خرید
+        if p[5]: btns.append([InlineKeyboardButton("🌐 مشاهده / خرید از سایت",url=p[5])])
+        btns.append([InlineKeyboardButton("📋 درخواست خرید",callback_data=f"req_{p[0]}")])
     btns.append([InlineKeyboardButton("🔙 برگشت",callback_data=f"cs_back_{p[7]}")])
     return InlineKeyboardMarkup(btns)
 
@@ -728,10 +735,18 @@ async def user_cb(query,ctx):
         await safe_edit(query.message,f"{title}\n{to_fa(len(products))} محصول:",reply_markup=cat_products_kb(products,sub_id)); return
 
     if data.startswith("prd_"):
-        pid=int(data[4:]); p=await get_product(pid)
+        pid=int(data[4:])
+        # انیمیشن بارگذاری — کاربر می‌فهمد ربات در حال گرفتن اطلاعات است
+        loading=await query.message.reply_text("⏳ در حال بارگذاری محصول از سایت، شکیبا باشید…")
+        p=await get_product(pid)
+        try: await loading.delete()
+        except Exception: pass
         if not p: return
         await record_stat(f"prd_{pid}")
+        is_backorder = len(p)>8 and p[8]==1
         text=f"📱 {p[1]}\n{'─'*18}\n💰 قیمت:  {p[2]}"
+        if is_backorder:
+            text+="\n\n🔵 وضعیت: قابل سفارش (پیش‌خرید)\nاین محصول هم‌اکنون موجود نیست اما قابل سفارش است. برای پیش‌خرید با پشتیبانی هماهنگ کنید."
         if p[3]: text+=f"\n\n📝 {p[3]}"
         kb=product_kb(p)
         if p[4]:
@@ -743,14 +758,20 @@ async def user_cb(query,ctx):
     if data.startswith("req_"):
         pid=int(data[4:]); p=await get_product(pid)
         if not p: return
-        ctx.user_data.update({"mode":"req_phone","req_pid":pid,"req_name":p[1]})
+        ctx.user_data.update({"mode":"req_phone","req_pid":pid,"req_name":p[1],"req_type":"خرید"})
         await query.message.reply_text(f"📋 درخواست خرید: {p[1]}\n\nشماره تماس خود را وارد کنید:",reply_markup=cancel_menu()); return
+
+    if data.startswith("pre_"):
+        pid=int(data[4:]); p=await get_product(pid)
+        if not p: return
+        ctx.user_data.update({"mode":"req_phone","req_pid":pid,"req_name":p[1],"req_type":"پیش‌خرید"})
+        await query.message.reply_text(f"📝 درخواست پیش‌خرید: {p[1]}\n\nاین محصول قابل سفارش است. شماره تماس خود را وارد کنید تا پشتیبانی برای پیش‌خرید با شما هماهنگ کند:",reply_markup=cancel_menu()); return
 
 # ════════════════════════════════════════════════
 #  MAIN CALLBACK DISPATCHER
 # ════════════════════════════════════════════════
 # پیشوندهایی که هم ادمین هم کاربر دسترسی دارد
-_USER_CB_PREFIXES = ("cr_","cs_","prd_","req_","cat_","wh_weekly","wh_back_today")
+_USER_CB_PREFIXES = ("cr_","cs_","prd_","req_","pre_","cat_","wh_weekly","wh_back_today")
 
 async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     query=update.callback_query
@@ -1231,17 +1252,19 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
 
     # ════ purchase request phone ════
     if mode=="req_phone":
-        pid=ctx.user_data.pop("req_pid",None); pname=ctx.user_data.pop("req_name","نامشخص"); ctx.user_data.pop("mode",None)
+        pid=ctx.user_data.pop("req_pid",None); pname=ctx.user_data.pop("req_name","نامشخص")
+        rtype=ctx.user_data.pop("req_type","خرید"); ctx.user_data.pop("mode",None)
         digits=text.replace("-","").replace(" ","").replace("+","")
         if not digits.isdigit() or len(digits)<10:
-            ctx.user_data.update({"mode":"req_phone","req_pid":pid,"req_name":pname})
+            ctx.user_data.update({"mode":"req_phone","req_pid":pid,"req_name":pname,"req_type":rtype})
             await update.message.reply_text("❌ شماره معتبر نیست. دوباره:",reply_markup=cancel_menu()); return
         await save_request(user.id,user.username,user.first_name,text,pid,pname)
+        icon="📝" if rtype=="پیش‌خرید" else "📋"
         try:
             await ctx.bot.send_message(ADMIN_ID,
-                f"📋 درخواست خرید!\n📱 {pname}\n👤 {user.first_name or'—'} | {'@'+user.username if user.username else'—'}\n📞 {text}\n🆔 {user.id}")
+                f"{icon} درخواست {rtype}!\n📱 {pname}\n👤 {user.first_name or'—'} | {'@'+user.username if user.username else'—'}\n📞 {text}\n🆔 {user.id}")
         except Exception as e: logger.error(f"req notify: {e}")
-        await update.message.reply_text(f"✅ درخواست خرید «{pname}» ثبت شد!\nپشتیبانی به زودی تماس می‌گیرد.",reply_markup=main_menu()); return
+        await update.message.reply_text(f"✅ درخواست {rtype} «{pname}» ثبت شد!\nپشتیبانی به زودی تماس می‌گیرد.",reply_markup=main_menu()); return
 
     # ════ user menu ════
     # تشخیص دکمه از روی label (که ممکن است ادمین تغییرش داده باشد)
