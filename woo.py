@@ -37,17 +37,32 @@ def _set_cache(key, data):
 def clear_cache():
     _cache.clear()
 
+def is_cats_cached():
+    """آیا دسته‌ها در cache گرم هستند؟"""
+    return _get_cache("cats") is not None
+
 async def warm_cache():
-    """Cache گرم‌کردن هنگام استارت ربات — داده‌ها را از قبل می‌گیرد
-    تا اولین کاربر منتظر نماند."""
+    """Cache گرم‌کردن هنگام استارت ربات — دسته‌ها و محصولات همه دسته‌ها را
+    از قبل می‌گیرد تا کاربر هیچ‌جا منتظر نماند."""
     try:
         logger.info("woo: گرم کردن cache شروع شد...")
         cats = await get_categories()
-        if cats:
-            roots = [c for c in cats if c["parent"] == 0]
-            logger.info(f"woo: {len(cats)} دسته cache شد ({len(roots)} اصلی)")
-        else:
-            logger.warning("woo: دسته‌ای پیدا نشد (اتصال یا تنظیمات را بررسی کنید)")
+        if not cats:
+            logger.warning("woo: دسته‌ای پیدا نشد (اتصال/تنظیمات را بررسی کنید)")
+            return
+        roots = [c for c in cats if c["parent"] == 0]
+        logger.info(f"woo: {len(cats)} دسته cache شد ({len(roots)} اصلی)")
+        # محصولات همه دسته‌ها را هم از قبل بگیر (کلیک روی دسته فوری شود)
+        import asyncio
+        async def _warm_cat(c):
+            try: await get_products_by_category(c["id"])
+            except Exception: pass
+        # موازی بگیر (سریع‌تر) ولی محدود به ۵ تا همزمان (فشار نیاد روی سایت)
+        sem = asyncio.Semaphore(5)
+        async def _bounded(c):
+            async with sem: await _warm_cat(c)
+        await asyncio.gather(*[_bounded(c) for c in cats])
+        logger.info(f"woo: محصولات {len(cats)} دسته هم cache شد — آماده!")
     except Exception as e:
         logger.error(f"woo warm_cache: {e}")
 
@@ -147,7 +162,7 @@ async def get_categories():
     """تمام دسته‌های قابل‌نمایش (تیک‌خورده در افزونه) را برمی‌گرداند."""
     cached = _get_cache("cats")
     if cached is not None: return cached
-    raw = await _fetch_all("products/categories", {"hide_empty": "false"})
+    raw = await _fetch_all("products/categories", {"hide_empty": "false", "_fields": "id,name,parent,count,image"})
     if raw is None: return []
     # فیلتر دسته‌های تیک‌خورده (اگر افزونه نصب باشد)
     visible = await get_visible_category_ids()
@@ -186,7 +201,7 @@ def _map_product(p):
     price_fmt = f"{price} تومان" if price and price.isdigit() else (price or "تماس بگیرید")
     # توضیح کوتاه بدون تگ HTML
     desc = p.get("short_description") or p.get("description") or ""
-    desc = _strip_html(desc)[:500]
+    desc = _limit_lines(_strip_html(desc), max_lines=10, permalink=p.get("permalink"))
     return {
         "id": p["id"], "name": p["name"], "price": price_fmt,
         "price_raw": price, "description": desc,
@@ -198,18 +213,35 @@ def _map_product(p):
 
 def _strip_html(s):
     import re
-    s = re.sub(r"<[^>]+>", " ", s)
+    # پایان پاراگراف و خط جدید → newline (حفظ خط‌بندی)
+    s = re.sub(r"</p>|<br\s*/?>|</li>|</div>", "\n", s, flags=re.I)
+    s = re.sub(r"<li[^>]*>", "• ", s, flags=re.I)  # آیتم لیست → بولت
+    s = re.sub(r"<[^>]+>", "", s)  # بقیه تگ‌ها حذف
     s = re.sub(r"&nbsp;", " ", s)
     s = re.sub(r"&zwnj;", "\u200c", s)
     s = re.sub(r"&[a-z]+;", " ", s)
-    return re.sub(r"\s+", " ", s).strip()
+    # فقط خطوط غیرخالی را نگه دار (خطوط خالی اضافه حذف)
+    lines = [ln.strip() for ln in s.split("\n") if ln.strip()]
+    return "\n".join(lines).strip()
+
+def _limit_lines(text, max_lines=10, permalink=None):
+    """توضیح را به max_lines خط محدود می‌کند. اگر بیشتر بود، «ادامه در سایت»."""
+    lines = [ln for ln in text.split("\n") if ln.strip()]
+    if len(lines) <= max_lines:
+        return text
+    kept = "\n".join(lines[:max_lines])
+    if permalink:
+        kept += "\n\n📖 ادامه توضیحات در سایت…"
+    else:
+        kept += "\n…"
+    return kept
 
 async def get_products_by_category(cat_id):
     """محصولات یک دسته (شامل ناموجود طبق تنظیم)."""
     key = f"prods_{cat_id}"
     cached = _get_cache(key)
     if cached is not None: return cached
-    params = {"category": cat_id, "status": "publish", "orderby": "menu_order"}
+    params = {"category": cat_id, "status": "publish", "orderby": "menu_order", "_fields": "id,name,price,regular_price,sale_price,stock_status,status,permalink,images,short_description,description,categories"}
     raw = await _fetch_all("products", params)
     if raw is None: return []
     # ناموجود واقعی (outofstock) همیشه حذف می‌شود
@@ -234,7 +266,7 @@ async def get_product(pid):
 
 async def search_products(query):
     """جستجوی محصول."""
-    params = {"search": query, "status": "publish", "per_page": 20}
+    params = {"search": query, "status": "publish", "per_page": 20, "_fields": "id,name,price,regular_price,sale_price,stock_status,status,permalink,images,short_description,description,categories"}
     raw = await _fetch("products", params)
     if raw is None: return []
     if HIDE_OUT_OF_STOCK:
