@@ -224,16 +224,12 @@ def _strip_html(s):
     return "\n".join(lines).strip()
 
 def _limit_lines(text, max_lines=9, permalink=None):
-    """توضیح را به max_lines خط محدود می‌کند. اگر بیشتر بود، لینک سایت اضافه می‌شود.
-    تلگرام URL خام را خودکار کلیک‌پذیر می‌کند (نیازی به parse_mode نیست)."""
+    """توضیح را به max_lines خط محدود می‌کند. اگر بیشتر بود، متن راهنما اضافه می‌شود."""
     lines = [ln for ln in text.split("\n") if ln.strip()]
     if len(lines) <= max_lines:
         return text
     kept = "\n".join(lines[:max_lines])
-    if permalink:
-        kept += f"\n\n📖 ادامه توضیحات در سایت:\n{permalink}"
-    else:
-        kept += "\n…"
+    kept += "\n\n📖 ادامه توضیحات در سایت"
     return kept
 
 async def get_products_by_category(cat_id):
