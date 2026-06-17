@@ -389,17 +389,10 @@ def spam_check(uid: int) -> str:
     _warned.pop(uid, None)        # کاربر آرام گرفت → هشدار ریست شود
     return 'ok'
 
-async def _bg_woo_refresh(force: bool = False):
-    """فراخوانی پس‌زمینه‌ای: چک نسخه ووکامرس + گرم‌کردن cache در صورت نیاز.
-    کاربر هیچ تاخیری احساس نمی‌کند — کاملاً در پس‌زمینه اجرا می‌شود.
-    woo.check_sync_version خودش cooldown داخلی دارد (60 ثانیه) — پس
-    حتی اگر صدها بار فراخوانی شود، فقط یک بار در دقیقه به سایت وصل می‌شود."""
-    try:
-        await woo.check_sync_version(force=force)
-        if not woo.is_cats_cached():
-            await woo.warm_cache()
-    except Exception as e:
-        logger.debug(f"bg_woo_refresh: {e}")
+async def _trigger_warm():
+    """فراخوانی پس‌زمینه‌ای maybe_warm_cache — کاربر هیچ تاخیری احساس نمی‌کند."""
+    try: await woo.maybe_warm_cache()
+    except Exception as e: logger.debug(f"trigger_warm: {e}")
 
 # ════════════════════════════════════════════════
 #  KEYBOARDS
@@ -721,7 +714,7 @@ async def loading_animation(chat, ctx):
     return msg, asyncio.ensure_future(animate())
 
 async def cmd_start(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
-    asyncio.ensure_future(_bg_woo_refresh(force=True))  # فراخوان فوری + گرم‌کردن cache در پس‌زمینه
+    asyncio.ensure_future(_trigger_warm())  # warm در پس‌زمینه — اگر ۱۰ دقیقه گذشته باشد
     user=update.effective_user; is_new=False
     async with db.execute("SELECT user_id FROM users WHERE user_id=?",(user.id,)) as c: is_new=(await c.fetchone()) is None
     await save_user(user)
@@ -1277,7 +1270,7 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         if _s == 'block': return                                                    # بی‌صدا
         if _s == 'warn': return await update.message.reply_text("🐢 لطفاً آرام‌تر پیام دهید.")
         if await is_blocked(user.id): return
-        asyncio.ensure_future(_bg_woo_refresh())
+        asyncio.ensure_future(_trigger_warm())
     if text=="❌ لغو عملیات":
         ctx.user_data.clear(); return await update.message.reply_text("❌ لغو شد.",reply_markup=main_menu())
     mode=ctx.user_data.get("mode")
@@ -1386,7 +1379,6 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         anim = None
         if not woo.is_cats_cached():
             anim = await loading_animation(update.message.chat, ctx)
-        await woo.check_sync_version()
         cats=await get_root_cats()
         if anim:
             msg_a, task_a = anim
@@ -1448,7 +1440,7 @@ async def post_init(app):
     await load_workhours(); await load_buttons(); await load_settings()
     await load_stats(); await load_menu()
     # گرم‌کردن cache ووکامرس در پس‌زمینه — اولین کاربر منتظر نمی‌ماند
-    asyncio.ensure_future(_bg_woo_refresh(force=True))
+    asyncio.ensure_future(_trigger_warm())
     logger.info("✅ ربات راه‌اندازی شد")
 
 def main():
