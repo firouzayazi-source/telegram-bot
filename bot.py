@@ -861,9 +861,6 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
 
     # ── مسیریابی کاربران — answer یکبار اینجا فراخوانی می‌شه
     if data.startswith(_USER_CB_PREFIXES) or uid!=ADMIN_ID:
-        # فراخوان پس‌زمینه ووکامرس (حداکثر ۱ بار در دقیقه، بدون تاخیر برای کاربر)
-        if uid != ADMIN_ID:
-            asyncio.ensure_future(_bg_woo_refresh())
         await query.answer()
         try: await user_cb(query,ctx)
         except Exception as e:
