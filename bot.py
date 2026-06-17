@@ -1,5 +1,5 @@
 import os, json, time, asyncio, logging, aiosqlite, jdatetime, pytz, zipfile, io
-from datetime import datetime
+from datetime import datetime, timedelta
 import aiofiles
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (ApplicationBuilder, CommandHandler, MessageHandler,
@@ -651,20 +651,40 @@ async def send_banner(msg,text,key,kb=None):
     await msg.reply_text(text,reply_markup=kb)
 
 # ── broadcast
-async def broadcast(ctx,text,photo=None):
-    users=await get_all_uids(); total=len(users); ok=fail=0
-    st=await ctx.bot.send_message(ADMIN_ID,f"📢 شروع پخش به {to_fa(total)} کاربر...")
-    for i,uid in enumerate(users,1):
-        try:
-            if photo: await ctx.bot.send_photo(uid,photo=photo,caption=text)
-            else: await ctx.bot.send_message(uid,text)
-            ok+=1
-        except: fail+=1
-        if i%10==0 or i==total:
-            try: await st.edit_text(f"📢 {to_fa(ok)}✔️ {to_fa(fail)}❌ {to_fa(i)}/{to_fa(total)}")
-            except: pass
-        await asyncio.sleep(0.2)
-    await st.edit_text(f"✅ پخش تمام شد!\nموفق: {to_fa(ok)} | شکست: {to_fa(fail)}")
+_broadcast_active = False   # جلوگیری از پخش همزمان دوگانه
+
+async def broadcast(ctx, text, photo=None):
+    global _broadcast_active
+    if _broadcast_active:
+        await ctx.bot.send_message(ADMIN_ID, "⚠️ یک پخش در حال اجراست — صبر کنید تا تمام شود.")
+        return
+    _broadcast_active = True
+    try:
+        users = await get_all_uids(); total = len(users); ok = fail = 0
+        st = await ctx.bot.send_message(ADMIN_ID, f"📢 شروع پخش به {to_fa(total)} کاربر...")
+        for i, uid in enumerate(users, 1):
+            try:
+                if photo: await ctx.bot.send_photo(uid, photo=photo, caption=text)
+                else:     await ctx.bot.send_message(uid, text)
+                ok += 1
+                await asyncio.sleep(0.05)   # ~۲۰ پیام/ثانیه — زیر حد تلگرام
+            except Exception as e:
+                retry = getattr(e, "retry_after", None)
+                if retry:                   # تلگرام: صبر کن X ثانیه
+                    await asyncio.sleep(retry + 1)
+                    try:
+                        if photo: await ctx.bot.send_photo(uid, photo=photo, caption=text)
+                        else:     await ctx.bot.send_message(uid, text)
+                        ok += 1
+                    except: fail += 1
+                else:
+                    fail += 1
+            if i % 20 == 0 or i == total:
+                try: await st.edit_text(f"📢 {to_fa(ok)}✔️ {to_fa(fail)}❌  {to_fa(i)}/{to_fa(total)}")
+                except: pass
+        await st.edit_text(f"✅ پخش تمام شد!\nموفق: {to_fa(ok)} | شکست: {to_fa(fail)}")
+    finally:
+        _broadcast_active = False
 
 # ── backup
 async def send_backup(bot):
@@ -680,6 +700,24 @@ async def send_backup(bot):
     buf.seek(0)
     await bot.send_message(ADMIN_ID,f"💾 بک‌آپ — {shamsi_now()}")
     await bot.send_document(ADMIN_ID,document=buf,filename=f"backup_{ts}.zip",caption="💾 بک‌آپ کامل")
+
+async def _auto_backup_loop(bot):
+    """هر شب ساعت ۳ بامداد به وقت تهران، بکاپ خودکار به ادمین می‌فرستد."""
+    _tz = pytz.timezone("Asia/Tehran")
+    while True:
+        try:
+            now = datetime.now(_tz)
+            target = now.replace(hour=3, minute=0, second=0, microsecond=0)
+            if now >= target:
+                target += timedelta(days=1)
+            wait = (target - now).total_seconds()
+            logger.info(f"auto_backup: بعد از {int(wait//3600)} ساعت و {int((wait%3600)//60)} دقیقه")
+            await asyncio.sleep(wait)
+            await send_backup(bot)
+            logger.info("✅ بکاپ خودکار ارسال شد")
+        except Exception as e:
+            logger.error(f"auto_backup: {e}")
+            await asyncio.sleep(3600)   # خطا → یک ساعت دیگر دوباره
 
 async def restore_backup(bot,file_id):
     try:
@@ -1145,9 +1183,20 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             await safe_edit(query.message,f"📋 درخواست‌ها\n🆕 جدید: {to_fa(nc)} | کل: {to_fa(len(reqs))}",reply_markup=reqs_kb(reqs))
 
         elif data.startswith("rq_done_"):
-            rid=int(data[8:]); await done_request(rid)
+            rid=int(data[8:])
+            # اطلاعات کاربر را قبل از تغییر وضعیت بگیر
+            async with db.execute("SELECT user_id,product_name FROM requests WHERE id=?",(rid,)) as c:
+                req_row=await c.fetchone()
+            await done_request(rid)
             await query.answer("✅",show_alert=True)
             await safe_edit(query.message,"✅ پیگیری شد.",reply_markup=back_admin())
+            # اطلاع‌رسانی به کاربر
+            if req_row:
+                try:
+                    await ctx.bot.send_message(req_row[0],
+                        f"✅ درخواست خرید شما برای «{req_row[1]}» پیگیری شد.\n"
+                        f"به زودی با شما تماس خواهیم گرفت. 🙏")
+                except Exception as e: logger.warning(f"req_done notify: {e}")
 
         elif data.startswith("rq_"):
             await query.answer()
@@ -1456,6 +1505,7 @@ async def post_init(app):
     # گرم‌کردن cache ووکامرس در پس‌زمینه — اولین کاربر منتظر نمی‌ماند
     asyncio.ensure_future(_trigger_warm())
     asyncio.ensure_future(_spam_cleanup_loop())
+    asyncio.ensure_future(_auto_backup_loop(app.bot))
     logger.info("✅ ربات راه‌اندازی شد")
 
 def main():
