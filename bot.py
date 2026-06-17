@@ -358,21 +358,36 @@ async def get_requests():
 async def done_request(rid): await db.execute("UPDATE requests SET status='done' WHERE id=?",(rid,)); await db.commit()
 
 # ── anti-spam (سیستم سبک — sliding window، بدون DB query، بدون lock)
-_rate: dict = {}   # uid -> list[timestamp]
-_RATE_MAX = 8      # حداکثر تعداد مجاز
-_RATE_WIN = 10.0   # در بازه (ثانیه)
+_rate:       dict = {}   # uid → [timestamps]
+_warned:     dict = {}   # uid → زمان اولین هشدار
+_hard_block: dict = {}   # uid → blocked_until timestamp
+_RATE_MAX   = 8          # حداکثر کلیک مجاز در پنجره
+_RATE_WIN   = 10.0       # پنجره زمانی (ثانیه)
+_HARD_BLOCK = 10.0       # مدت بلاک سخت (ثانیه)
 
-def is_spam(uid: int) -> bool:
-    """True یعنی کاربر اسپم می‌کند. کاملاً sync، بدون await، بدون DB.
-    بیش از _RATE_MAX تعامل در _RATE_WIN ثانیه → اسپم."""
-    if uid == ADMIN_ID: return False
+def spam_check(uid: int) -> str:
+    """کاملاً sync — بدون await، بدون DB، صفر overhead.
+    بازگشتی: 'ok' | 'warn' | 'block'
+      ok    → درخواست معمولی، ادامه بده
+      warn  → اولین بار اسپم شناسایی شد — popup هشدار نشان بده، ریپلای نده
+      block → کاربر بعد از هشدار ادامه داد — ۱۰ ثانیه بی‌صدا بلاک"""
+    if uid == ADMIN_ID: return 'ok'
     now = time.time()
+    # بلاک سخت فعال است؟
+    if _hard_block.get(uid, 0) > now: return 'block'
+    # پنجره نرخ — فقط timestamps داخل _RATE_WIN ثانیه اخیر
     ts = [t for t in _rate.get(uid, ()) if now - t < _RATE_WIN]
     if len(ts) >= _RATE_MAX:
         _rate[uid] = ts
-        return True
+        if uid in _warned:        # هشدار قبلاً داده شده → بلاک سخت ۱۰ ثانیه
+            del _warned[uid]
+            _hard_block[uid] = now + _HARD_BLOCK
+            return 'block'
+        _warned[uid] = now        # اولین تخطی → هشدار
+        return 'warn'
     ts.append(now); _rate[uid] = ts
-    return False
+    _warned.pop(uid, None)        # کاربر آرام گرفت → هشدار ریست شود
+    return 'ok'
 
 async def _bg_woo_refresh(force: bool = False):
     """فراخوانی پس‌زمینه‌ای: چک نسخه ووکامرس + گرم‌کردن cache در صورت نیاز.
@@ -831,12 +846,15 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     query=update.callback_query
     data=query.data; uid=query.from_user.id
 
-    # ── محافظت اسپم (فقط کاربران عادی) — سیستم سبک، بدون lock
+    # ── محافظت اسپم دو فازی (فقط کاربران عادی) — sync، بدون DB، صفر overhead
     if uid != ADMIN_ID:
-        if is_spam(uid):
-            await query.answer("🐢 لطفاً آرام‌تر کلیک کنید.")
+        _s = spam_check(uid)
+        if _s == 'block':
+            await query.answer()   # بی‌صدا — فقط loading را خاموش می‌کند
             return
-        # بلاک دائمی توسط ادمین
+        if _s == 'warn':
+            await query.answer("🐢 لطفاً کمی آرام‌تر کلیک کنید.", show_alert=True)
+            return
         if await is_blocked(uid):
             await query.answer("⛔ دسترسی شما مسدود شده است.")
             return
@@ -1258,9 +1276,10 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     user=update.effective_user; text=update.message.text.strip()
     await save_user(user)
     if user.id != ADMIN_ID:
-        if is_spam(user.id): return await update.message.reply_text("🐢 لطفاً آرام‌تر پیام دهید.")
+        _s = spam_check(user.id)
+        if _s == 'block': return                                                    # بی‌صدا
+        if _s == 'warn': return await update.message.reply_text("🐢 لطفاً آرام‌تر پیام دهید.")
         if await is_blocked(user.id): return
-        # فراخوان پس‌زمینه ووکامرس (حداکثر ۱ بار در دقیقه)
         asyncio.ensure_future(_bg_woo_refresh())
     if text=="❌ لغو عملیات":
         ctx.user_data.clear(); return await update.message.reply_text("❌ لغو شد.",reply_markup=main_menu())
