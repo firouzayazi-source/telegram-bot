@@ -23,7 +23,25 @@ _last_sync_version = None
 _version_cache_time = 0
 VERSION_CHECK_INTERVAL = 60
 
-# ── Interval-Based Warm ─────────────────────────────
+# ── HTTP session دائمی — یک‌بار ساخته می‌شود، برای همه requests استفاده می‌شود
+_http_session: "aiohttp.ClientSession | None" = None
+
+async def _get_session() -> "aiohttp.ClientSession":
+    """Session دائمی با connection pool — از ساختن session جدید برای هر request جلوگیری می‌کند."""
+    global _http_session
+    import aiohttp as _aio
+    if _http_session is None or _http_session.closed:
+        timeout = _aio.ClientTimeout(total=20)
+        connector = _aio.TCPConnector(limit=10, enable_cleanup_closed=True)
+        _http_session = _aio.ClientSession(timeout=timeout, connector=connector)
+    return _http_session
+
+def _clean_cache():
+    """ورودی‌های منقضی را از cache حذف می‌کند — جلوگیری از رشد بی‌پایان."""
+    now = time.time()
+    expired = [k for k, (ts, _) in list(_cache.items()) if now - ts >= CACHE_TTL]
+    for k in expired: del _cache[k]
+    if expired: logger.debug(f"woo cache cleaned: {len(expired)} expired")
 _last_warm_time: float = 0.0
 WARM_INTERVAL: int = 600   # ۱۰ دقیقه — حداقل فاصله بین دو warm کامل
 
@@ -69,48 +87,45 @@ async def warm_cache():
         logger.error(f"woo warm_cache: {e}")
 
 async def maybe_warm_cache():
-    """اگر ۱۰ دقیقه از آخرین warm کامل گذشته باشد، cache را گرم می‌کند.
-    در غیر این صورت فوراً برمی‌گردد — صفر overhead برای کاربر."""
+    """اگر ۱۰ دقیقه از آخرین warm کامل گذشته باشد، cache را گرم می‌کند."""
     global _last_warm_time
     now = time.time()
-    if now - _last_warm_time < WARM_INTERVAL:
-        return   # هنوز ۱۰ دقیقه نگذشته
-    _last_warm_time = now   # فوری ست کن تا فراخوانی‌های همزمان بلاک شوند
+    if now - _last_warm_time < WARM_INTERVAL: return
+    _last_warm_time = now
+    _clean_cache()   # ابتدا expired ها را پاک کن
     await warm_cache()
 
 # ── درخواست به API ──────────────────────────────────
 async def _fetch(path, params=None):
-    if not is_configured():
-        logger.warning("WooCommerce تنظیم نشده")
-        return None
+    if not is_configured(): return None
     url = f"{WOO_URL}/wp-json/wc/v3/{path}"
-    p = dict(params or {})
-    p.update({"consumer_key": WOO_KEY, "consumer_secret": WOO_SECRET})
-    try:
-        timeout = aiohttp.ClientTimeout(total=20)
-        async with aiohttp.ClientSession(timeout=timeout) as s:
-            async with s.get(url, params=p) as r:
-                if r.status != 200:
-                    logger.error(f"woo {path}: HTTP {r.status}")
-                    return None
-                return await r.json()
-    except Exception as e:
-        logger.error(f"woo fetch {path}: {e}")
-        return None
+    p = dict(params or {}); p.update({"consumer_key": WOO_KEY, "consumer_secret": WOO_SECRET})
+    for attempt in range(2):   # یک تلاش اول + یک retry
+        try:
+            session = await _get_session()
+            async with session.get(url, params=p) as r:
+                if r.status == 200: return await r.json()
+                logger.error(f"woo {path}: HTTP {r.status}"); return None
+        except Exception as e:
+            if attempt == 0:
+                logger.warning(f"woo fetch retry ({path}): {e}")
+                await asyncio.sleep(1)   # یک ثانیه صبر کن و دوباره امتحان کن
+            else:
+                logger.error(f"woo fetch {path}: {e}"); return None
 
 async def _fetch_plugin(path):
     """خواندن از endpoint افزونه استوک لند (نه ووکامرس استاندارد)."""
     if not WOO_URL: return None
     url = f"{WOO_URL}/wp-json/stockland/v1/{path}"
-    try:
-        timeout = aiohttp.ClientTimeout(total=15)
-        async with aiohttp.ClientSession(timeout=timeout) as s:
-            async with s.get(url) as r:
-                if r.status != 200: return None
-                return await r.json()
-    except Exception as e:
-        logger.error(f"plugin fetch {path}: {e}")
-        return None
+    for attempt in range(2):
+        try:
+            session = await _get_session()
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as r:
+                if r.status == 200: return await r.json()
+                return None
+        except Exception as e:
+            if attempt == 0: await asyncio.sleep(1)
+            else: return None
 
 async def check_sync_version(force=False):
     """نسخه سینک را چک می‌کند.
