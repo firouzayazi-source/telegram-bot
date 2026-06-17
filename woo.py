@@ -56,7 +56,6 @@ async def warm_cache():
         roots = [c for c in cats if c["parent"] == 0]
         logger.info(f"woo: {len(cats)} دسته cache شد ({len(roots)} اصلی)")
         # محصولات همه دسته‌ها را هم از قبل بگیر (کلیک روی دسته فوری شود)
-        import asyncio
         async def _warm_cat(c):
             try: await get_products_by_category(c["id"])
             except Exception: pass
@@ -225,7 +224,7 @@ def _strip_html(s):
     lines = [ln.strip() for ln in s.split("\n") if ln.strip()]
     return "\n".join(lines).strip()
 
-def _trim_desc(text: str, max_chars: int = 150) -> str:
+def _trim_desc(text: str, max_chars: int = 350) -> str:
     """توضیح را به max_chars کاراکتر محدود می‌کند.
     برش در آخرین فاصله (کلمه کامل) + راهنما.
     مستقل از تعداد \n — روی هر موبایل یکنواخت است."""

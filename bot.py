@@ -365,6 +365,20 @@ _RATE_MAX   = 8          # حداکثر کلیک مجاز در پنجره
 _RATE_WIN   = 10.0       # پنجره زمانی (ثانیه)
 _HARD_BLOCK = 10.0       # مدت بلاک سخت (ثانیه)
 
+async def _spam_cleanup_loop():
+    """هر ۶ ساعت دیکشنری‌های anti-spam را از کاربران منقضی پاک می‌کند.
+    صفر تاثیر روی سرعت — فقط در زمان idle اجرا می‌شود."""
+    while True:
+        await asyncio.sleep(6 * 3600)
+        now = time.time()
+        stale = [uid for uid, ts in list(_rate.items())
+                 if not ts or now - max(ts) > _RATE_WIN * 6]
+        for uid in stale:
+            _rate.pop(uid, None); _warned.pop(uid, None)
+        for uid in [u for u, t in list(_hard_block.items()) if t < now]:
+            del _hard_block[uid]
+        if stale: logger.debug(f"spam_cleanup: {len(stale)} رکورد منقضی پاک شد")
+
 def spam_check(uid: int) -> str:
     """کاملاً sync — بدون await، بدون DB، صفر overhead.
     بازگشتی: 'ok' | 'warn' | 'block'
@@ -1441,6 +1455,7 @@ async def post_init(app):
     await load_stats(); await load_menu()
     # گرم‌کردن cache ووکامرس در پس‌زمینه — اولین کاربر منتظر نمی‌ماند
     asyncio.ensure_future(_trigger_warm())
+    asyncio.ensure_future(_spam_cleanup_loop())
     logger.info("✅ ربات راه‌اندازی شد")
 
 def main():
