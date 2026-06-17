@@ -19,9 +19,13 @@ def is_configured():
 
 # ── cache ساده در حافظه ────────────────────────────
 _cache = {}   # key -> (timestamp, data)
-_last_sync_version = None   # آخرین نسخه سینک که دیدیم
-_version_cache_time = 0     # آخرین باری که نسخه سینک چک شد
-VERSION_CHECK_INTERVAL = 60   # ۱ دقیقه — فعال می‌شود فقط با تعامل کاربر (نه polling)
+_last_sync_version = None
+_version_cache_time = 0
+VERSION_CHECK_INTERVAL = 60
+
+# ── Interval-Based Warm ─────────────────────────────
+_last_warm_time: float = 0.0
+WARM_INTERVAL: int = 600   # ۱۰ دقیقه — حداقل فاصله بین دو warm کامل
 
 def _get_cache(key):
     if key in _cache:
@@ -64,6 +68,16 @@ async def warm_cache():
         logger.info(f"woo: محصولات {len(cats)} دسته هم cache شد — آماده!")
     except Exception as e:
         logger.error(f"woo warm_cache: {e}")
+
+async def maybe_warm_cache():
+    """اگر ۱۰ دقیقه از آخرین warm کامل گذشته باشد، cache را گرم می‌کند.
+    در غیر این صورت فوراً برمی‌گردد — صفر overhead برای کاربر."""
+    global _last_warm_time
+    now = time.time()
+    if now - _last_warm_time < WARM_INTERVAL:
+        return   # هنوز ۱۰ دقیقه نگذشته
+    _last_warm_time = now   # فوری ست کن تا فراخوانی‌های همزمان بلاک شوند
+    await warm_cache()
 
 # ── درخواست به API ──────────────────────────────────
 async def _fetch(path, params=None):
@@ -188,7 +202,7 @@ def _map_product(p):
     price_fmt = f"{price} تومان" if price and price.isdigit() else (price or "تماس بگیرید")
     # توضیح کوتاه بدون تگ HTML
     desc = p.get("short_description") or p.get("description") or ""
-    desc = _limit_lines(_strip_html(desc), max_lines=9, permalink=p.get("permalink"))
+    desc = _trim_desc(_strip_html(desc))
     return {
         "id": p["id"], "name": p["name"], "price": price_fmt,
         "price_raw": price, "description": desc,
@@ -211,16 +225,17 @@ def _strip_html(s):
     lines = [ln.strip() for ln in s.split("\n") if ln.strip()]
     return "\n".join(lines).strip()
 
-def _limit_lines(text, max_lines=9, permalink=None):
-    """توضیح را به max_lines خط محدود می‌کند.
-    اگر بیشتر بود: ۹ خط اول + متن راهنما."""
-    lines = [ln for ln in text.split("\n") if ln.strip()]
-    if not lines: return ""
-    if len(lines) <= max_lines:
-        return "\n".join(lines)   # خطوط خالی اضافی را هم پاک می‌کند
-    kept = "\n".join(lines[:max_lines])
-    kept += "\n\n📖 ادامه توضیحات در سایت"
-    return kept
+def _trim_desc(text: str, max_chars: int = 350) -> str:
+    """توضیح را به max_chars کاراکتر محدود می‌کند.
+    برش در آخرین فاصله (کلمه کامل) + راهنما.
+    مستقل از تعداد \n — روی هر موبایل یکنواخت است."""
+    if not text: return ""
+    # خطوط خالی پشت سر هم را پاک کن
+    text = "\n".join(ln for ln in text.split("\n") if ln.strip())
+    if len(text) <= max_chars: return text
+    cut = text.rfind(" ", 0, max_chars)
+    if cut < max_chars // 2: cut = max_chars
+    return text[:cut].rstrip() + "\n\n📖 ادامه توضیحات در سایت"
 
 async def get_products_by_category(cat_id):
     """محصولات یک دسته — instock و onbackorder نمایش داده می‌شوند، outofstock حذف می‌شود."""
