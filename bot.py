@@ -348,9 +348,10 @@ async def search_products(q):
 
 # ── requests db
 async def save_request(uid,username,first_name,phone,pid,pname):
-    await db.execute("INSERT INTO requests(user_id,username,first_name,phone,product_id,product_name,status,created_at) VALUES(?,?,?,?,?,?,?,?)",
+    cur=await db.execute("INSERT INTO requests(user_id,username,first_name,phone,product_id,product_name,status,created_at) VALUES(?,?,?,?,?,?,?,?)",
         (uid,username or"",first_name or"",phone,pid,pname,"new",gregorian_now()))
     await db.commit()
+    return cur.lastrowid   # برای دکمه‌های inline روی اعلان ادمین
 
 async def get_requests():
     async with db.execute("SELECT id,user_id,username,first_name,phone,product_name,status,created_at FROM requests ORDER BY id DESC LIMIT 30") as c: return await c.fetchall()
@@ -687,7 +688,11 @@ async def broadcast(ctx, text, photo=None):
         _broadcast_active = False
 
 # ── backup
+_backup_ids: list = []   # message_id بکاپ‌های ارسال‌شده (max 5)
+MAX_BACKUPS  = 5
+
 async def send_backup(bot):
+    global _backup_ids
     ts=shamsi_now().replace(" ","_").replace("—","-").replace(":","-")
     buf=io.BytesIO()
     files=[(DATA_FILE,"data.json"),(BANNER_FILE,"banner.json"),(WORKHOURS_FILE,"workhours.json"),
@@ -698,8 +703,14 @@ async def send_backup(bot):
                 async with aiofiles.open(fp,"rb") as f: zf.writestr(name,await f.read())
             except Exception as e: logger.warning(f"backup skip {fp}: {e}")
     buf.seek(0)
-    await bot.send_message(ADMIN_ID,f"💾 بک‌آپ — {shamsi_now()}")
-    await bot.send_document(ADMIN_ID,document=buf,filename=f"backup_{ts}.zip",caption="💾 بک‌آپ کامل")
+    msg=await bot.send_document(ADMIN_ID,document=buf,filename=f"backup_{ts}.zip",
+                                caption=f"💾 بک‌آپ کامل — {shamsi_now()}")
+    _backup_ids.append(msg.message_id)
+    # اگر بیشتر از MAX_BACKUPS داریم، قدیمی‌ترین را حذف کن
+    while len(_backup_ids) > MAX_BACKUPS:
+        old_id=_backup_ids.pop(0)
+        try: await bot.delete_message(ADMIN_ID,old_id)
+        except Exception as e: logger.debug(f"backup delete old: {e}")
 
 async def _auto_backup_loop(bot):
     """هر شب ساعت ۳ بامداد به وقت تهران، بکاپ خودکار به ادمین می‌فرستد."""
@@ -1184,19 +1195,25 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
 
         elif data.startswith("rq_done_"):
             rid=int(data[8:])
-            # اطلاعات کاربر را قبل از تغییر وضعیت بگیر
             async with db.execute("SELECT user_id,product_name FROM requests WHERE id=?",(rid,)) as c:
                 req_row=await c.fetchone()
             await done_request(rid)
             await query.answer("✅",show_alert=True)
             await safe_edit(query.message,"✅ پیگیری شد.",reply_markup=back_admin())
-            # اطلاع‌رسانی به کاربر
             if req_row:
                 try:
                     await ctx.bot.send_message(req_row[0],
                         f"✅ درخواست خرید شما برای «{req_row[1]}» پیگیری شد.\n"
                         f"به زودی با شما تماس خواهیم گرفت. 🙏")
                 except Exception as e: logger.warning(f"req_done notify: {e}")
+
+        elif data.startswith("rq_msg_"):
+            target_uid=int(data[7:])
+            await query.answer()
+            ctx.user_data.update({"mode":"admin_msg","admin_msg_uid":target_uid})
+            await query.message.reply_text(
+                f"💬 پیام برای کاربر 🆔{target_uid}\nمتن یا تصویر را ارسال کنید:",
+                reply_markup=cancel_menu())
 
         elif data.startswith("rq_"):
             await query.answer()
@@ -1357,6 +1374,15 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         if mode=="broadcast":
             ctx.user_data.pop("mode",None); await update.message.reply_text("📤 در حال ارسال...")
             await broadcast(ctx,text); return
+        if mode=="admin_msg":
+            target_uid=ctx.user_data.pop("admin_msg_uid",None); ctx.user_data.pop("mode",None)
+            if not target_uid: await update.message.reply_text("❌ خطا.",reply_markup=main_menu()); return
+            try:
+                await ctx.bot.send_message(target_uid,f"📩 پیام از فروشگاه:\n\n{text}")
+                await update.message.reply_text("✅ پیام ارسال شد.",reply_markup=main_menu())
+            except Exception as e:
+                await update.message.reply_text(f"❌ خطا در ارسال: {e}",reply_markup=main_menu())
+            return
         if mode=="users_search":
             ctx.user_data.pop("mode",None); rows=await search_users(text)
             if not rows: await update.message.reply_text("❌ یافت نشد.",reply_markup=main_menu()); return
@@ -1415,11 +1441,16 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         if not digits.isdigit() or len(digits)<10:
             ctx.user_data.update({"mode":"req_phone","req_pid":pid,"req_name":pname,"req_type":rtype})
             await update.message.reply_text("❌ شماره معتبر نیست. دوباره:",reply_markup=cancel_menu()); return
-        await save_request(user.id,user.username,user.first_name,text,pid,pname)
+        rid=await save_request(user.id,user.username,user.first_name,text,pid,pname)
         icon="📝" if rtype=="پیش‌خرید" else "📋"
         try:
+            req_kb=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ پیگیری شد",callback_data=f"rq_done_{rid}"),
+                 InlineKeyboardButton("💬 پیام به کاربر",callback_data=f"rq_msg_{user.id}")]
+            ])
             await ctx.bot.send_message(ADMIN_ID,
-                f"{icon} درخواست {rtype}!\n📱 {pname}\n👤 {user.first_name or'—'} | {'@'+user.username if user.username else'—'}\n📞 {text}\n🆔 {user.id}")
+                f"{icon} درخواست {rtype}!\n📱 {pname}\n👤 {user.first_name or'—'} | {'@'+user.username if user.username else'—'}\n📞 {text}\n🆔 {user.id}",
+                reply_markup=req_kb)
         except Exception as e: logger.error(f"req notify: {e}")
         await update.message.reply_text(f"✅ درخواست {rtype} «{pname}» ثبت شد!\nپشتیبانی به زودی تماس می‌گیرد.",reply_markup=main_menu()); return
 
@@ -1477,6 +1508,17 @@ async def photo_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         ctx.user_data.pop("mode",None); caption=update.message.caption or""
         await update.message.reply_text("📤 در حال ارسال...")
         await broadcast(ctx,caption,photo=photo.file_id); return
+    if mode=="admin_msg":
+        target_uid=ctx.user_data.pop("admin_msg_uid",None); ctx.user_data.pop("mode",None)
+        caption=update.message.caption or""
+        if not target_uid: await update.message.reply_text("❌ خطا.",reply_markup=main_menu()); return
+        try:
+            await ctx.bot.send_photo(target_uid,photo=photo.file_id,
+                caption=f"📩 پیام از فروشگاه:\n\n{caption}" if caption else "📩 پیام از فروشگاه")
+            await update.message.reply_text("✅ تصویر ارسال شد.",reply_markup=main_menu())
+        except Exception as e:
+            await update.message.reply_text(f"❌ خطا در ارسال: {e}",reply_markup=main_menu())
+        return
 
 # ════════════════════════════════════════════════
 #  DOCUMENT HANDLER (backup import)
