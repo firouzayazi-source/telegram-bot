@@ -119,18 +119,6 @@ async def check_sync_version(force=False):
             logger.info(f"sync version changed → cache cleared (v={v})")
         _last_sync_version = v
 
-async def get_backorder_setting():
-    """آیا محصولات پیش‌خرید (onbackorder) باید نمایش داده شوند؟
-    از افزونه خوانده می‌شود. پیش‌فرض: True (نمایش بده)."""
-    cached = _get_cache("show_backorder")
-    if cached is not None: return cached
-    data = await _fetch_plugin("settings")
-    show = True  # پیش‌فرض
-    if data and "show_backorder" in data:
-        show = bool(data["show_backorder"])
-    _set_cache("show_backorder", show)
-    return show
-
 async def get_visible_category_ids():
     """فهرست id دسته‌هایی که در افزونه تیک «نمایش در تلگرام» خورده‌اند.
     اگر افزونه نصب نباشد، None برمی‌گرداند (یعنی همه دسته‌ها نمایش داده شوند)."""
@@ -224,28 +212,31 @@ def _strip_html(s):
     return "\n".join(lines).strip()
 
 def _limit_lines(text, max_lines=9, permalink=None):
-    """توضیح را به max_lines خط محدود می‌کند. اگر بیشتر بود، متن راهنما اضافه می‌شود."""
+    """توضیح را به max_lines خط محدود می‌کند.
+    اگر بیشتر بود: ۹ خط اول + متن راهنما."""
     lines = [ln for ln in text.split("\n") if ln.strip()]
+    if not lines: return ""
     if len(lines) <= max_lines:
-        return text
+        return "\n".join(lines)   # خطوط خالی اضافی را هم پاک می‌کند
     kept = "\n".join(lines[:max_lines])
     kept += "\n\n📖 ادامه توضیحات در سایت"
     return kept
 
 async def get_products_by_category(cat_id):
-    """محصولات یک دسته (شامل ناموجود طبق تنظیم)."""
+    """محصولات یک دسته — instock و onbackorder نمایش داده می‌شوند، outofstock حذف می‌شود."""
     key = f"prods_{cat_id}"
     cached = _get_cache(key)
     if cached is not None: return cached
-    params = {"category": cat_id, "status": "publish", "orderby": "menu_order", "_fields": "id,name,price,regular_price,sale_price,stock_status,status,permalink,images,short_description,description,categories"}
+    params = {
+        "category": cat_id, "status": "publish",
+        "orderby": "menu_order",
+        "_fields": "id,name,price,regular_price,sale_price,stock_status,status,permalink,images,short_description,description,categories"
+    }
     raw = await _fetch_all("products", params)
     if raw is None: return []
-    # ناموجود واقعی (outofstock) همیشه حذف می‌شود
+    # فقط outofstock حذف می‌شود — onbackorder (پیش‌خرید) همیشه نمایش داده می‌شود
     if HIDE_OUT_OF_STOCK:
         raw = [p for p in raw if p.get("stock_status") != "outofstock"]
-    # پیش‌خرید (onbackorder) فقط اگر در افزونه فعال باشد
-    if not await get_backorder_setting():
-        raw = [p for p in raw if p.get("stock_status") != "onbackorder"]
     prods = [_map_product(p) for p in raw]
     _set_cache(key, prods)
     return prods
