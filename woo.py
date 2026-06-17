@@ -200,7 +200,7 @@ def _map_product(p):
     price_fmt = f"{price} تومان" if price and price.isdigit() else (price or "تماس بگیرید")
     # توضیح کوتاه بدون تگ HTML
     desc = p.get("short_description") or p.get("description") or ""
-    desc = _limit_lines(_strip_html(desc), max_lines=10, permalink=p.get("permalink"))
+    desc = _limit_lines(_strip_html(desc), max_lines=9, permalink=p.get("permalink"))
     return {
         "id": p["id"], "name": p["name"], "price": price_fmt,
         "price_raw": price, "description": desc,
@@ -223,14 +223,15 @@ def _strip_html(s):
     lines = [ln.strip() for ln in s.split("\n") if ln.strip()]
     return "\n".join(lines).strip()
 
-def _limit_lines(text, max_lines=10, permalink=None):
-    """توضیح را به max_lines خط محدود می‌کند. اگر بیشتر بود، «ادامه در سایت»."""
+def _limit_lines(text, max_lines=9, permalink=None):
+    """توضیح را به max_lines خط محدود می‌کند. اگر بیشتر بود، لینک سایت اضافه می‌شود.
+    تلگرام URL خام را خودکار کلیک‌پذیر می‌کند (نیازی به parse_mode نیست)."""
     lines = [ln for ln in text.split("\n") if ln.strip()]
     if len(lines) <= max_lines:
         return text
     kept = "\n".join(lines[:max_lines])
     if permalink:
-        kept += "\n\n📖 ادامه توضیحات در سایت…"
+        kept += f"\n\n📖 ادامه توضیحات در سایت:\n{permalink}"
     else:
         kept += "\n…"
     return kept
