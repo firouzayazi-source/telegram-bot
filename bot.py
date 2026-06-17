@@ -1,6 +1,5 @@
 import os, json, time, asyncio, logging, aiosqlite, jdatetime, pytz, zipfile, io
 from datetime import datetime
-from collections import defaultdict, deque
 import aiofiles
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (ApplicationBuilder, CommandHandler, MessageHandler,
@@ -358,32 +357,22 @@ async def get_requests():
 
 async def done_request(rid): await db.execute("UPDATE requests SET status='done' WHERE id=?",(rid,)); await db.commit()
 
-# ── anti-spam
-_W,_L,_B=10,7,60; _spam=defaultdict(lambda:deque(maxlen=_L)); _blk={}
+# ── anti-spam (سیستم سبک — sliding window، بدون DB query، بدون lock)
+_rate: dict = {}   # uid -> list[timestamp]
+_RATE_MAX = 8      # حداکثر تعداد مجاز
+_RATE_WIN = 10.0   # در بازه (ثانیه)
 
-# ── User Processing Lock — جلوگیری از کلیک‌های تکراری و درخواست‌های همزمان
-_user_active: set = set()   # کاربرانی که در حال پردازش callback هستند
-_user_last_cb: dict = {}    # زمان آخرین callback مجاز هر کاربر
-_CB_DEBOUNCE: float = 0.4   # 400ms — حداقل فاصله بین دو callback مجاز
-
-def _cb_is_debounced(uid: int) -> bool:
-    """True اگر کاربر خیلی سریع کلیک کرده و باید نادیده گرفته شود."""
+def is_spam(uid: int) -> bool:
+    """True یعنی کاربر اسپم می‌کند. کاملاً sync، بدون await، بدون DB.
+    بیش از _RATE_MAX تعامل در _RATE_WIN ثانیه → اسپم."""
     if uid == ADMIN_ID: return False
     now = time.time()
-    if now - _user_last_cb.get(uid, 0) < _CB_DEBOUNCE:
+    ts = [t for t in _rate.get(uid, ()) if now - t < _RATE_WIN]
+    if len(ts) >= _RATE_MAX:
+        _rate[uid] = ts
         return True
-    _user_last_cb[uid] = now
+    ts.append(now); _rate[uid] = ts
     return False
-
-def _cb_try_lock(uid: int) -> bool:
-    """True اگر پردازش شروع شود (کاربر قبلاً در صف نیست)."""
-    if uid == ADMIN_ID: return True
-    if uid in _user_active: return False
-    _user_active.add(uid); return True
-
-def _cb_release(uid: int):
-    """آزادسازی lock پس از اتمام پردازش."""
-    _user_active.discard(uid)
 
 async def _bg_woo_refresh(force: bool = False):
     """فراخوانی پس‌زمینه‌ای: چک نسخه ووکامرس + گرم‌کردن cache در صورت نیاز.
@@ -396,15 +385,6 @@ async def _bg_woo_refresh(force: bool = False):
             await woo.warm_cache()
     except Exception as e:
         logger.debug(f"bg_woo_refresh: {e}")
-
-async def anti_spam(uid):
-    if uid==ADMIN_ID: return True
-    if await is_blocked(uid): return False
-    now=time.time()
-    if uid in _blk and _blk[uid]>now: return False
-    q=_spam[uid]; q.append(now)
-    if len(q)>=_L and(now-q[0])<=_W: _blk[uid]=now+_B; return False
-    return True
 
 # ════════════════════════════════════════════════
 #  KEYBOARDS
@@ -851,19 +831,14 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     query=update.callback_query
     data=query.data; uid=query.from_user.id
 
-    # ── محافظت در برابر کلیک‌های تکراری و درخواست‌های همزمان (فقط کاربران عادی)
+    # ── محافظت اسپم (فقط کاربران عادی) — سیستم سبک، بدون lock
     if uid != ADMIN_ID:
-        # لایه ۳: Sliding window — spammer واقعی را بلاک می‌کند
-        if not await anti_spam(uid):
+        if is_spam(uid):
             await query.answer("🐢 لطفاً آرام‌تر کلیک کنید.")
             return
-        # لایه ۱: Debounce — double-click فوری را رد می‌کند
-        if _cb_is_debounced(uid):
-            await query.answer("⏳ لطفاً لحظه‌ای صبر کنید…")
-            return
-        # لایه ۲: Processing lock — درخواست همزمان را رد می‌کند
-        if not _cb_try_lock(uid):
-            await query.answer("⏳ درخواست قبلی در حال پردازش است…")
+        # بلاک دائمی توسط ادمین
+        if await is_blocked(uid):
+            await query.answer("⛔ دسترسی شما مسدود شده است.")
             return
 
     # ── مسیریابی کاربران — answer یکبار اینجا فراخوانی می‌شه
@@ -877,8 +852,6 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             logger.error(f"user_cb uid={uid} data={data}: {e}",exc_info=True)
             try: await query.message.reply_text("❌ خطا. دوباره امتحان کنید.")
             except: pass
-        finally:
-            _cb_release(uid)
         return
 
     # ════ ADMIN — هر handler خودش answer می‌زنه تا show_alert درست کار کنه
@@ -1284,9 +1257,10 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
 async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     user=update.effective_user; text=update.message.text.strip()
     await save_user(user)
-    if not await anti_spam(user.id): return await update.message.reply_text("🐢 لطفاً آرام‌تر پیام دهید.")
-    # فراخوان پس‌زمینه ووکامرس برای کاربران عادی (حداکثر ۱ بار در دقیقه)
     if user.id != ADMIN_ID:
+        if is_spam(user.id): return await update.message.reply_text("🐢 لطفاً آرام‌تر پیام دهید.")
+        if await is_blocked(user.id): return
+        # فراخوان پس‌زمینه ووکامرس (حداکثر ۱ بار در دقیقه)
         asyncio.ensure_future(_bg_woo_refresh())
     if text=="❌ لغو عملیات":
         ctx.user_data.clear(); return await update.message.reply_text("❌ لغو شد.",reply_markup=main_menu())
@@ -1355,13 +1329,7 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     # ════ catalog search ════
     if mode=="cat_search":
         ctx.user_data.pop("mode",None)
-        if not _cb_try_lock(user.id):
-            await update.message.reply_text("⏳ درخواست قبلی در حال پردازش است.",reply_markup=cancel_menu())
-            return
-        try:
-            results=await search_products(text)
-        finally:
-            _cb_release(user.id)
+        results=await search_products(text)
         if not results: await update.message.reply_text(f"🔍 نتیجه‌ای برای «{text}» یافت نشد.",reply_markup=main_menu()); return
         btns=[[InlineKeyboardButton(f"📱 {p[1]} — {p[2]}",callback_data=f"prd_{p[0]}")] for p in results]
         btns.append([InlineKeyboardButton("🔙 کاتالوگ",callback_data="cat_back")])
