@@ -225,7 +225,7 @@ def _strip_html(s):
     lines = [ln.strip() for ln in s.split("\n") if ln.strip()]
     return "\n".join(lines).strip()
 
-def _trim_desc(text: str, max_chars: int = 250) -> str:
+def _trim_desc(text: str, max_chars: int = 150) -> str:
     """توضیح را به max_chars کاراکتر محدود می‌کند.
     برش در آخرین فاصله (کلمه کامل) + راهنما.
     مستقل از تعداد \n — روی هر موبایل یکنواخت است."""
