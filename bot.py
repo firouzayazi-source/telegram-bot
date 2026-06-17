@@ -79,6 +79,13 @@ def get_banner(k): banners.setdefault(k,{"file_id":None,"active":False}); return
 
 # cache نگاشت URL عکس → file_id تلگرام (ارسال آنی در دفعات بعد)
 _photo_fileids = {}
+_PHOTO_CACHE_MAX = 500
+
+def _cache_photo(url: str, file_id: str):
+    """URL عکس → Telegram file_id را cache می‌کند. حداکثر ۵۰۰ ورودی."""
+    if len(_photo_fileids) >= _PHOTO_CACHE_MAX:
+        _photo_fileids.pop(next(iter(_photo_fileids)), None)
+    _photo_fileids[url] = file_id
 def get_sec_btns(k): buttons.setdefault(k,{"enabled":True,"items":[]}); return buttons[k]
 def get_setting(k): return settings.get(k,DEFAULT_SETTINGS.get(k,True))
 
@@ -126,7 +133,20 @@ def progress_bar(v,t,n=8):
     if t==0: return "░"*n
     f=int(n*v/t); return "▓"*f+"░"*(n-f)
 
-async def record_stat(k): stats[k]=stats.get(k,0)+1; await save_stats()
+_stats_dirty = False
+
+async def record_stat(k):
+    global _stats_dirty
+    stats[k]=stats.get(k,0)+1
+    _stats_dirty=True   # فقط flag — بدون disk write
+
+async def _stats_flush_loop():
+    """هر ۳۰ ثانیه اگر آمار تغییر کرده باشد، یک‌بار به دیسک می‌نویسد."""
+    global _stats_dirty
+    while True:
+        await asyncio.sleep(30)
+        if _stats_dirty:
+            await save_stats(); _stats_dirty=False
 
 # ── load/save
 async def _rj(path,default):
@@ -135,10 +155,15 @@ async def _rj(path,default):
     except: return default() if callable(default) else default
 
 async def _wj(path,data):
+    tmp=path+".tmp"
     try:
-        async with aiofiles.open(path,"w",encoding="utf-8") as f:
+        async with aiofiles.open(tmp,"w",encoding="utf-8") as f:
             await f.write(json.dumps(data,ensure_ascii=False,indent=2))
-    except Exception as e: logger.error(f"write {path}: {e}")
+        os.replace(tmp,path)   # atomic — اگر crash کند فایل اصلی سالم می‌ماند
+    except Exception as e:
+        logger.error(f"write {path}: {e}")
+        try: os.unlink(tmp)
+        except: pass
 
 async def load_data():
     global responses
@@ -281,11 +306,22 @@ async def save_user(u):
 async def get_all_uids():
     async with db.execute("SELECT user_id FROM users WHERE is_blocked=0") as c: return[r[0] for r in await c.fetchall()]
 
-async def is_blocked(uid):
-    async with db.execute("SELECT is_blocked FROM users WHERE user_id=?",(uid,)) as c:
-        r=await c.fetchone(); return bool(r and r[0])
+_block_cache: dict = {}   # uid → (is_blocked: bool, expires: float)
+_BLOCK_CACHE_TTL = 60     # ثانیه — بعد از این مدت مجدداً از DB خوانده می‌شود
 
-async def set_block(uid,v): await db.execute("UPDATE users SET is_blocked=? WHERE user_id=?",(v,uid)); await db.commit()
+async def is_blocked(uid):
+    now=time.time()
+    cached=_block_cache.get(uid)
+    if cached and cached[1]>now: return cached[0]
+    async with db.execute("SELECT is_blocked FROM users WHERE user_id=?",(uid,)) as c:
+        r=await c.fetchone()
+    result=bool(r and r[0])
+    _block_cache[uid]=(result,now+_BLOCK_CACHE_TTL)
+    return result
+
+async def set_block(uid,v):
+    await db.execute("UPDATE users SET is_blocked=? WHERE user_id=?",(v,uid)); await db.commit()
+    _block_cache[uid]=(bool(v),time.time()+_BLOCK_CACHE_TTL)  # فوری cache را آپدیت کن
 
 async def search_users(q):
     q=f"%{q}%"
@@ -348,13 +384,22 @@ async def search_products(q):
 
 # ── requests db
 async def save_request(uid,username,first_name,phone,pid,pname):
+    # بررسی درخواست تکراری در ۲۴ ساعت اخیر
+    async with db.execute(
+        "SELECT id FROM requests WHERE user_id=? AND product_id=? AND created_at>=datetime('now','-1 day')",
+        (uid,pid)) as c:
+        if await c.fetchone(): return None   # تکراری
     cur=await db.execute("INSERT INTO requests(user_id,username,first_name,phone,product_id,product_name,status,created_at) VALUES(?,?,?,?,?,?,?,?)",
         (uid,username or"",first_name or"",phone,pid,pname,"new",gregorian_now()))
     await db.commit()
-    return cur.lastrowid   # برای دکمه‌های inline روی اعلان ادمین
+    return cur.lastrowid
 
-async def get_requests():
-    async with db.execute("SELECT id,user_id,username,first_name,phone,product_name,status,created_at FROM requests ORDER BY id DESC LIMIT 30") as c: return await c.fetchall()
+async def get_requests(offset=0,limit=25):
+    async with db.execute(
+        "SELECT id,user_id,username,first_name,phone,product_name,status,created_at FROM requests ORDER BY id DESC LIMIT ? OFFSET ?",
+        (limit,offset)) as c: return await c.fetchall()
+
+async def count_requests(): return await _cnt("SELECT COUNT(*) FROM requests")
 
 async def done_request(rid): await db.execute("UPDATE requests SET status='done' WHERE id=?",(rid,)); await db.commit()
 
@@ -378,6 +423,8 @@ async def _spam_cleanup_loop():
             _rate.pop(uid, None); _warned.pop(uid, None)
         for uid in [u for u, t in list(_hard_block.items()) if t < now]:
             del _hard_block[uid]
+        for uid in [u for u,(v,exp) in list(_block_cache.items()) if exp<now]:
+            del _block_cache[uid]
         if stale: logger.debug(f"spam_cleanup: {len(stale)} رکورد منقضی پاک شد")
 
 def spam_check(uid: int) -> str:
@@ -478,10 +525,17 @@ def product_kb(p):
 # ── admin keyboards
 def back_admin(): return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به پنل",callback_data="back_to_admin")]])
 
-def backup_kb(): return InlineKeyboardMarkup([
-    [InlineKeyboardButton("💾 دریافت پشتیبان",callback_data="backup_get"),
-     InlineKeyboardButton("📥 بازگردانی",callback_data="backup_import")],
-    [InlineKeyboardButton("🔙 تنظیمات",callback_data="settings_menu")]])
+def backup_kb():
+    rows=[
+        [InlineKeyboardButton("💾 دریافت پشتیبان",callback_data="backup_get"),
+         InlineKeyboardButton("📥 بارگذاری فایل",callback_data="backup_import")]
+    ]
+    if _backup_registry:
+        rows.append([InlineKeyboardButton("──── بکاپ‌های خودکار ────",callback_data="noop")])
+        for i,b in enumerate(reversed(_backup_registry)):
+            rows.append([InlineKeyboardButton(f"♻️ {b['date']}",callback_data=f"backup_auto_{i}")])
+    rows.append([InlineKeyboardButton("🔙 تنظیمات",callback_data="settings_menu")])
+    return InlineKeyboardMarkup(rows)
 
 def admin_menu():
     return InlineKeyboardMarkup([
@@ -634,8 +688,12 @@ def udetail_kb(uid,is_bl): return InlineKeyboardMarkup([
     [InlineKeyboardButton("✅ رفع بلاک" if is_bl else "🚫 بلاک",callback_data=f"utog_{uid}")],
     [InlineKeyboardButton("🔙",callback_data="users_menu")]])
 
-def reqs_kb(reqs):
+def reqs_kb(reqs,offset=0,total=0):
     btns=[[InlineKeyboardButton(f"{'🆕' if r[6]=='new' else '✅'} {r[5]} — {r[3]}",callback_data=f"rq_{r[0]}")] for r in reqs]
+    nav=[]
+    if offset>0: nav.append(InlineKeyboardButton("▶️ جدیدتر",callback_data=f"admin_reqs_{offset-25}"))
+    if offset+25<total: nav.append(InlineKeyboardButton("◀️ قدیمی‌تر",callback_data=f"admin_reqs_{offset+25}"))
+    if nav: btns.append(nav)
     btns.append([InlineKeyboardButton("🔙",callback_data="back_to_admin")]); return InlineKeyboardMarkup(btns)
 
 def req_kb(rid,status):
@@ -688,11 +746,11 @@ async def broadcast(ctx, text, photo=None):
         _broadcast_active = False
 
 # ── backup
-_backup_ids: list = []   # message_id بکاپ‌های ارسال‌شده (max 5)
-MAX_BACKUPS  = 5
+_backup_registry: list = []  # [{"msg_id": int, "file_id": str, "date": str}]
+MAX_BACKUPS = 5
 
 async def send_backup(bot):
-    global _backup_ids
+    global _backup_registry
     ts=shamsi_now().replace(" ","_").replace("—","-").replace(":","-")
     buf=io.BytesIO()
     files=[(DATA_FILE,"data.json"),(BANNER_FILE,"banner.json"),(WORKHOURS_FILE,"workhours.json"),
@@ -704,12 +762,12 @@ async def send_backup(bot):
             except Exception as e: logger.warning(f"backup skip {fp}: {e}")
     buf.seek(0)
     msg=await bot.send_document(ADMIN_ID,document=buf,filename=f"backup_{ts}.zip",
-                                caption=f"💾 بک‌آپ کامل — {shamsi_now()}")
-    _backup_ids.append(msg.message_id)
+                                caption=f"💾 بک‌آپ — {shamsi_now()}")
+    _backup_registry.append({"msg_id":msg.message_id,"file_id":msg.document.file_id,"date":shamsi_now()})
     # اگر بیشتر از MAX_BACKUPS داریم، قدیمی‌ترین را حذف کن
-    while len(_backup_ids) > MAX_BACKUPS:
-        old_id=_backup_ids.pop(0)
-        try: await bot.delete_message(ADMIN_ID,old_id)
+    while len(_backup_registry)>MAX_BACKUPS:
+        old=_backup_registry.pop(0)
+        try: await bot.delete_message(ADMIN_ID,old["msg_id"])
         except Exception as e: logger.debug(f"backup delete old: {e}")
 
 async def _auto_backup_loop(bot):
@@ -874,19 +932,23 @@ async def user_cb(query,ctx):
             photo_ref = _photo_fileids.get(p[4], p[4])
             try:
                 sent=await query.message.reply_photo(photo=photo_ref,caption=cap,reply_markup=kb)
-                if sent.photo: _photo_fileids[p[4]] = sent.photo[-1].file_id
+                if sent.photo: _cache_photo(p[4], sent.photo[-1].file_id)
                 return
             except Exception as e: logger.error(f"prd photo {pid}: {e}")
         if len(text)>4000: text=text[:3990]+"..."
         await query.message.reply_text(text,reply_markup=kb); return
 
     if data.startswith("req_"):
+        if not is_open():
+            await query.answer("🔴 فروشگاه در حال حاضر بسته است.\nلطفاً در ساعات کاری مراجعه کنید.",show_alert=True); return
         pid=int(data[4:]); p=await get_product(pid)
         if not p: return
         ctx.user_data.update({"mode":"req_phone","req_pid":pid,"req_name":p[1],"req_type":"خرید"})
         await query.message.reply_text(f"📋 درخواست خرید: {p[1]}\n\nشماره تماس خود را وارد کنید:",reply_markup=cancel_menu()); return
 
     if data.startswith("pre_"):
+        if not is_open():
+            await query.answer("🔴 فروشگاه در حال حاضر بسته است.\nلطفاً در ساعات کاری مراجعه کنید.",show_alert=True); return
         pid=int(data[4:]); p=await get_product(pid)
         if not p: return
         ctx.user_data.update({"mode":"req_phone","req_pid":pid,"req_name":p[1],"req_type":"پیش‌خرید"})
@@ -998,6 +1060,20 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             await safe_edit(query.message,"💾 در حال تهیه...",reply_markup=None)
             await send_backup(query.message._bot)
             await safe_edit(query.message,"✅ بک‌آپ ارسال شد.",reply_markup=backup_kb())
+
+        elif data.startswith("backup_auto_"):
+            idx=int(data[12:])
+            registry_rev=list(reversed(_backup_registry))
+            if idx>=len(registry_rev):
+                await query.answer("❌ بکاپ یافت نشد.",show_alert=True); return
+            entry=registry_rev[idx]
+            await query.answer()
+            await safe_edit(query.message,f"⏳ در حال بازگردانی از {entry['date']}...",reply_markup=None)
+            ok,result=await restore_backup(ctx.bot,entry["file_id"])
+            if ok:
+                await safe_edit(query.message,f"✅ بازگردانی شد.\nفایل‌ها: {', '.join(result)}",reply_markup=backup_kb())
+            else:
+                await safe_edit(query.message,f"❌ خطا: {result}",reply_markup=backup_kb())
 
         elif data=="backup_import":
             await query.answer()
@@ -1186,26 +1262,56 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             await safe_edit(query.message,f"🔘 {SECTION_NAMES.get(key,key)}",reply_markup=sec_btns_kb(key))
 
         # ── درخواست‌ها
-        elif data=="admin_reqs":
+        elif data=="admin_reqs" or data.startswith("admin_reqs_"):
             await query.answer()
-            reqs=await get_requests()
-            if not reqs: await safe_edit(query.message,"📋 درخواستی وجود ندارد.",reply_markup=back_admin()); return
+            offset=0
+            if data.startswith("admin_reqs_"):
+                try: offset=int(data[11:])
+                except: offset=0
+            reqs=await get_requests(offset=offset,limit=25)
+            total=await count_requests()
+            if not reqs and offset==0:
+                await safe_edit(query.message,"📋 درخواستی وجود ندارد.",reply_markup=back_admin()); return
             nc=sum(1 for r in reqs if r[6]=="new")
-            await safe_edit(query.message,f"📋 درخواست‌ها\n🆕 جدید: {to_fa(nc)} | کل: {to_fa(len(reqs))}",reply_markup=reqs_kb(reqs))
+            rng=f"{to_fa(offset+1)}–{to_fa(min(offset+25,total))}"
+            await safe_edit(query.message,
+                f"📋 درخواست‌ها  [{rng} از {to_fa(total)}]\n🆕 جدید: {to_fa(nc)}",
+                reply_markup=reqs_kb(reqs,offset,total))
+
+        elif data=="noop":
+            await query.answer()
 
         elif data.startswith("rq_done_"):
             rid=int(data[8:])
-            async with db.execute("SELECT user_id,product_name FROM requests WHERE id=?",(rid,)) as c:
+            async with db.execute("SELECT user_id,product_name,status FROM requests WHERE id=?",(rid,)) as c:
                 req_row=await c.fetchone()
+            if not req_row:
+                await query.answer("❌ درخواست یافت نشد.",show_alert=True); return
+            if req_row[2]=="done":
+                await query.answer("⚠️ این درخواست قبلاً پیگیری شده است.",show_alert=True)
+                try: await query.message.edit_reply_markup(reply_markup=None)
+                except: pass
+                return
             await done_request(rid)
-            await query.answer("✅",show_alert=True)
-            await safe_edit(query.message,"✅ پیگیری شد.",reply_markup=back_admin())
-            if req_row:
-                try:
-                    await ctx.bot.send_message(req_row[0],
-                        f"✅ درخواست خرید شما برای «{req_row[1]}» پیگیری شد.\n"
-                        f"به زودی با شما تماس خواهیم گرفت. 🙏")
-                except Exception as e: logger.warning(f"req_done notify: {e}")
+            await query.answer("✅ پیگیری شد",show_alert=False)
+            # تشخیص: از اعلان (notification) یا از پنل مدیریت؟
+            is_notif=query.message.reply_markup and any(
+                btn.callback_data and btn.callback_data.startswith("rq_msg_")
+                for row in query.message.reply_markup.inline_keyboard for btn in row)
+            if is_notif:
+                try: await query.message.edit_reply_markup(reply_markup=None)
+                except: pass
+            else:
+                reqs=await get_requests(limit=25); total=await count_requests()
+                nc=sum(1 for r in reqs if r[6]=="new")
+                await safe_edit(query.message,
+                    f"📋 درخواست‌ها — ✅ پیگیری شد\n🆕 جدید: {to_fa(nc)} | کل: {to_fa(total)}",
+                    reply_markup=reqs_kb(reqs,0,total))
+            try:
+                await ctx.bot.send_message(req_row[0],
+                    f"✅ درخواست خرید شما برای «{req_row[1]}» پیگیری شد.\n"
+                    f"به زودی با شما تماس خواهیم گرفت. 🙏")
+            except Exception as e: logger.warning(f"req_done notify: {e}")
 
         elif data.startswith("rq_msg_"):
             target_uid=int(data[7:])
@@ -1442,6 +1548,10 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             ctx.user_data.update({"mode":"req_phone","req_pid":pid,"req_name":pname,"req_type":rtype})
             await update.message.reply_text("❌ شماره معتبر نیست. دوباره:",reply_markup=cancel_menu()); return
         rid=await save_request(user.id,user.username,user.first_name,text,pid,pname)
+        if rid is None:
+            await update.message.reply_text(
+                f"⚠️ شما قبلاً برای «{pname}» درخواست ثبت کرده‌اید.\nپشتیبانی در حال بررسی است.",
+                reply_markup=main_menu()); return
         icon="📝" if rtype=="پیش‌خرید" else "📋"
         try:
             req_kb=InlineKeyboardMarkup([
@@ -1547,6 +1657,7 @@ async def post_init(app):
     # گرم‌کردن cache ووکامرس در پس‌زمینه — اولین کاربر منتظر نمی‌ماند
     asyncio.ensure_future(_trigger_warm())
     asyncio.ensure_future(_spam_cleanup_loop())
+    asyncio.ensure_future(_stats_flush_loop())
     asyncio.ensure_future(_auto_backup_loop(app.bot))
     logger.info("✅ ربات راه‌اندازی شد")
 
