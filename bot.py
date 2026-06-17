@@ -273,7 +273,11 @@ async def safe_edit(msg,text,**kw):
 async def init_db():
     global db
     db=await aiosqlite.connect(DB_FILE)
+    # بهینه‌سازی SQLite — ایمن و سریع‌تر
     await db.execute("PRAGMA journal_mode=WAL")
+    await db.execute("PRAGMA synchronous=NORMAL")   # ایمن با WAL، سریع‌تر از FULL
+    await db.execute("PRAGMA cache_size=-8000")     # ۸ مگابایت cache در RAM
+    await db.execute("PRAGMA temp_store=MEMORY")    # عملیات موقت در RAM
     await db.executescript("""
         CREATE TABLE IF NOT EXISTS users(
             user_id INTEGER PRIMARY KEY,username TEXT,first_name TEXT,
@@ -297,11 +301,19 @@ async def init_db():
         except: pass
     await db.commit()
 
+_seen_uids: dict = {}   # uid → زمان آخرین save_user
+_SEEN_TTL  = 300        # 5 دقیقه — اگر اخیراً ذخیره شده، skip کن
+
 async def save_user(u):
+    now_ts=time.time()
+    if u.id in _seen_uids and now_ts-_seen_uids[u.id]<_SEEN_TTL: return
     now=gregorian_now()
-    await db.execute("INSERT OR IGNORE INTO users VALUES(?,?,?,?,?,0)",(u.id,u.username or"",u.first_name or"",now,now))
-    await db.execute("UPDATE users SET username=?,first_name=?,last_seen=? WHERE user_id=?",(u.username or"",u.first_name or"",now,u.id))
+    await db.execute("INSERT OR IGNORE INTO users VALUES(?,?,?,?,?,0)",
+        (u.id,u.username or"",u.first_name or"",now,now))
+    await db.execute("UPDATE users SET username=?,first_name=?,last_seen=? WHERE user_id=?",
+        (u.username or"",u.first_name or"",now,u.id))
     await db.commit()
+    _seen_uids[u.id]=now_ts
 
 async def get_all_uids():
     async with db.execute("SELECT user_id FROM users WHERE is_blocked=0") as c: return[r[0] for r in await c.fetchall()]
@@ -425,6 +437,8 @@ async def _spam_cleanup_loop():
             del _hard_block[uid]
         for uid in [u for u,(v,exp) in list(_block_cache.items()) if exp<now]:
             del _block_cache[uid]
+        for uid in [u for u,ts in list(_seen_uids.items()) if now-ts>_SEEN_TTL*3]:
+            del _seen_uids[uid]
         if stale: logger.debug(f"spam_cleanup: {len(stale)} رکورد منقضی پاک شد")
 
 def spam_check(uid: int) -> str:
@@ -696,9 +710,13 @@ def reqs_kb(reqs,offset=0,total=0):
     if nav: btns.append(nav)
     btns.append([InlineKeyboardButton("🔙",callback_data="back_to_admin")]); return InlineKeyboardMarkup(btns)
 
-def req_kb(rid,status):
+def req_kb(rid,status,uid=0):
     btns=[]
-    if status=="new": btns.append([InlineKeyboardButton("✅ پیگیری شد",callback_data=f"rq_done_{rid}")])
+    if status=="new":
+        btns.append([InlineKeyboardButton("✅ پیگیری شد",callback_data=f"rq_done_{rid}")])
+        if uid: btns.append([InlineKeyboardButton("💬 پیام به کاربر",callback_data=f"rq_msg_{uid}")])
+    else:
+        btns.append([InlineKeyboardButton("☑️ پیگیری شده — بسته شد",callback_data="noop")])
     btns.append([InlineKeyboardButton("🔙",callback_data="admin_reqs")]); return InlineKeyboardMarkup(btns)
 
 # ── send with banner
@@ -939,16 +957,12 @@ async def user_cb(query,ctx):
         await query.message.reply_text(text,reply_markup=kb); return
 
     if data.startswith("req_"):
-        if not is_open():
-            await query.answer("🔴 فروشگاه در حال حاضر بسته است.\nلطفاً در ساعات کاری مراجعه کنید.",show_alert=True); return
         pid=int(data[4:]); p=await get_product(pid)
         if not p: return
         ctx.user_data.update({"mode":"req_phone","req_pid":pid,"req_name":p[1],"req_type":"خرید"})
         await query.message.reply_text(f"📋 درخواست خرید: {p[1]}\n\nشماره تماس خود را وارد کنید:",reply_markup=cancel_menu()); return
 
     if data.startswith("pre_"):
-        if not is_open():
-            await query.answer("🔴 فروشگاه در حال حاضر بسته است.\nلطفاً در ساعات کاری مراجعه کنید.",show_alert=True); return
         pid=int(data[4:]); p=await get_product(pid)
         if not p: return
         ctx.user_data.update({"mode":"req_phone","req_pid":pid,"req_name":p[1],"req_type":"پیش‌خرید"})
@@ -964,18 +978,21 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     query=update.callback_query
     data=query.data; uid=query.from_user.id
 
-    # ── محافظت اسپم دو فازی (فقط کاربران عادی) — sync، بدون DB، صفر overhead
-    if uid != ADMIN_ID:
-        _s = spam_check(uid)
-        if _s == 'block':
-            await query.answer()   # بی‌صدا — فقط loading را خاموش می‌کند
-            return
-        if _s == 'warn':
-            await query.answer("🐢 لطفاً کمی آرام‌تر کلیک کنید.", show_alert=True)
-            return
+    # ── بررسی ساعت کاری برای درخواست خرید — BEFORE query.answer() تا show_alert کار کند
+    if data.startswith(("req_","pre_")) and uid!=ADMIN_ID and not is_open():
+        await query.answer("🔴 فروشگاه در حال حاضر بسته است.\nلطفاً در ساعات کاری مراجعه کنید.",show_alert=True)
+        return
+
+    # ── محافظت اسپم — برای req_/pre_ اعمال نمی‌شود (درخواست خرید نباید بلاک شود)
+    if uid!=ADMIN_ID and not data.startswith(("req_","pre_")):
+        _s=spam_check(uid)
+        if _s=='block':
+            await query.answer(); return
+        if _s=='warn':
+            await query.answer("🐢 لطفاً کمی آرام‌تر کلیک کنید.",show_alert=True); return
+    if uid!=ADMIN_ID:
         if await is_blocked(uid):
-            await query.answer("⛔ دسترسی شما مسدود شده است.")
-            return
+            await query.answer("⛔ دسترسی شما مسدود شده است."); return
 
     # ── مسیریابی کاربران — answer یکبار اینجا فراخوانی می‌شه
     if data.startswith(_USER_CB_PREFIXES) or uid!=ADMIN_ID:
@@ -1032,8 +1049,9 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
 
         elif data=="dash":
             await query.answer()
-            t,d,w,m,nt,bl=(await total_users(),await today_users(),await week_users(),
-                            await month_users(),await new_today(),await blk_count())
+            t,d,w,m,nt,bl=await asyncio.gather(
+                total_users(),today_users(),week_users(),
+                month_users(),new_today(),blk_count())
             sep="─"*22
             dash=(f"📊 داشبورد — {shamsi_now()}\n{sep}"
                   f"\n👥 کل کاربران: {to_fa(t)}     🚫 بلاک: {to_fa(bl)}"
@@ -1336,7 +1354,7 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
                  f"\n🆔 {r[1]}  {'@'+r[2] if r[2] else ''}"
                  f"\n⏱ {r[7]}"
                  f"\n{sep}\n{st2}")
-            await safe_edit(query.message,txt,reply_markup=req_kb(rid,r[6]))
+            await safe_edit(query.message,txt,reply_markup=req_kb(rid,r[6],r[1]))
 
         # ── ساعت کاری
         elif data=="wh_menu":
@@ -1452,9 +1470,11 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     user=update.effective_user; text=update.message.text.strip()
     await save_user(user)
     if user.id != ADMIN_ID:
-        _s = spam_check(user.id)
-        if _s == 'block': return                                                    # بی‌صدا
-        if _s == 'warn': return await update.message.reply_text("🐢 لطفاً آرام‌تر پیام دهید.")
+        _mode=ctx.user_data.get("mode")
+        if _mode!="req_phone":   # در حین ثبت درخواست، spam block اعمال نشود
+            _s=spam_check(user.id)
+            if _s=='block': return
+            if _s=='warn': return await update.message.reply_text("🐢 لطفاً آرام‌تر پیام دهید.")
         if await is_blocked(user.id): return
         asyncio.ensure_future(_trigger_warm())
     if text=="❌ لغو عملیات":
