@@ -159,17 +159,20 @@ async def get_visible_category_ids():
     return ids
 
 async def _fetch_all(path, params=None):
-    """همه صفحات را می‌گیرد (pagination)."""
+    """همه صفحات را می‌گیرد. اگر هر صفحه‌ای fail کند، None برمی‌گردد (نه داده ناقص)."""
     out = []
     page = 1
     while True:
         p = dict(params or {}); p.update({"per_page": 100, "page": page})
         data = await _fetch(path, p)
+        if data is None:
+            logger.error(f"fetch_all {path} p{page}: خطا — داده ناقص برنمی‌گردیم")
+            return None   # همیشه None اگر هر صفحه‌ای fail کند
         if not data: break
         out.extend(data)
         if len(data) < 100: break
         page += 1
-        if page > 20: break  # سقف ایمنی
+        if page > 20: break
     return out
 
 # ── دسته‌بندی‌ها ────────────────────────────────────
