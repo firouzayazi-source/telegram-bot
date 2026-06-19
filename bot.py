@@ -1,4 +1,4 @@
-import os, json, time, asyncio, logging, aiosqlite, jdatetime, pytz, zipfile, io
+import os, json, time, asyncio, logging, aiosqlite, jdatetime, pytz, zipfile, io, csv
 from datetime import datetime, timedelta
 import aiofiles
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
@@ -821,20 +821,28 @@ async def send_backup(bot):
 async def _auto_backup_loop(bot):
     """هر شب ساعت ۳ بامداد به وقت تهران، بکاپ خودکار به ادمین می‌فرستد."""
     _tz = pytz.timezone("Asia/Tehran")
+    last_backup_date = None   # جلوگیری از backup تکراری در همان روز
     while True:
         try:
             now = datetime.now(_tz)
+            today = now.date()
             target = now.replace(hour=3, minute=0, second=0, microsecond=0)
-            if now >= target:
+            if now >= target and last_backup_date != today:
+                await send_backup(bot)
+                last_backup_date = today
+                logger.info("✅ بکاپ خودکار ارسال شد")
+                await asyncio.sleep(3600)   # یک ساعت صبر کن تا دوباره چک نشود
+                continue
+            if now < target:
+                wait = (target - now).total_seconds()
+            else:
                 target += timedelta(days=1)
-            wait = (target - now).total_seconds()
-            logger.info(f"auto_backup: بعد از {int(wait//3600)} ساعت و {int((wait%3600)//60)} دقیقه")
+                wait = (target - now).total_seconds()
+            logger.info(f"auto_backup: بعد از {int(wait//3600)}h {int((wait%3600)//60)}m")
             await asyncio.sleep(wait)
-            await send_backup(bot)
-            logger.info("✅ بکاپ خودکار ارسال شد")
         except Exception as e:
             logger.error(f"auto_backup: {e}")
-            await asyncio.sleep(3600)   # خطا → یک ساعت دیگر دوباره
+            await asyncio.sleep(3600)
 
 async def restore_backup(bot,file_id):
     try:
@@ -1334,11 +1342,10 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         elif data=="export_reqs":
             await query.answer()
             await safe_edit(query.message,"📊 در حال آماده‌سازی فایل CSV...",reply_markup=None)
-            import csv,io as _io
             async with db.execute(
                 "SELECT id,product_name,first_name,username,phone,user_id,status,created_at FROM requests ORDER BY id DESC") as c:
                 rows=await c.fetchall()
-            buf=_io.StringIO()
+            buf=io.StringIO()
             w=csv.writer(buf)
             w.writerow(["#","محصول","نام","یوزرنیم","تلفن","آیدی","وضعیت","تاریخ"])
             for r in rows:
