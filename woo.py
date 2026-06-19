@@ -27,7 +27,7 @@ VERSION_CHECK_INTERVAL = 60
 _http_session: "aiohttp.ClientSession | None" = None
 
 async def _get_session() -> "aiohttp.ClientSession":
-    """Session دائمی با connection pool — از ساختن session جدید برای هر request جلوگیری می‌کند."""
+    """Session دائمی با connection pool و auto-reconnect."""
     global _http_session
     import aiohttp as _aio
     if _http_session is None or _http_session.closed:
@@ -35,6 +35,14 @@ async def _get_session() -> "aiohttp.ClientSession":
         connector = _aio.TCPConnector(limit=10, enable_cleanup_closed=True)
         _http_session = _aio.ClientSession(timeout=timeout, connector=connector)
     return _http_session
+
+async def _reset_session():
+    """Session را بازسازی می‌کند — بعد از connection error فراخوانی می‌شود."""
+    global _http_session
+    if _http_session and not _http_session.closed:
+        try: await _http_session.close()
+        except: pass
+    _http_session = None
 
 def _clean_cache():
     """ورودی‌های منقضی را از cache حذف می‌کند — جلوگیری از رشد بی‌پایان."""
@@ -100,16 +108,17 @@ async def _fetch(path, params=None):
     if not is_configured(): return None
     url = f"{WOO_URL}/wp-json/wc/v3/{path}"
     p = dict(params or {}); p.update({"consumer_key": WOO_KEY, "consumer_secret": WOO_SECRET})
-    for attempt in range(2):   # یک تلاش اول + یک retry
+    for attempt in range(2):
         try:
             session = await _get_session()
             async with session.get(url, params=p) as r:
                 if r.status == 200: return await r.json()
                 logger.error(f"woo {path}: HTTP {r.status}"); return None
         except Exception as e:
+            await _reset_session()   # session را بازسازی کن
             if attempt == 0:
                 logger.warning(f"woo fetch retry ({path}): {e}")
-                await asyncio.sleep(1)   # یک ثانیه صبر کن و دوباره امتحان کن
+                await asyncio.sleep(1)
             else:
                 logger.error(f"woo fetch {path}: {e}"); return None
 
