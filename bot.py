@@ -12,7 +12,7 @@ TOKEN = os.environ["BOT_TOKEN"].strip()
 ADMIN_ID = int(os.environ["ADMIN_ID"].strip())
 DATA_FILE = "data.json"; DB_FILE = "users.db"; BANNER_FILE = "banner.json"
 WORKHOURS_FILE = "workhours.json"; BUTTONS_FILE = "buttons.json"
-MENU_FILE = "menu.json"
+MENU_FILE = "menu.json"; PHOTOMAP_FILE = "photomap.json"
 SETTINGS_FILE = "settings.json"; STATS_FILE = "stats.json"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -80,12 +80,25 @@ def get_banner(k): banners.setdefault(k,{"file_id":None,"active":False}); return
 # cache نگاشت URL عکس → file_id تلگرام (ارسال آنی در دفعات بعد)
 _photo_fileids = {}
 _PHOTO_CACHE_MAX = 500
+_photomap_dirty  = False
 
 def _cache_photo(url: str, file_id: str):
-    """URL عکس → Telegram file_id را cache می‌کند. حداکثر ۵۰۰ ورودی."""
+    global _photomap_dirty
     if len(_photo_fileids) >= _PHOTO_CACHE_MAX:
         _photo_fileids.pop(next(iter(_photo_fileids)), None)
     _photo_fileids[url] = file_id
+    _photomap_dirty = True
+
+async def load_photomap():
+    global _photo_fileids
+    data = await _rj(PHOTOMAP_FILE, dict)
+    if isinstance(data, dict): _photo_fileids.update(data)
+    logger.info(f"photomap: {len(_photo_fileids)} آدرس عکس بارگذاری شد")
+
+async def save_photomap():
+    global _photomap_dirty
+    await _wj(PHOTOMAP_FILE, dict(list(_photo_fileids.items())[-_PHOTO_CACHE_MAX:]))
+    _photomap_dirty = False
 def get_sec_btns(k): buttons.setdefault(k,{"enabled":True,"items":[]}); return buttons[k]
 def get_setting(k): return settings.get(k,DEFAULT_SETTINGS.get(k,True))
 
@@ -141,12 +154,12 @@ async def record_stat(k):
     _stats_dirty=True   # فقط flag — بدون disk write
 
 async def _stats_flush_loop():
-    """هر ۳۰ ثانیه اگر آمار تغییر کرده باشد، یک‌بار به دیسک می‌نویسد."""
+    """هر ۳۰ ثانیه اگر آمار یا photomap تغییر کرده باشد، ذخیره می‌کند."""
     global _stats_dirty
     while True:
         await asyncio.sleep(30)
-        if _stats_dirty:
-            await save_stats(); _stats_dirty=False
+        if _stats_dirty: await save_stats(); _stats_dirty=False
+        if _photomap_dirty: await save_photomap()
 
 # ── load/save
 async def _rj(path,default):
@@ -295,6 +308,8 @@ async def init_db():
             price TEXT,description TEXT,photo_id TEXT,site_url TEXT,
             is_active INTEGER DEFAULT 1,created_at TEXT);
         CREATE INDEX IF NOT EXISTS idx_ls ON users(last_seen);
+        CREATE INDEX IF NOT EXISTS idx_req_uid ON requests(user_id,product_id,created_at);
+        CREATE INDEX IF NOT EXISTS idx_req_st ON requests(status);
     """)
     for sql in ["ALTER TABLE users ADD COLUMN is_blocked INTEGER DEFAULT 0"]:
         try: await db.execute(sql)
@@ -336,8 +351,18 @@ async def set_block(uid,v):
     _block_cache[uid]=(bool(v),time.time()+_BLOCK_CACHE_TTL)  # فوری cache را آپدیت کن
 
 async def search_users(q):
-    q=f"%{q}%"
-    async with db.execute("SELECT user_id,first_name,username,last_seen,is_blocked FROM users WHERE first_name LIKE ? OR username LIKE ? OR CAST(user_id AS TEXT) LIKE ? ORDER BY last_seen DESC LIMIT 15",(q,q,q)) as c: return await c.fetchall()
+    q_like=f"%{q}%"
+    async with db.execute(
+        "SELECT user_id,first_name,username,last_seen,is_blocked FROM users WHERE first_name LIKE ? OR username LIKE ? OR CAST(user_id AS TEXT) LIKE ? ORDER BY last_seen DESC LIMIT 15",
+        (q_like,q_like,q_like)) as c: rows=list(await c.fetchall())
+    # جستجو با شماره تلفن در جدول درخواست‌ها
+    if q.replace("-","").replace(" ","").replace("+","").isdigit():
+        async with db.execute(
+            "SELECT DISTINCT r.user_id,u.first_name,u.username,u.last_seen,u.is_blocked FROM requests r JOIN users u ON r.user_id=u.user_id WHERE r.phone LIKE ? LIMIT 5",
+            (q_like,)) as c: phone_rows=await c.fetchall()
+        seen={r[0] for r in rows}
+        rows+=[r for r in phone_rows if r[0] not in seen]
+    return rows[:15]
 
 async def get_users_page(offset,limit=15,ft="all"):
     flt={"today":"WHERE DATE(last_seen)=DATE('now','localtime')","week":"WHERE last_seen>=datetime('now','-7 days','localtime')","blocked":"WHERE is_blocked=1"}
@@ -708,6 +733,7 @@ def reqs_kb(reqs,offset=0,total=0):
     if offset>0: nav.append(InlineKeyboardButton("▶️ جدیدتر",callback_data=f"admin_reqs_{offset-25}"))
     if offset+25<total: nav.append(InlineKeyboardButton("◀️ قدیمی‌تر",callback_data=f"admin_reqs_{offset+25}"))
     if nav: btns.append(nav)
+    btns.append([InlineKeyboardButton("📊 Export CSV",callback_data="export_reqs")])
     btns.append([InlineKeyboardButton("🔙",callback_data="back_to_admin")]); return InlineKeyboardMarkup(btns)
 
 def req_kb(rid,status,uid=0):
@@ -728,40 +754,44 @@ async def send_banner(msg,text,key,kb=None):
     await msg.reply_text(text,reply_markup=kb)
 
 # ── broadcast
-_broadcast_active = False   # جلوگیری از پخش همزمان دوگانه
+_broadcast_active = False
+_broadcast_cancel = False   # توقف اضطراری
 
 async def broadcast(ctx, text, photo=None):
-    global _broadcast_active
+    global _broadcast_active, _broadcast_cancel
     if _broadcast_active:
         await ctx.bot.send_message(ADMIN_ID, "⚠️ یک پخش در حال اجراست — صبر کنید تا تمام شود.")
         return
-    _broadcast_active = True
+    _broadcast_active = True; _broadcast_cancel = False
     try:
         users = await get_all_uids(); total = len(users); ok = fail = 0
-        st = await ctx.bot.send_message(ADMIN_ID, f"📢 شروع پخش به {to_fa(total)} کاربر...")
+        cancel_kb=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 توقف پخش",callback_data="broadcast_cancel")]])
+        st = await ctx.bot.send_message(ADMIN_ID, f"📢 شروع پخش به {to_fa(total)} کاربر...", reply_markup=cancel_kb)
         for i, uid in enumerate(users, 1):
+            if _broadcast_cancel:
+                await st.edit_text(f"🛑 پخش متوقف شد!\n✔️ {to_fa(ok)} | ❌ {to_fa(fail)}",reply_markup=None)
+                return
             try:
                 if photo: await ctx.bot.send_photo(uid, photo=photo, caption=text)
                 else:     await ctx.bot.send_message(uid, text)
                 ok += 1
-                await asyncio.sleep(0.05)   # ~۲۰ پیام/ثانیه — زیر حد تلگرام
+                await asyncio.sleep(0.05)
             except Exception as e:
                 retry = getattr(e, "retry_after", None)
-                if retry:                   # تلگرام: صبر کن X ثانیه
+                if retry:
                     await asyncio.sleep(retry + 1)
                     try:
                         if photo: await ctx.bot.send_photo(uid, photo=photo, caption=text)
                         else:     await ctx.bot.send_message(uid, text)
                         ok += 1
                     except: fail += 1
-                else:
-                    fail += 1
+                else: fail += 1
             if i % 20 == 0 or i == total:
-                try: await st.edit_text(f"📢 {to_fa(ok)}✔️ {to_fa(fail)}❌  {to_fa(i)}/{to_fa(total)}")
+                try: await st.edit_text(f"📢 {to_fa(ok)}✔️ {to_fa(fail)}❌  {to_fa(i)}/{to_fa(total)}",reply_markup=cancel_kb if i<total else None)
                 except: pass
-        await st.edit_text(f"✅ پخش تمام شد!\nموفق: {to_fa(ok)} | شکست: {to_fa(fail)}")
+        await st.edit_text(f"✅ پخش تمام شد!\nموفق: {to_fa(ok)} | شکست: {to_fa(fail)}", reply_markup=None)
     finally:
-        _broadcast_active = False
+        _broadcast_active = False; _broadcast_cancel = False
 
 # ── backup
 _backup_registry: list = []  # [{"msg_id": int, "file_id": str, "date": str}]
@@ -1296,8 +1326,28 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
                 f"📋 درخواست‌ها  [{rng} از {to_fa(total)}]\n🆕 جدید: {to_fa(nc)}",
                 reply_markup=reqs_kb(reqs,offset,total))
 
-        elif data=="noop":
+        elif data=="broadcast_cancel":
+            global _broadcast_cancel
+            _broadcast_cancel=True
+            await query.answer("🛑 در حال توقف پخش...")
+
+        elif data=="export_reqs":
             await query.answer()
+            await safe_edit(query.message,"📊 در حال آماده‌سازی فایل CSV...",reply_markup=None)
+            import csv,io as _io
+            async with db.execute(
+                "SELECT id,product_name,first_name,username,phone,user_id,status,created_at FROM requests ORDER BY id DESC") as c:
+                rows=await c.fetchall()
+            buf=_io.StringIO()
+            w=csv.writer(buf)
+            w.writerow(["#","محصول","نام","یوزرنیم","تلفن","آیدی","وضعیت","تاریخ"])
+            for r in rows:
+                w.writerow([r[0],r[1],r[2],r[3] or"-",r[4],r[5],"پیگیری شده" if r[6]=="done" else"جدید",r[7]])
+            fname=f"requests_{shamsi_now().replace(' ','_').replace(':','-')}.csv"
+            await ctx.bot.send_document(ADMIN_ID,
+                document=buf.getvalue().encode("utf-8-sig"),  # BOM برای Excel
+                filename=fname,caption=f"📊 {to_fa(len(rows))} درخواست")
+            await safe_edit(query.message,"✅ فایل CSV ارسال شد.",reply_markup=back_admin())
 
         elif data.startswith("rq_done_"):
             rid=int(data[8:])
@@ -1338,6 +1388,8 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text(
                 f"💬 پیام برای کاربر 🆔{target_uid}\nمتن یا تصویر را ارسال کنید:",
                 reply_markup=cancel_menu())
+
+        elif data=="noop": await query.answer()
 
         elif data.startswith("rq_"):
             await query.answer()
@@ -1673,16 +1725,24 @@ async def document_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
 async def post_init(app):
     await init_db(); await load_data(); await load_banners()
     await load_workhours(); await load_buttons(); await load_settings()
-    await load_stats(); await load_menu()
-    # گرم‌کردن cache ووکامرس در پس‌زمینه — اولین کاربر منتظر نمی‌ماند
+    await load_stats(); await load_menu(); await load_photomap()
     asyncio.ensure_future(_trigger_warm())
     asyncio.ensure_future(_spam_cleanup_loop())
     asyncio.ensure_future(_stats_flush_loop())
     asyncio.ensure_future(_auto_backup_loop(app.bot))
     logger.info("✅ ربات راه‌اندازی شد")
 
+async def post_shutdown(app):
+    """قبل از خاموش‌شدن — داده‌های in-memory را flush کن تا چیزی گم نشود."""
+    if _stats_dirty:   await save_stats();   logger.info("shutdown: stats saved")
+    if _photomap_dirty: await save_photomap(); logger.info("shutdown: photomap saved")
+    woo_session = getattr(woo, "_http_session", None)
+    if woo_session and not woo_session.closed:
+        await woo_session.close()
+    logger.info("✅ shutdown clean")
+
 def main():
-    app=ApplicationBuilder().token(TOKEN).post_init(post_init).build()
+    app=ApplicationBuilder().token(TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
     app.add_handler(CommandHandler("start",cmd_start))
     app.add_handler(CommandHandler("admin",cmd_admin))
     app.add_handler(CallbackQueryHandler(callbacks))
