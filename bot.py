@@ -4024,7 +4024,8 @@ def handle_callbacks(call: types.CallbackQuery):
     if data == "cancel_purchase":
         bot.answer_callback_query(call.id)
         clear_user_state(uid)
-        bot.send_message(call.message.chat.id, "خرید لغو شد.", reply_markup=main_menu(user_id=message.from_user.id if hasattr(message,"from_user") else None))
+        bot.send_message(call.message.chat.id, "خرید لغو شد.",
+                         reply_markup=main_menu(user_id=uid))
         return
 
     # ─── ناوبری دسته‌بندی داینامیک ────────────────────────────────────────
@@ -4094,7 +4095,7 @@ def handle_callbacks(call: types.CallbackQuery):
             if t_row:
                 clear_user_state(int(t_row["user_id"]))
                 try:
-                    bot.send_message(int(t_row["user_id"]), "⛔️ چت بسته شد.", reply_markup=main_menu(user_id=message.from_user.id if hasattr(message,"from_user") else None))
+                    bot.send_message(int(t_row["user_id"]), "⛔️ چت بسته شد.", reply_markup=main_menu(user_id=int(t_row["user_id"])))
                 except Exception:
                     pass
         return
@@ -4227,12 +4228,14 @@ def handle_callbacks(call: types.CallbackQuery):
 
     if data == "back_main":
         bot.answer_callback_query(call.id)
-        bot.send_message(call.message.chat.id, t("TXT_MAIN_MENU_TITLE","منوی اصلی"), reply_markup=main_menu(user_id=message.from_user.id if hasattr(message,"from_user") else None))
+        bot.send_message(call.message.chat.id, t("TXT_MAIN_MENU_TITLE","منوی اصلی"),
+                         reply_markup=main_menu(user_id=uid))
         return
 
     if data == "other_back":
         bot.answer_callback_query(call.id)
-        bot.send_message(call.message.chat.id, t("TXT_MAIN_MENU_TITLE","منوی اصلی"), reply_markup=main_menu(user_id=message.from_user.id if hasattr(message,"from_user") else None))
+        bot.send_message(call.message.chat.id, t("TXT_MAIN_MENU_TITLE","منوی اصلی"),
+                         reply_markup=main_menu(user_id=uid))
         return
 
     if data == "admin_products_back":
