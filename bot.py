@@ -2795,11 +2795,30 @@ def cb_myord_detail(call):
 def cb_myord_back(call):
     uid = call.from_user.id
     bot.answer_callback_query(call.id)
+    orders = get_recent_orders_by_user(int(uid), limit=5)
+    if not orders:
+        try:
+            bot.edit_message_text("🛒 هنوز خریدی انجام نداده‌اید.",
+                                  call.message.chat.id, call.message.message_id)
+        except Exception:
+            bot.send_message(call.message.chat.id, "🛒 هنوز خریدی انجام نداده‌اید.")
+        return
+    lines = ["🛒 <b>خریدهای من</b>\n"]
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    for i, o in enumerate(orders, 1):
+        oid, title, price, created_at = o
+        date_str = (created_at or "")[:10]
+        lines.append(f"{i}. {title} — {int(price):,} ت | {date_str}")
+        kb.add(types.InlineKeyboardButton(
+            f"📦 {i}. {str(title)[:40]}", callback_data=f"myord_{oid}"
+        ))
+    lines.append("\n👇 برای مشاهده محصول روی هر سفارش بزنید:")
     try:
-        bot.delete_message(call.message.chat.id, call.message.message_id)
+        bot.edit_message_text("\n".join(lines), call.message.chat.id,
+                              call.message.message_id, parse_mode="HTML", reply_markup=kb)
     except Exception:
-        pass
-    _show_my_orders(call.message.chat.id, uid)
+        bot.send_message(call.message.chat.id, "\n".join(lines),
+                         parse_mode="HTML", reply_markup=kb)
 
 
 @bot.message_handler(func=lambda m: m.text == t("MAIN_BTN_SUPPORT"))
