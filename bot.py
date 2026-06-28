@@ -1,5289 +1,1763 @@
-import os
-import logging
+import os, json, time, asyncio, logging, aiosqlite, jdatetime, pytz, zipfile, io, csv
 from datetime import datetime, timedelta
-import random
-import string
-import requests
-import logging
+import aiofiles
+from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.ext import (ApplicationBuilder, CommandHandler, MessageHandler,
+                           CallbackQueryHandler, ContextTypes, filters)
 
-logger = logging.getLogger("inox_bot")
-import requests
-import telebot
-from telebot import types
-from telebot import apihelper
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+os.environ.pop("HTTP_PROXY", None); os.environ.pop("HTTPS_PROXY", None)
+os.environ.pop("ALL_PROXY", None); os.environ["NO_PROXY"] = "*"
 
-# Telegram networking timeouts (stability)
-apihelper.CONNECT_TIMEOUT = 15
-apihelper.READ_TIMEOUT = 60
-import re
-import html
-from db import subtract_wallet_balance
-from db import (
-    init_db,
-    DB_FULL_PATH,
-    get_wallet_balance,
-    add_wallet_balance,
-    subtract_wallet_balance,
-    set_wallet_balance,
-    create_order,
-    get_recent_orders_by_user,
-    get_recent_orders_global,
-    get_products_by_category,
-    get_product_by_id,
-    update_product_field,
-    toggle_product_active,
-    add_product,
-    delete_product,
-    get_stats,
-    claim_next_feed_item,
-    add_feed_items,
-    get_feed_stats,
-    list_feed_items,
-    count_feed_items,
-    set_feed_item_delivered,
-    delete_feed_item,
-    get_feed_alert_setting,
-    set_feed_alert_threshold,
-    reset_feed_alert_notification,
-    set_feed_alert_last_notified,
-    list_other_services,
-    add_other_service,
-    delete_other_service,
-    upsert_partner_request,
-    list_pending_partners,
-    list_partner_requests,
-    approve_partner,
-    reject_partner,
-    update_partner_city_shop,
-    is_partner_approved,
-    get_partner_by_user_id,
-    get_partner_by_phone,
-    count_user_product_orders_today,
-    get_ui_text,
-    set_ui_text,
-    delete_ui_text,
-    list_ui_texts,
-    # دسته‌بندی داینامیک
-    get_root_categories,
-    get_subcategories,
-    get_category,
-    get_category_products,
-    get_category_by_button_text,
-    get_category_path,
-    # کاربران و تیکت
-    upsert_user,
-    # کد تخفیف
-    validate_discount, use_discount,
-    # اشتراک موجودی
-    subscribe_stock, get_stock_subscribers, mark_subscriptions_notified,
-    reset_subscriptions_on_restock,
-    # پشتیبانی محصول
-    get_product_support_flag, ensure_product_support_schema, get_product_setup_message,
-)
-from services.payments import start_wallet_charge_payment
-from config import (
-    BOT_TOKEN,
-    ADMIN_ID,
-    BASE_DIR,
-    DB_PATH,
-    ZARINPAL_SANDBOX,
-    BASE_CALLBACK_URL,
-    MIN_TOPUP_AMOUNT,
-)
-from state import (
-    STATE,
-    user_states,
-    reseller_signup,
-    admin_states,
-    clear_user_state,
-    clear_admin_state,
-    ensure_admin,
-    admin_has_perm,
-)
-from backup_tools import (
-    BACKUP_DIR,
-    _ensure_backup_dir,
-    create_db_backup,
-    validate_backup_db,
-    restore_db_from_backup,
-    admin_backup_menu,
-    admin_full_reset_confirm_menu,
-    full_reset_database,
-    set_ui_cache_clear_callback,
-)
-from ui_texts import (
-    DEFAULT_UI_TEXTS,
-    MAIN_BUTTON_KEYS,
-    t,
-    tf,
-    is_main_button_enabled,
-    set_main_button_enabled,
-    ui_cache_clear,
-)
-from keyboards import (
-    main_menu,
-    other_products_menu,
-    admin_other_products_menu,
-    wallet_inline_keyboard,
-    admin_main_inline,
-    admin_settings_menu,
-    admin_main_btn_manage_menu,
-    admin_ui_list_menu,
-    category_inline_keyboard,
-)
+TOKEN = os.environ["BOT_TOKEN"].strip()
+ADMIN_ID = int(os.environ["ADMIN_ID"].strip())
+DATA_FILE = "data.json"; DB_FILE = "users.db"; BANNER_FILE = "banner.json"
+WORKHOURS_FILE = "workhours.json"; BUTTONS_FILE = "buttons.json"
+MENU_FILE = "menu.json"; PHOTOMAP_FILE = "photomap.json"
+SETTINGS_FILE = "settings.json"; STATS_FILE = "stats.json"
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
-logger = logging.getLogger("inox_bot")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger(__name__)
+IRAN_TZ = pytz.timezone("Asia/Tehran")
 
-bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
-set_ui_cache_clear_callback(ui_cache_clear)
+# ── زمان
+_FA = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
+MONTH_FA = {1:"فروردین",2:"اردیبهشت",3:"خرداد",4:"تیر",5:"مرداد",6:"شهریور",
+            7:"مهر",8:"آبان",9:"آذر",10:"دی",11:"بهمن",12:"اسفند"}
+DAY_FA   = {"0":"شنبه","1":"یکشنبه","2":"دوشنبه","3":"سه‌شنبه",
+            "4":"چهارشنبه","5":"پنجشنبه","6":"جمعه"}
 
+def to_fa(v): return str(v).translate(_FA)
 
+def shamsi_now():
+    now = datetime.now(IRAN_TZ); j = jdatetime.datetime.fromgregorian(datetime=now)
+    return f"{to_fa(j.day)} {MONTH_FA[j.month]} {to_fa(j.year)} — {to_fa(now.strftime('%H:%M'))}"
 
+def gregorian_now(): return datetime.now(IRAN_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
-def send_product_detail(chat_id_or_msg, product, category=None, user_id=None, message=None, cat_id=None):
-    """نمایش جزئیات محصول.
-    
-    از هر دو روش قدیمی (category TEXT) و جدید (cat_id INT) پشتیبانی می‌کند.
-    """
-    # handle both chat_id (int) and message object
-    if hasattr(chat_id_or_msg, 'chat'):
-        msg_obj = chat_id_or_msg
-        chat_id = msg_obj.chat.id
-        if user_id is None and hasattr(msg_obj, 'from_user'):
-            user_id = msg_obj.from_user.id
+# ── منو
+MENU_ITEMS = {"1":"🌐 شبکه‌های اجتماعی","2":"🌐 سایت استوک لند",
+              "3":"💰 شرایط اقساط","4":"📞 پشتیبانی","5":"📍 آدرس فروشگاه",
+              "6":"🔖 دکمه ذخیره ۱","7":"🔖 دکمه ذخیره ۲"}
+# پیکربندی منوی اصلی — قابل تغییر از پنل ادمین (menu.json)
+# هر آیتم: key (ثابت), label (قابل تغییر), order (ترتیب), enabled (روشن/خاموش)
+DEFAULT_MENU = [
+    {"key":"1","label":"🌐 شبکه‌های اجتماعی","order":1,"enabled":True,"width":"half"},
+    {"key":"2","label":"🌐 سایت استوک لند","order":2,"enabled":True,"width":"half"},
+    {"key":"3","label":"💰 شرایط اقساط","order":3,"enabled":True,"width":"half"},
+    {"key":"5","label":"📍 آدرس فروشگاه","order":4,"enabled":True,"width":"half"},
+    {"key":"catalog","label":"🛍 محصولات","order":5,"enabled":True,"width":"full"},
+    {"key":"workhours","label":"🕐 ساعت کاری","order":6,"enabled":True,"width":"half"},
+    {"key":"4","label":"📞 پشتیبانی","order":7,"enabled":True,"width":"half"},
+    {"key":"6","label":"🔖 دکمه ذخیره ۱","order":8,"enabled":False,"width":"half"},
+    {"key":"7","label":"🔖 دکمه ذخیره ۲","order":9,"enabled":False,"width":"half"},
+]
+menu_cfg = []
+
+SECTION_NAMES = {"welcome":"🏠 خوش‌آمدگویی",
+                 "catalog":"🛍 محصولات","workhours":"🕐 ساعت کاری",
+                 "1":"🌐 شبکه‌های اجتماعی","2":"🌐 سایت استوک لند",
+                 "3":"💰 شرایط اقساط","4":"📞 پشتیبانی","5":"📍 آدرس فروشگاه",
+                 "6":"🔖 دکمه ذخیره ۱","7":"🔖 دکمه ذخیره ۲"}
+
+# ── state
+responses=None; banners={}; workhours={}; buttons={}; settings={}; stats={}
+
+DEFAULT_WH = {"enabled":True,"schedule":{
+    "0":{"open":True,"shifts":[{"from":"11:00","to":"14:00"},{"from":"17:00","to":"23:00"}]},
+    "1":{"open":True,"shifts":[{"from":"11:00","to":"14:00"},{"from":"17:00","to":"23:00"}]},
+    "2":{"open":True,"shifts":[{"from":"11:00","to":"14:00"},{"from":"17:00","to":"23:00"}]},
+    "3":{"open":True,"shifts":[{"from":"11:00","to":"14:00"},{"from":"17:00","to":"23:00"}]},
+    "4":{"open":True,"shifts":[{"from":"11:00","to":"14:00"},{"from":"17:00","to":"23:00"}]},
+    "5":{"open":True,"shifts":[{"from":"11:00","to":"14:00"},{"from":"17:00","to":"23:00"}]},
+    "6":{"open":True,"shifts":[{"from":"17:00","to":"23:00"}]}},
+    "msg_open":"✅ هم‌اکنون باز است","msg_closed":"🔴 هم‌اکنون بسته است"}
+DEFAULT_SETTINGS = {"notify_new_user":True,"store_open":True}
+DEFAULT_SEC_WH = {k:True for k in SECTION_NAMES}
+
+# ── helpers
+def get_banner(k): banners.setdefault(k,{"file_id":None,"active":False}); return banners[k]
+
+# cache نگاشت URL عکس → file_id تلگرام (ارسال آنی در دفعات بعد)
+_photo_fileids = {}
+_PHOTO_CACHE_MAX = 500
+_photomap_dirty  = False
+
+def _cache_photo(url: str, file_id: str):
+    global _photomap_dirty
+    if len(_photo_fileids) >= _PHOTO_CACHE_MAX:
+        _photo_fileids.pop(next(iter(_photo_fileids)), None)
+    _photo_fileids[url] = file_id
+    _photomap_dirty = True
+
+async def load_photomap():
+    global _photo_fileids
+    data = await _rj(PHOTOMAP_FILE, dict)
+    if isinstance(data, dict): _photo_fileids.update(data)
+    logger.info(f"photomap: {len(_photo_fileids)} آدرس عکس بارگذاری شد")
+
+async def save_photomap():
+    global _photomap_dirty
+    await _wj(PHOTOMAP_FILE, dict(list(_photo_fileids.items())[-_PHOTO_CACHE_MAX:]))
+    _photomap_dirty = False
+def get_sec_btns(k): buttons.setdefault(k,{"enabled":True,"items":[]}); return buttons[k]
+def get_setting(k): return settings.get(k,DEFAULT_SETTINGS.get(k,True))
+
+def is_open():
+    if not get_setting("store_open"): return False
+    if not workhours.get("enabled",True): return True
+    now=datetime.now(IRAN_TZ); j=jdatetime.datetime.fromgregorian(datetime=now)
+    day=workhours.get("schedule",{}).get(str(j.weekday()),{})
+    if not day.get("open",False): return False
+    ns=now.strftime("%H:%M")
+    return any(s["from"]<=ns<=s["to"] for s in day.get("shifts",[]))
+
+def wh_today_block():
+    if not workhours.get("enabled",True): return None
+    now=datetime.now(IRAN_TZ); j=jdatetime.datetime.fromgregorian(datetime=now)
+    wd=str(j.weekday()); day=workhours.get("schedule",{}).get(wd,{})
+    opened=is_open()
+    status=workhours.get("msg_open","✅ باز") if opened else workhours.get("msg_closed","🔴 بسته")
+    oi=["☀️","🌙","🌃","🕯"]; ci=["⚫️"]*4
+    sl=["شیفت اول","شیفت دوم","شیفت سوم","شیفت چهارم"]
+    lines=["━"*15,"🏪 وضعیت فروشگاه",f"📅 امروز {DAY_FA.get(wd,'')}",""]
+    if not day.get("open"): lines.append("❌ امروز تعطیل است")
     else:
-        chat_id = chat_id_or_msg
-        msg_obj = message
+        icons=oi if opened else ci
+        for i,s in enumerate(day.get("shifts",[])):
+            lines.append(f"{icons[i] if i<len(icons) else '🕐'} {sl[i] if i<len(sl) else ''}   {to_fa(s['from'])} — {to_fa(s['to'])}")
+    lines+=["",status,"━"*15]; return "\n".join(lines)
 
-    # product می‌تونه tuple یا sqlite3.Row باشه
-    if hasattr(product, 'keys'):
-        pid = product["id"]
-        category = category or product.get("category") or str(product.get("category_id", ""))
-        title = product["title"]
-        price = product["price"]
-        description = product.get("description")
-        is_active = product.get("is_active", 1)
-        partner_price = product.get("partner_price")
-        daily_lim_c = product.get("daily_limit_customer") or 0
-        daily_lim_p = product.get("daily_limit_partner") or 0
-        if cat_id is None:
-            cat_id = product.get("category_id")
+def wh_full_table():
+    rows=[]
+    for k,name in DAY_FA.items():
+        day=workhours.get("schedule",{}).get(k,{})
+        if not day.get("open"): rows.append(f"❌ {name}: تعطیل")
+        else:
+            sh=" و ".join(f"{to_fa(s['from'])} تا {to_fa(s['to'])}" for s in day.get("shifts",[]))
+            rows.append(f"✅ {name}: {sh}")
+    return "\n".join(rows)
+
+def build_msg(title,content,sec_key):
+    lines=[f"✦ {title}","",content]
+    msg="\n".join(lines)
+    return msg[:4000]+"..." if len(msg)>4000 else msg
+
+def progress_bar(v,t,n=8):
+    if t==0: return "░"*n
+    f=int(n*v/t); return "▓"*f+"░"*(n-f)
+
+_stats_dirty = False
+
+async def record_stat(k):
+    global _stats_dirty
+    stats[k]=stats.get(k,0)+1
+    _stats_dirty=True   # فقط flag — بدون disk write
+
+async def _stats_flush_loop():
+    """هر ۳۰ ثانیه اگر آمار یا photomap تغییر کرده باشد، ذخیره می‌کند."""
+    global _stats_dirty
+    while True:
+        await asyncio.sleep(30)
+        if _stats_dirty: await save_stats(); _stats_dirty=False
+        if _photomap_dirty: await save_photomap()
+
+# ── load/save
+async def _rj(path,default):
+    try:
+        async with aiofiles.open(path,"r",encoding="utf-8") as f: return json.loads(await f.read())
+    except: return default() if callable(default) else default
+
+async def _wj(path,data):
+    tmp=path+".tmp"
+    try:
+        async with aiofiles.open(tmp,"w",encoding="utf-8") as f:
+            await f.write(json.dumps(data,ensure_ascii=False,indent=2))
+        os.replace(tmp,path)   # atomic — اگر crash کند فایل اصلی سالم می‌ماند
+    except Exception as e:
+        logger.error(f"write {path}: {e}")
+        try: os.unlink(tmp)
+        except: pass
+
+async def load_data():
+    global responses
+    responses=await _rj(DATA_FILE,lambda:dict(MENU_ITEMS,welcome="✨ خوش آمدید به ربات استوک لند"))
+async def save_data(): await _wj(DATA_FILE,responses)
+
+async def load_banners():
+    global banners
+    banners=await _rj(BANNER_FILE,dict)
+    # migration: فرمت قدیمی flat (show_on, caption) → فرمت section-based
+    if "show_on" in banners or "caption" in banners:
+        old=banners.copy(); banners={}
+        for k in SECTION_NAMES:
+            if k in old and isinstance(old[k],dict):
+                banners[k]=old[k]
+        logger.info("banner.json: فرمت قدیمی شناسایی و migrate شد")
+        await save_banners()
+    for k in SECTION_NAMES: banners.setdefault(k,{"file_id":None,"active":False})
+async def save_banners(): await _wj(BANNER_FILE,banners)
+
+async def load_workhours():
+    global workhours
+    workhours=await _rj(WORKHOURS_FILE,dict)
+    if not workhours: workhours=dict(DEFAULT_WH); await save_workhours()
+async def save_workhours(): await _wj(WORKHOURS_FILE,workhours)
+
+async def load_buttons():
+    global buttons
+    buttons=await _rj(BUTTONS_FILE,dict)
+    for k in SECTION_NAMES: buttons.setdefault(k,{"enabled":True,"items":[]})
+async def save_buttons(): await _wj(BUTTONS_FILE,buttons)
+
+async def load_menu():
+    global menu_cfg
+    menu_cfg = await _rj(MENU_FILE, list)
+    if not menu_cfg:
+        menu_cfg = [dict(m) for m in DEFAULT_MENU]; await save_menu()
     else:
-        pid, category, title, price, description, is_active = product[0:6]
-        partner_price = product[6] if len(product) > 6 else None
-        daily_lim_c = product[7] if len(product) > 7 else 0
-        daily_lim_p = product[8] if len(product) > 8 else 0
-
-    # تعیین back_cb
-    if cat_id:
-        back_cb = f"cat_{cat_id}"
-    else:
-        back_cb = f"back_list_{category}"
-
-    partner_ok = (user_id is not None) and is_partner_approved(int(user_id))
-    eff_price = partner_price if (partner_ok and partner_price) else price
-
-    # بررسی سقف خرید روزانه
-    if user_id is not None:
-        buyer_type = "partner" if partner_ok else "customer"
-        limit_val = int((daily_lim_p if buyer_type == "partner" else daily_lim_c) or 0)
-        if limit_val > 0:
-            cnt = count_user_product_orders_today(int(user_id), int(pid), buyer_type=buyer_type)
-            if cnt >= limit_val:
-                kb_limit = types.InlineKeyboardMarkup()
-                kb_limit.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data=back_cb))
-                bot.send_message(
-                    chat_id,
-                    f"نام سرویس: <b>{title}</b>\n\n"
-                    f"⛔️ سقف خرید روزانه‌ی این محصول ({limit_val} عدد) برای شما تکمیل شده است.\n"
-                    f"لطفاً فردا دوباره اقدام کنید.",
-                    reply_markup=kb_limit,
-                    parse_mode="HTML",
-                )
-                return
-
-    wallet_balance = get_wallet_balance(user_id) if user_id else 0
-    text = (
-        f"نام سرویس: <b>{title}</b>\n"
-        f"قیمت: <b>{eff_price:,}</b> تومان\n\n"
-        f"{description or 'بدون توضیحات'}"
-    )
-
-    markup = types.InlineKeyboardMarkup()
-
-    if wallet_balance >= eff_price:
-        markup.add(types.InlineKeyboardButton(
-            "💳 پرداخت با کیف پول",
-            callback_data=f"confirm_wallet_{category}_{pid}"
-        ))
-    elif 0 < wallet_balance < eff_price:
-        markup.add(types.InlineKeyboardButton(
-            "💳 پرداخت ترکیبی (کیف پول + درگاه)",
-            callback_data=f"confirm_wallet_{category}_{pid}"
-        ))
-        markup.add(types.InlineKeyboardButton(
-            "🌐 پرداخت کامل از درگاه",
-            callback_data=f"confirm_full_{category}_{pid}"
-        ))
-    else:
-        markup.add(types.InlineKeyboardButton(
-            "🌐 پرداخت از درگاه",
-            callback_data=f"confirm_full_{category}_{pid}"
-        ))
-
-    markup.add(types.InlineKeyboardButton("❌ انصراف", callback_data="cancel_purchase"))
-    markup.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data=back_cb))
-
-    # اطلاع‌رسانی موجودی — فقط برای محصولات معمولی (نه setup)
-    try:
-        from db import count_feed_items, get_product_support_flag as _gpf
-        is_setup = _gpf(int(pid))
-        if not is_setup:
-            avail = count_feed_items(int(pid), delivered=False)
-            if avail == 0:
-                markup.add(types.InlineKeyboardButton(
-                    "🔔 اطلاع بده وقتی موجود شد",
-                    callback_data=f"notify_stock_{pid}"
-                ))
-    except Exception:
-        pass
-
-    bot.send_message(chat_id, text, reply_markup=markup, parse_mode="HTML")
-
-
-
-
-# ================== CLEAN CHAT (DELETE ONLY LAST "DELIVERY" MESSAGE) ==================
-# هدف: فقط پیام تحویل محصول (که شامل اطلاعات/فایل محصول است) پاک شود، نه منوها و پیام‌های عادی.
-LAST_DELIVERY = {}  # chat_id -> message_id
-
-def try_delete_last_delivery(chat_id: int):
-    """Delete the last delivery message we sent to this chat (if any)."""
-    mid = LAST_DELIVERY.get(chat_id)
-    if not mid:
-        return
-    try:
-        bot.delete_message(chat_id, mid)
-    except Exception:
-        pass
-    LAST_DELIVERY.pop(chat_id, None)
-
-def _remember_delivery(msg):
-    try:
-        LAST_DELIVERY[msg.chat.id] = msg.message_id
-    except Exception:
-        pass
-
-
-# ================== PENDING AUTO-DELIVERY QUEUE (WHEN FEED IS EMPTY) ==================
-# هدف: وقتی محصول محصول خالی است، سفارش در صف "pending" ثبت شود و به محض اضافه شدن محصول، خودکار تحویل گردد.
-
-def _db_conn():
-    import sqlite3
-    return sqlite3.connect(DB_FULL_PATH)
-
-def ensure_pending_schema():
-    """Create / migrate pending_deliveries table (best-effort, backward compatible)."""
-    try:
-        conn = _db_conn()
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS pending_deliveries (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                order_id INTEGER UNIQUE,
-                user_id INTEGER,
-                chat_id INTEGER,
-                product_id INTEGER,
-                product_title TEXT,
-                price INTEGER,
-                status TEXT DEFAULT 'pending',
-                feed_id INTEGER,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                delivered_at TEXT
-            );
-            """
-        )
-        # Add missing columns if table existed before (SQLite safe migration)
-        cols = {row[1] for row in conn.execute("PRAGMA table_info(pending_deliveries);").fetchall()}
-        needed = {
-            "order_id": "INTEGER UNIQUE",
-            "user_id": "INTEGER",
-            "chat_id": "INTEGER",
-            "product_id": "INTEGER",
-            "product_title": "TEXT",
-            "price": "INTEGER",
-            "status": "TEXT DEFAULT 'pending'",
-            "feed_id": "INTEGER",
-            "created_at": "TEXT DEFAULT CURRENT_TIMESTAMP",
-            "delivered_at": "TEXT",
-        }
-        for col, decl in needed.items():
-            if col not in cols:
-                conn.execute(f"ALTER TABLE pending_deliveries ADD COLUMN {col} {decl};")
-        conn.commit()
-        conn.close()
-    except Exception:
-        # never block bot start
-        pass
-
-def enqueue_pending_delivery(order_id: int, user_id: int, chat_id: int, product_id: int, title: str, price: int):
-    try:
-        if int(_get_product_chat_enabled(int(product_id))) == 1:
-            return False
-    except Exception:
-        pass
-    ensure_pending_schema()
-    try:
-        conn = _db_conn()
-        conn.execute(
-            """
-            INSERT OR REPLACE INTO pending_deliveries
-                (order_id, user_id, chat_id, product_id, product_title, price, status, feed_id)
-            VALUES (?, ?, ?, ?, ?, ?, 'pending', NULL);
-            """,
-            (int(order_id), int(user_id), int(chat_id), int(product_id), str(title), int(price)),
-        )
-        conn.commit()
-        conn.close()
-    except Exception:
-        pass
-
-def _mark_pending_delivered(order_id: int, feed_id: int):
-    try:
-        conn = _db_conn()
-        conn.execute(
-            "UPDATE pending_deliveries SET status='delivered', feed_id=?, delivered_at=CURRENT_TIMESTAMP WHERE order_id=?;",
-            (int(feed_id), int(order_id)),
-        )
-        conn.commit()
-        conn.close()
-    except Exception:
-        pass
-
-def _send_delivery_to_user(chat_id: int, order_id: int, pid: int, title: str, eff_price: int, feed_id: int, feed_data: str):
-    delivery_text = (
-        "✅ <b>محصول شما آماده شد</b>\n\n"
-        f"Order ID: <b>#{order_id}</b>\n"
-        f"محصول: <b>{html.escape(str(title))}</b> (#{pid})\n"
-        f"Feed ID: <b>{feed_id}</b>\n\n"
-        f"<code>{html.escape(str(feed_data))}</code>"
-    )
-    try_delete_last_delivery(chat_id)
-    _delivery_msg = bot.send_message(chat_id, delivery_text, parse_mode="HTML")
-    _remember_delivery(_delivery_msg)
-
-    # ذخیره دائمی پیام تحویل برای امکان «برگشت» از پنل
-    try:
-        import sqlite3 as _sq3
-        from datetime import datetime as _dt2
-        _c = _sq3.connect(DB_FULL_PATH)
-        _c.execute(
-            "INSERT OR REPLACE INTO delivery_messages (feed_id, order_id, chat_id, message_id, created_at) "
-            "VALUES (?,?,?,?,?);",
-            (int(feed_id), int(order_id), int(chat_id), int(_delivery_msg.message_id), _dt2.utcnow().isoformat())
-        )
-        _c.commit()
-        _c.close()
-    except Exception as _ex:
-        logger.error("delivery_messages insert failed: %s", _ex)
-
-    # ذخیره feed_id در orders برای برگشت
-    try:
-        from db import order_set_feed_id
-        order_set_feed_id(int(order_id), int(feed_id))
-    except Exception:
-        pass
-
-def try_dispatch_pending_for_product(product_id: int, limit: int = 50) -> int:
-    """
-    Try to dispatch pending orders for a product using available feed items.
-    Returns number of dispatched orders.
-    """
-    try:
-        if int(_get_product_chat_enabled(int(product_id))) == 1:
-            return 0
-    except Exception:
-        pass
-    ensure_pending_schema()
-    dispatched = 0
-    try:
-        conn = _db_conn()
-        rows = conn.execute(
-            """
-            SELECT order_id, user_id, chat_id, product_id, product_title, COALESCE(price,0)
-            FROM pending_deliveries
-            WHERE product_id=? AND status='pending'
-            ORDER BY id ASC
-            LIMIT ?;
-            """,
-            (int(product_id), int(limit)),
-        ).fetchall()
-        conn.close()
-    except Exception:
-        rows = []
-
-    for order_id, user_id, chat_id, pid, title, price in rows:
-        feed_item = claim_next_feed_item(int(pid))
-        if not feed_item:
-            break
-
-        try:
-            feed_id, feed_data = feed_item
-        except Exception:
-            try:
-                feed_id, feed_data, _ = feed_item
-            except Exception:
-                feed_id, feed_data = (None, None)
-
-        if feed_id is None:
-            break
-
-        try:
-            _send_delivery_to_user(int(chat_id), int(order_id), int(pid), str(title), int(price), int(feed_id), str(feed_data))
-        except Exception:
-            # if delivery fails, revert delivered flag back? keep pending so it can be retried.
-            try:
-                # mark feed item as undelivered (rollback best-effort)
-                set_feed_item_delivered(int(feed_id), 0)
-            except Exception:
-                pass
-            continue
-
-        _mark_pending_delivered(int(order_id), int(feed_id))
-        dispatched += 1
-
-        # notify admin
-        try:
-            bot.send_message(
-                ADMIN_ID,
-                "📤 <b>تحویل خودکار از صف</b>\n\n"
-                f"Order ID: #{int(order_id)}\n"
-                f"User ID: <code>{int(user_id)}</code>\n"
-                f"محصول: {html.escape(str(title))} (#{int(pid)})\n"
-                f"Feed ID: {int(feed_id)}",
-                parse_mode="HTML",
-            )
-        except Exception:
-            pass
-
-        # low stock alert check (reuse existing logic)
-        try:
-            total_f, remaining_f, delivered_f = get_feed_stats(int(pid))
-            threshold_f, last_f = get_feed_alert_setting(int(pid))
-            if remaining_f <= threshold_f and (last_f is None or int(last_f) != int(remaining_f)):
-                bot.send_message(
-                    ADMIN_ID,
-                    "⚠️ <b>هشدار کمبود موجودی</b>\n\n"
-                    f"محصول: {html.escape(str(title))} (#{int(pid)})\n"
-                    f"باقی‌مانده: <b>{remaining_f}</b> از <b>{total_f}</b>\n"
-                    f"آستانه: <b>{threshold_f}</b>",
-                    parse_mode="HTML",
-                )
-                set_feed_alert_last_notified(int(pid), remaining_f)
-        except Exception:
-            pass
-
-    return dispatched
-
-
-# ================== DELIVERY MESSAGE TRACKING (PERSISTENT) ==================
-# هدف: وقتی آیتم محصول «تحویل» شد، پیام تحویل همان آیتم در چت مشتری ذخیره شود تا با «برگشت» از پنل ادمین همان پیام پاک شود.
-# نکته: Order ID با Feed ID فرق دارد. برای جلوگیری از سردرگمی، ارتباط feed_id <-> order_id را هم ذخیره می‌کنیم.
-def _ensure_delivery_table():
-    try:
-        import sqlite3
-        _conn = sqlite3.connect(DB_FULL_PATH)
-        _conn.execute(
-            """CREATE TABLE IF NOT EXISTS delivery_messages (
-                feed_id INTEGER PRIMARY KEY,
-                order_id INTEGER,
-                chat_id INTEGER NOT NULL,
-                message_id INTEGER NOT NULL,
-                created_at TEXT NOT NULL
-            );"""
-        )
-
-        # مهاجرت نرم: اگر جدول قبلاً ساخته شده و ستون order_id ندارد، اضافه‌اش کن.
-        cols = [r[1] for r in _conn.execute("PRAGMA table_info(delivery_messages);").fetchall()]
-        if "order_id" not in cols:
-            try:
-                _conn.execute("ALTER TABLE delivery_messages ADD COLUMN order_id INTEGER;")
-            except Exception:
-                pass
-
-        _conn.commit()
-        _conn.close()
-    except Exception:
-        pass
-
-
-
-# ================== PRODUCT CHAT (TICKET) ==================
-# قابلیت چت برای هر محصول (اختیاری). اگر برای محصول فعال شود، بعد از خرید/تحویل یک تیکت باز می‌شود
-# و تا زمانی که کاربر یا ادمین آن را ببندند، پیام‌های کاربر به ادمین و پاسخ ادمین به کاربر ارسال می‌شود.
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# TICKET SYSTEM v2 — طراحی از صفر
-# ═══════════════════════════════════════════════════════════════════════════
-
-from db import (
-    ticket_ensure_schema, ticket_create, ticket_get, ticket_get_open_support,
-    ticket_get_open_product, ticket_add_message, ticket_user_sent,
-    ticket_admin_replied, ticket_close, ticket_get_messages,
-    ticket_count_waiting, ticket_get_all, TICKET_MAX_USER_MSGS,
-)
-
-BOT_BASE_URL = os.getenv("BOT_WEBHOOK_URL", "").rstrip("/")
-RAILWAY_PANEL = "https://stockland-bot-production.up.railway.app/admin"
-
-
-def _get_product_chat_enabled(product_id: int) -> int:
-    """چک chat_enabled برای محصول."""
-    try:
-        import sqlite3 as _sq3
-        _c = _sq3.connect(DB_FULL_PATH)
-        row = _c.execute("SELECT chat_enabled FROM products WHERE id=? LIMIT 1;", (int(product_id),)).fetchone()
-        _c.close()
-        return int(row[0] or 0) if row else 0
-    except Exception:
-        return 0
-
-
-def _set_product_chat_enabled(product_id: int, enabled: int) -> None:
-    try:
-        import sqlite3 as _sq3
-        _c = _sq3.connect(DB_FULL_PATH)
-        _c.execute("UPDATE products SET chat_enabled=? WHERE id=?;", (int(enabled), int(product_id)))
-        _c.commit()
-        _c.close()
-    except Exception:
-        pass
-
-
-def _tg_send_to_user(user_id: int, text: str, reply_markup=None, parse_mode="HTML") -> bool:
-    """ارسال پیام به کاربر از طریق ربات."""
-    try:
-        bot.send_message(int(user_id), text, reply_markup=reply_markup, parse_mode=parse_mode)
-        return True
-    except Exception as ex:
-        logger.error("_tg_send_to_user(%s) failed: %s", user_id, ex)
-        return False
-
-
-# ─── Keyboards ──────────────────────────────────────────────────────────────
-
-def _ticket_user_kb(ticket_id: int, has_messages: bool = False) -> types.InlineKeyboardMarkup:
-    """هیچ دکمه‌ای نمایش داده نمی‌شه — جریان از طریق پیام‌های متنی مدیریت می‌شه."""
-    return types.InlineKeyboardMarkup()
-
-
-def _is_real_message(msg_text: str, content_type: str) -> bool:
-    """آیا این پیام واقعی و معتبر است؟"""
-    # رسانه‌ها بدون متن هم معتبرن
-    if content_type in ("photo", "document", "voice", "video", "audio"):
-        return True
-    if content_type != "text":
-        return False  # استیکر، animation و... قبول نیست
-    if not msg_text or not msg_text.strip():
-        return False
-    text = msg_text.strip()
-    if len(text) <= 2:
-        return False
-    import unicodedata
-    non_emoji = [c for c in text if unicodedata.category(c) not in ('So','Sk','Sm','Sc')]
-    if len("".join(non_emoji).strip()) <= 1:
-        return False
-    return True
-
-
-def _ticket_has_user_message(ticket_id: int) -> bool:
-    try:
-        from db import _get_connection
-        conn = _get_connection()
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT COUNT(*) FROM ticket_messages WHERE ticket_id=? AND sender='user';",
-            (ticket_id,)
-        )
-        count = cur.fetchone()[0]
-        conn.close()
-        return count > 0
-    except Exception:
-        return False
-
-
-def _ticket_real_msg_count(ticket_id: int) -> int:
-    """تعداد پیام‌های واقعی کاربر در تیکت."""
-    try:
-        from db import _get_connection
-        conn = _get_connection()
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT COUNT(*) FROM ticket_messages WHERE ticket_id=? AND sender='user';",
-            (ticket_id,)
-        )
-        count = cur.fetchone()[0]
-        conn.close()
-        return count
-    except Exception:
-        return 0
-
-
-TICKET_MAX_USER_MSGS = 3
-
-
-def _ticket_admin_kb(ticket_id: int, user_id: int) -> types.InlineKeyboardMarkup:
-    kb = types.InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        types.InlineKeyboardButton("✏️ پاسخ از تلگرام", callback_data=f"ticket_v2_reply_{ticket_id}_{user_id}"),
-        types.InlineKeyboardButton("🔒 بستن تیکت", callback_data=f"ticket_v2_admin_close_{ticket_id}"),
-    )
-    kb.add(types.InlineKeyboardButton("🌐 پاسخ از پنل", url=f"{RAILWAY_PANEL}/tickets/{ticket_id}"))
-    return kb
-
-
-# ─── Support Ticket Flow (کاربر) ─────────────────────────────────────────────
-
-def _support_ticket_start(chat_id: int, user_id: int) -> None:
-    """ایجاد یا ادامه تیکت پشتیبانی — کاربر مستقیم وارد گفتگو می‌شه."""
-    ticket_ensure_schema()
-    existing = ticket_get_open_support(user_id)
-    if existing:
-        ticket_id = existing["id"]
-        user_states[user_id] = {"mode": "ticket_v2", "ticket_id": ticket_id}
-        has_msg = _ticket_has_user_message(ticket_id)
-        kb = _ticket_user_kb(ticket_id, has_messages=has_msg)
-        bot.send_message(
-            chat_id,
-            f"💬 ادامه مکالمه تیکت <b>#{ticket_id}</b>\n\n"
-            "پیام خود را ارسال کنید، پشتیبانی در اولین فرصت پاسخ خواهد داد.",
-            reply_markup=kb, parse_mode="HTML"
-        )
-    else:
-        ticket_id = ticket_create(user_id, type_="support")
-        user_states[user_id] = {"mode": "ticket_v2", "ticket_id": ticket_id}
-        # ابتدا بدون دکمه پایان — فقط راهنما
-        kb = _ticket_user_kb(ticket_id, has_messages=False)
-        bot.send_message(
-            chat_id,
-            "💬 <b>پشتیبانی آنلاین</b>\n\n"
-            "پیام خود را ارسال کنید، پشتیبانی در اولین فرصت پاسخ خواهد داد.\n\n"
-            "⚠️ لطفاً مشکل خود را در یک پیام کامل توضیح دهید.",
-            reply_markup=kb, parse_mode="HTML"
-        )
-
-
-def _is_menu_or_system_button(text: str) -> bool:
-    """آیا این پیام یک دکمه/دستور است که باید از چت خارج کند؟"""
-    if not text:
-        return False
-    text = text.strip()
-
-    # ۱. هر دستوری که با / شروع شود (/start, /help, ...)
-    if text.startswith("/"):
-        return True
-
-    # ۲. دکمه‌های سیستمی منوی اصلی
-    try:
-        system_keys = (
-            "MAIN_BTN_MY_ORDERS", "MAIN_BTN_WALLET", "MAIN_BTN_PARTNER_REQUEST",
-            "MAIN_BTN_PARTNER_PANEL", "MAIN_BTN_GUIDE", "MAIN_BTN_SUPPORT",
-            "MAIN_BTN_OTHER_PRODUCTS", "MAIN_BTN_BUY_APPLE_ID",
-        )
-        for key in system_keys:
-            val = t(key, DEFAULT_UI_TEXTS.get(key, ""))
-            if val and text == val:
-                return True
-    except Exception:
-        pass
-
-    # ۳. دکمه‌های دسته‌بندی (داینامیک)
-    try:
-        from db import get_root_categories
-        for cat in get_root_categories(active_only=True):
-            emoji = (cat["emoji"] or "").strip()
-            label = f"{emoji} {cat['name']}".strip() if emoji else cat["name"]
-            if text == label:
-                return True
-    except Exception:
-        pass
-
-    # ۴. دکمه‌های ثابت شناخته‌شده
-    known_buttons = (
-        "🔙 بازگشت", "🔙 بازگشت به منو", "❌ انصراف", "🏠 منوی اصلی",
-        "بازگشت", "انصراف", "منوی اصلی", "🛒 خرید", "📜 قوانین",
-    )
-    if text in known_buttons:
-        return True
-
-    return False
-
-
-def _exit_chat_if_needed(message) -> bool:
-    """
-    استاندارد سراسری: اگر کاربر وسط چت/تیکت کاری غیر از پیام‌دادن کرد،
-    خودکار از حالت چت خارج شود و پیام در تیکت ثبت نشود.
-    خروجی: True اگر از چت خارج شد (یعنی نباید ادامه داد).
-    """
-    uid = message.from_user.id
-    st  = user_states.get(uid, {})
-    if st.get("mode") != "ticket_v2":
-        return False  # اصلاً در حالت چت نیست
-
-    txt = message.text or ""
-
-    # حالت ۱: دکمه منو یا دستور → خروج + انتقال به handler مربوطه
-    if message.content_type == "text" and _is_menu_or_system_button(txt):
-        clear_user_state(uid)
-        try:
-            bot.process_new_messages([message])
-        except Exception:
-            pass
-        return True
-
-    return False
-
-
-def _ticket_v2_handle_user_message(message) -> None:
-    """handler اصلی پیام کاربر به تیکت."""
-    uid = message.from_user.id
-
-    # ── استاندارد سراسری: اگر کاری غیر چت کرد، خودکار خارج شو ──────────────
-    if _exit_chat_if_needed(message):
-        return  # از چت خارج شد، پیام در تیکت ثبت نشد
-
-    st = user_states.get(uid, {})
-    ticket_id = st.get("ticket_id")
-
-    if not ticket_id:
-        clear_user_state(uid)
-        bot.send_message(message.chat.id, "مکالمه بسته شده است.", reply_markup=main_menu(user_id=uid))
-        return
-
-    ticket = ticket_get(int(ticket_id))
-    if not ticket or ticket["status"] == "closed":
-        clear_user_state(uid)
-        bot.send_message(message.chat.id, "این مکالمه بسته شده است.", reply_markup=main_menu(user_id=uid))
-        return
-
-    # ─── Anti-spam: سقف ۳ پیام واقعی متوالی ────────────────────────────────
-    cur_count = int(ticket["user_msg_count"] or 0)
-    if cur_count >= TICKET_MAX_USER_MSGS:
-        bot.reply_to(message,
-            f"⏳ لطفاً منتظر پاسخ پشتیبانی بمانید.\n"
-            "پس از پاسخ، می‌توانید ادامه دهید.")
-        return
-
-    # ─── بررسی واقعی بودن پیام ───────────────────────────────────────────
-    # متن یا caption (برای عکس/ویدیو)
-    txt = (message.text or message.caption or "").strip()
-    if not _is_real_message(txt, message.content_type):
-        bot.reply_to(message,
-            "لطفاً پیام متنی یا عکس/فایل معتبر ارسال کنید.\n"
-            "(استیکر و ایموجی تنها قبول نمی‌شود)")
-        return
-
-    media = message.content_type if message.content_type != "text" else None
-    file_id = None
-    if media:
-        try:
-            if message.content_type == "photo":
-                file_id = message.photo[-1].file_id
-            elif message.content_type == "document":
-                file_id = message.document.file_id
-            elif message.content_type == "video":
-                file_id = message.video.file_id
-            elif message.content_type == "audio":
-                file_id = message.audio.file_id
-            elif message.content_type == "voice":
-                file_id = message.voice.file_id
-        except Exception:
-            pass
-
-    ticket_add_message(
-        int(ticket_id), "user",
-        txt or f"[{message.content_type}]",
-        media_type=media,
-        media_file_id=file_id
-    )
-    new_count = ticket_user_sent(int(ticket_id))
-
-    # بعد از اولین پیام — تأیید
-    if new_count == 1:
-        bot.send_message(message.chat.id,
-            "✅ پیام شما دریافت شد.\n"
-            "پشتیبانی در اولین فرصت پاسخ خواهد داد. 🙏\n\n"
-            f"({TICKET_MAX_USER_MSGS - new_count} پیام دیگر می‌توانید ارسال کنید)"
-        )
-
-    elif new_count >= TICKET_MAX_USER_MSGS:
-        # بستن سهمیه — تا پاسخ ادمین
-        user_states.pop(uid, None)
-        bot.send_message(message.chat.id,
-            "✅ پیام شما ثبت شد.\n\n"
-            "🔒 <b>گفتگو در انتظار پاسخ پشتیبانی است.</b>\n"
-            "پس از پاسخ پشتیبانی، می‌توانید ادامه دهید.",
-            parse_mode="HTML"
-        )
-    else:
-        bot.send_message(message.chat.id,
-            f"✅ پیام دریافت شد. ({TICKET_MAX_USER_MSGS - new_count} پیام دیگر)"
-        )
-
-    # ─── نوتیف به ادمین — فقط اولین پیام از هر batch ─────────────────────
-    if new_count == 1:
-        # تشخیص نوع تیکت برای نمایش بهتر به ادمین
-        try:
-            _tk = ticket_get(int(ticket_id))
-            _ttype = (_tk["type"] if _tk and "type" in _tk.keys() else "support") or "support"
-        except Exception:
-            _ttype = "support"
-        type_label = {
-            "support": "🔵 پشتیبانی",
-            "product_setup": "🟢 راه‌اندازی محصول",
-            "partner_support": "🤝 همکاران",
-        }.get(_ttype, "🔵 پشتیبانی")
-
-        panel_url = f"https://panel.stland.ir/admin/tickets/{ticket_id}"
-        notif_kb = types.InlineKeyboardMarkup()
-        notif_kb.add(types.InlineKeyboardButton("🌐 مشاهده در پنل", url=panel_url))
-        try:
-            bot.send_message(ADMIN_ID,
-                f"🔔 پیام جدید — {type_label}\n"
-                f"تیکت <b>#{ticket_id}</b> | کاربر: <code>{uid}</code>",
-                reply_markup=notif_kb, parse_mode="HTML")
-        except Exception as ex:
-            logger.error("Admin notification failed: %s", ex)
-
-
-# ─── Handler پیام‌های متنی کاربر در حالت تیکت ────────────────────────────────
-
-@bot.message_handler(
-    func=lambda m: (
-        not ensure_admin(m.from_user.id) or
-        user_states.get(m.from_user.id, {}).get("mode") == "ticket_v2"
-    ) and user_states.get(m.from_user.id, {}).get("mode") == "ticket_v2"
-)
-def _handle_ticket_v2_text(message):
-    _ticket_v2_handle_user_message(message)
-
-
-@bot.message_handler(
-    func=lambda m: user_states.get(m.from_user.id, {}).get("mode") == "ticket_v2",
-    content_types=["photo", "document", "video", "audio", "voice", "sticker"]
-)
-def _handle_ticket_v2_media(message):
-    _ticket_v2_handle_user_message(message)
-
-
-# ─── /start و /admin ──────────────────────────────────────────────────────
-
-@bot.message_handler(commands=["admin", "panel"])
-def handle_admin_command(message):
-    uid = message.from_user.id
-    if not ensure_admin(uid):
-        return
-    panel_url = "https://stockland-bot-production.up.railway.app/admin/"
-    kb = types.InlineKeyboardMarkup(row_width=1)
-    kb.add(
-        types.InlineKeyboardButton("🌐 ورود به پنل مدیریت", url=panel_url),
-        types.InlineKeyboardButton("🎫 تیکت‌ها", url=panel_url + "tickets"),
-        types.InlineKeyboardButton("📦 محصولات", url=panel_url + "products"),
-        types.InlineKeyboardButton("🗃 موجودی", url=panel_url + "feed"),
-        types.InlineKeyboardButton("🧾 سفارش‌ها", url=panel_url + "orders"),
-    )
-    bot.send_message(uid, "🛍 پنل مدیریت استوک لند:", reply_markup=kb)
-
-
-@bot.message_handler(commands=["start"])
-def handle_start(message):
-    init_db(DB_PATH)
-    ticket_ensure_schema()
-
-    uid       = message.from_user.id
-    username  = message.from_user.username
-    full_name = ((message.from_user.first_name or "") + " " + (message.from_user.last_name or "")).strip()
-
-    try:
-        upsert_user(uid, username, full_name)
-    except Exception:
-        pass
-
-    # بررسی لینک معرفی: /start ref_12345 یا /start STLAND-4521
-    args = message.text.split() if message.text else []
-    if len(args) > 1:
-        arg = args[1]
-        if arg.startswith("ref_"):
-            # سیستم معرفی کاربران عادی
-            try:
-                referrer_id = int(arg[4:])
-                if referrer_id != uid:
-                    from db import register_referral, get_referral_settings, ensure_referral_schema
-                    ensure_referral_schema()
-                    settings = get_referral_settings()
-                    if settings.get("is_active"):
-                        register_referral(referrer_id, uid)
-            except Exception:
-                pass
-
-
-    text = tf("MSG_WELCOME", name=full_name or "دوست عزیز")
-    bot.send_message(message.chat.id, text, reply_markup=main_menu(user_id=uid), parse_mode="HTML")
-
-
-
-@bot.message_handler(commands=["referral", "invite"])
-def handle_referral_cmd(message):
-    uid = message.from_user.id
-    from db import get_referral_stats, get_referral_settings, ensure_referral_schema
-    ensure_referral_schema()
-    settings = get_referral_settings()
-    if not settings.get("is_active"):
-        bot.send_message(message.chat.id, "❌ سیستم معرفی فعلاً غیرفعال است.")
-        return
-    stats    = get_referral_stats(uid)
-    bot_info = bot.get_me()
-    link     = f"https://t.me/{bot_info.username}?start=ref_{uid}"
-    bot.send_message(message.chat.id,
-        f"🔗 <b>لینک معرفی شما:</b>\n<code>{link}</code>\n\n"
-        f"👥 معرفی‌شدگان: <b>{stats['total']}</b>\n"
-        f"✅ پرداخت‌شده: <b>{stats['rewarded']}</b>\n"
-        f"💰 کل درآمد: <b>{stats['earned']:,}</b> تومان\n\n"
-        f"📌 به ازای هر خرید اول دوستی که معرفی می‌کنید "
-        f"<b>{settings.get('reward_amount',5000):,}</b> تومان به کیف‌پول شما اضافه می‌شود.",
-        parse_mode="HTML"
-    )
-
-
-
-
-
-def _display_order_no(order_id) -> int | None:
-    """شماره نمایشی سفارش — فعلاً همان ID."""
-    try:
-        return int(order_id)
-    except Exception:
-        return None
-
-
-
-
-
-def format_price(amount):
-    try:
-        amount = int(amount)
-    except Exception:
-        return str(amount)
-    return f"{amount:,} تومان"
-
-
-def admin_partner_requests_menu():
-    kb = types.InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        types.InlineKeyboardButton("📥 در انتظار", callback_data="admin_partner_list_pending"),
-        types.InlineKeyboardButton("✅ تایید شده", callback_data="admin_partner_list_approved"),
-        types.InlineKeyboardButton("❌ رد شده", callback_data="admin_partner_list_rejected"),
-        types.InlineKeyboardButton("🔍 جستجو", callback_data="admin_partner_search"),
-        types.InlineKeyboardButton("⬅️ بازگشت", callback_data="admin_back"),
-    )
-    return kb
-
-
-def send_partner_list(chat_id: int, status: str | None = None, query: str | None = None):
-    rows = list_partner_requests(status=status, query=query, limit=50, offset=0)
-
-    def h(x):
-        return html.escape(str(x)) if x is not None else "-"
-
-    title_parts = []
-    if status:
-        title_parts.append({"pending": "در انتظار", "approved": "تایید شده", "rejected": "رد شده"}.get(status, status))
-    else:
-        title_parts.append("همه")
-    if query:
-        title_parts.append(f"جستجو: {h(query)}")
-
-    bot.send_message(
-        chat_id,
-        f"🤝 لیست درخواست‌های همکار ({' | '.join(title_parts)})\nنتیجه: {len(rows)}",
-        reply_markup=admin_partner_requests_menu(),
-    )
-    if not rows:
-        return
-
-    for _id, tg_uid, phone, username, full_name, city, shop_name, st, created_at, approved_at in rows:
-        lines = [
-            "📌 درخواست نمایندگی",
-            f"User ID: {h(tg_uid)}",
-            f"Username: @{h(username) if username else '-'}",
-            f"Name: {h(full_name)}",
-            f"Phone: {h(phone)}",
-            f"City: {h(city)}",
-            f"Shop: {h(shop_name)}",
-            f"Status: {h(st)}",
-            f"Created: {h(created_at)}",
-        ]
-        if approved_at:
-            lines.append(f"Approved: {h(approved_at)}")
-        txt = "\n".join(lines)
-
-        kb = types.InlineKeyboardMarkup(row_width=3)
-        kb.add(types.InlineKeyboardButton("✏️ ویرایش", callback_data=f"admin_partner_edit_{tg_uid}"))
-        if st == "pending":
-            kb.add(
-                types.InlineKeyboardButton("✅ تایید", callback_data=f"admin_partner_approve_{tg_uid}"),
-                types.InlineKeyboardButton("❌ رد", callback_data=f"admin_partner_reject_{tg_uid}"),
-            )
-        bot.send_message(chat_id, txt, reply_markup=kb)
-
-
-def safe_int(text):
-    try:
-        return int(str(text).strip())
-    except Exception:
-        return None
-
-
-def parse_feed_bulk_items(raw: str) -> list[str]:
-    """Parse admin bulk feed input."""
-    raw = raw or ""
-    lines = raw.splitlines()
-    delim_re = re.compile(r"^\s*\*{3,}\s*$")
-
-    if any(delim_re.match(ln) for ln in lines):
-        blocks: list[list[str]] = []
-        cur: list[str] = []
-        for ln in lines:
-            if delim_re.match(ln):
-                blk = "\n".join(cur).strip()
-                if blk:
-                    blocks.append([blk])
-                cur = []
+        # اطمینان از وجود همه کلیدها (اگر نسخه قدیمی بود)
+        existing = {m["key"] for m in menu_cfg}
+        for d in DEFAULT_MENU:
+            if d["key"] not in existing: menu_cfg.append(dict(d))
+        for m in menu_cfg:
+            m.setdefault("width","half")
+
+async def save_menu(): await _wj(MENU_FILE, menu_cfg)
+
+async def reset_menu():
+    global menu_cfg
+    menu_cfg=[dict(m) for m in DEFAULT_MENU]
+    await save_menu()
+
+def menu_sorted():
+    """آیتم‌های منو مرتب‌شده بر اساس order."""
+    return sorted(menu_cfg, key=lambda m: m.get("order", 99))
+
+def menu_item(key):
+    return next((m for m in menu_cfg if m["key"] == key), None)
+
+def menu_row_partner(key):
+    """اگر این دکمه half باشد و در یک ردیف با دکمه half دیگری جفت شده،
+    کلید جفتش را برمی‌گرداند؛ وگرنه None. (فقط دکمه‌های فعال)"""
+    m = menu_item(key)
+    if not m or m.get("width","half")!="half" or not m.get("enabled",True): return None
+    items=[x for x in menu_sorted() if x.get("enabled",True)]
+    # شبیه‌سازی جفت‌سازی main_menu
+    pending=None
+    for x in items:
+        if x.get("width","half")=="full":
+            pending=None
+        else:
+            if pending:
+                if pending["key"]==key: return x["key"]
+                if x["key"]==key: return pending["key"]
+                pending=None
             else:
-                cur.append(ln.rstrip("\n"))
-        blk = "\n".join(cur).strip()
-        if blk:
-            blocks.append([blk])
-        return [b[0] for b in blocks]
+                pending=x
+    return None
 
-    return [ln.strip() for ln in lines if ln.strip()]
+async def load_settings():
+    global settings
+    settings=await _rj(SETTINGS_FILE,dict)
+    if not settings:
+        settings=dict(DEFAULT_SETTINGS); settings["section_workhours"]=dict(DEFAULT_SEC_WH)
+        await save_settings()
+async def save_settings(): await _wj(SETTINGS_FILE,settings)
+async def load_stats():
+    global stats; stats=await _rj(STATS_FILE,dict)
+async def save_stats(): await _wj(STATS_FILE,stats)
 
+# ── database
+db=None
 
-# ========= WALLET / ZARINPAL =========
-
-
-def can_submit_partner_request(tg_user_id: int, phone: str | None = None):
-    """سیاست درخواست نمایندگی (One-time only)"""
-    if phone:
-        try:
-            row_p = get_partner_by_phone(phone)
-        except Exception as e:
-            logging.exception("get_partner_by_phone failed: %s", e)
-            row_p = None
-        if row_p:
-            status = (row_p[3] or "").strip().lower()
-            if status == "approved":
-                return False, "این شماره قبلاً به عنوان همکار تایید شده است و امکان ارسال درخواست جدید ندارد."
-            if status == "pending":
-                return False, "برای این شماره قبلاً درخواست ثبت شده و در انتظار بررسی ادمین است."
-            if status == "rejected":
-                return False, "برای این شماره قبلاً درخواست رد شده است. برای بررسی مجدد با پشتیبانی تماس بگیرید."
-            return False, "برای این شماره قبلاً درخواست ثبت شده است."
-
-    try:
-        row_u = get_partner_by_user_id(tg_user_id)
+async def safe_edit(msg,text,**kw):
+    # اگر پیام عکس/کپشن دارد، edit_text کار نمی‌کند → پیام را حذف و پیام متنی جدید بفرست
+    if getattr(msg,"photo",None) or getattr(msg,"caption",None) is not None:
+        try: await msg.delete()
+        except: pass
+        try: await msg.reply_text(text,**kw); return
+        except Exception as e: logger.error(f"safe_edit(photo): {e}"); return
+    try: await msg.edit_text(text,**kw)
     except Exception as e:
-        logging.exception("get_partner_by_user_id failed: %s", e)
-        row_u = None
+        if "not modified" in str(e).lower(): return
+        try: await msg.reply_text(text,**kw)
+        except: logger.error(f"safe_edit: {e}")
 
-    if row_u:
-        status = (row_u[3] or "").strip().lower()
-        if status == "approved":
-            return False, "شما قبلاً به عنوان همکار تایید شده‌اید و امکان ارسال درخواست جدید ندارید."
-        if status == "pending":
-            return False, "درخواست نمایندگی شما قبلاً ثبت شده و در انتظار بررسی ادمین است."
-        if status == "rejected":
-            return False, "درخواست شما قبلاً رد شده است. برای بررسی مجدد با پشتیبانی تماس بگیرید."
-        return False, "شما قبلاً درخواست نمایندگی ثبت کرده‌اید."
+async def init_db():
+    global db
+    db=await aiosqlite.connect(DB_FILE)
+    # بهینه‌سازی SQLite — ایمن و سریع‌تر
+    await db.execute("PRAGMA journal_mode=WAL")
+    await db.execute("PRAGMA synchronous=NORMAL")   # ایمن با WAL، سریع‌تر از FULL
+    await db.execute("PRAGMA cache_size=-8000")     # ۸ مگابایت cache در RAM
+    await db.execute("PRAGMA temp_store=MEMORY")    # عملیات موقت در RAM
+    await db.executescript("""
+        CREATE TABLE IF NOT EXISTS users(
+            user_id INTEGER PRIMARY KEY,username TEXT,first_name TEXT,
+            joined_at TEXT,last_seen TEXT,is_blocked INTEGER DEFAULT 0);
+        CREATE TABLE IF NOT EXISTS requests(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER,
+            username TEXT,first_name TEXT,phone TEXT,
+            product_id INTEGER,product_name TEXT,
+            status TEXT DEFAULT 'new',created_at TEXT);
+        CREATE TABLE IF NOT EXISTS categories(
+            id INTEGER PRIMARY KEY,name TEXT,icon TEXT,
+            parent_id INTEGER,is_active INTEGER DEFAULT 1);
+        CREATE TABLE IF NOT EXISTS products(
+            id INTEGER PRIMARY KEY,category_id INTEGER,name TEXT,
+            price TEXT,description TEXT,photo_id TEXT,site_url TEXT,
+            is_active INTEGER DEFAULT 1,created_at TEXT);
+        CREATE INDEX IF NOT EXISTS idx_ls ON users(last_seen);
+        CREATE INDEX IF NOT EXISTS idx_req_uid ON requests(user_id,product_id,created_at);
+        CREATE INDEX IF NOT EXISTS idx_req_st ON requests(status);
+    """)
+    for sql in ["ALTER TABLE users ADD COLUMN is_blocked INTEGER DEFAULT 0"]:
+        try: await db.execute(sql)
+        except: pass
+    await db.commit()
 
-    return True, None
+_seen_uids: dict = {}   # uid → زمان آخرین save_user
+_SEEN_TTL  = 300        # 5 دقیقه — اگر اخیراً ذخیره شده، skip کن
 
-   #============== رفع محدودیت نام وارد کردن محصول =========
+async def save_user(u):
+    now_ts=time.time()
+    if u.id in _seen_uids and now_ts-_seen_uids[u.id]<_SEEN_TTL: return
+    now=gregorian_now()
+    await db.execute("INSERT OR IGNORE INTO users VALUES(?,?,?,?,?,0)",
+        (u.id,u.username or"",u.first_name or"",now,now))
+    await db.execute("UPDATE users SET username=?,first_name=?,last_seen=? WHERE user_id=?",
+        (u.username or"",u.first_name or"",now,u.id))
+    await db.commit()
+    _seen_uids[u.id]=now_ts
 
-def _make_service_key(title: str) -> str:
-    """
-    تولید کلید سرویس بدون محدودیت خاص.
-    فقط فاصله حذف می‌شود و طول محدود می‌شود.
-    """
-    t = (title or "").strip()
+async def get_all_uids():
+    async with db.execute("SELECT user_id FROM users WHERE is_blocked=0") as c: return[r[0] for r in await c.fetchall()]
 
-    if not t:
-        return "svc_" + "".join(random.choice(string.digits) for _ in range(6))
+_block_cache: dict = {}   # uid → (is_blocked: bool, expires: float)
+_BLOCK_CACHE_TTL = 60     # ثانیه — بعد از این مدت مجدداً از DB خوانده می‌شود
 
-    # تبدیل فاصله به _
-    safe = t.replace(" ", "_")
+async def is_blocked(uid):
+    now=time.time()
+    cached=_block_cache.get(uid)
+    if cached and cached[1]>now: return cached[0]
+    async with db.execute("SELECT is_blocked FROM users WHERE user_id=?",(uid,)) as c:
+        r=await c.fetchone()
+    result=bool(r and r[0])
+    _block_cache[uid]=(result,now+_BLOCK_CACHE_TTL)
+    return result
 
-    return safe[:32]
+async def set_block(uid,v):
+    await db.execute("UPDATE users SET is_blocked=? WHERE user_id=?",(v,uid)); await db.commit()
+    _block_cache[uid]=(bool(v),time.time()+_BLOCK_CACHE_TTL)  # فوری cache را آپدیت کن
 
+async def search_users(q):
+    q_like=f"%{q}%"
+    async with db.execute(
+        "SELECT user_id,first_name,username,last_seen,is_blocked FROM users WHERE first_name LIKE ? OR username LIKE ? OR CAST(user_id AS TEXT) LIKE ? ORDER BY last_seen DESC LIMIT 15",
+        (q_like,q_like,q_like)) as c: rows=list(await c.fetchall())
+    # جستجو با شماره تلفن در جدول درخواست‌ها
+    if q.replace("-","").replace(" ","").replace("+","").isdigit():
+        async with db.execute(
+            "SELECT DISTINCT r.user_id,u.first_name,u.username,u.last_seen,u.is_blocked FROM requests r JOIN users u ON r.user_id=u.user_id WHERE r.phone LIKE ? LIMIT 5",
+            (q_like,)) as c: phone_rows=await c.fetchall()
+        seen={r[0] for r in rows}
+        rows+=[r for r in phone_rows if r[0] not in seen]
+    return rows[:15]
 
-def start_wallet_charge(message):
-    uid = message.from_user.id
+async def get_users_page(offset,limit=15,ft="all"):
+    flt={"today":"WHERE DATE(last_seen)=DATE('now','localtime')","week":"WHERE last_seen>=datetime('now','-7 days','localtime')","blocked":"WHERE is_blocked=1"}
+    async with db.execute(f"SELECT user_id,first_name,username,last_seen,is_blocked FROM users {flt.get(ft,'')} ORDER BY last_seen DESC LIMIT {limit} OFFSET {offset}") as c: return await c.fetchall()
 
-    # مبالغ سریع از تنظیمات
-    quick_amounts = _get_quick_amounts()
+async def _cnt(sql,args=()):
+    async with db.execute(sql,args) as c: return(await c.fetchone())[0]
 
-    if quick_amounts:
-        kb = types.InlineKeyboardMarkup(row_width=2)
-        btns = [types.InlineKeyboardButton(
-            f"💵 {a:,} تومان", callback_data=f"quick_charge_{a}"
-        ) for a in quick_amounts]
-        kb.add(*btns)
-        kb.add(types.InlineKeyboardButton("✏️ مبلغ دلخواه", callback_data="wallet_charge_custom"))
-        bot.send_message(
-            message.chat.id,
-            tf("MSG_WALLET_AMOUNT_REQUEST", min_amount=f"{MIN_TOPUP_AMOUNT:,}"),
-            reply_markup=kb,
-            parse_mode="HTML"
-        )
+async def total_users(): return await _cnt("SELECT COUNT(*) FROM users")
+async def today_users(): return await _cnt("SELECT COUNT(*) FROM users WHERE DATE(last_seen)=DATE('now','localtime')")
+async def week_users():  return await _cnt("SELECT COUNT(*) FROM users WHERE last_seen>=datetime('now','-7 days','localtime')")
+async def month_users(): return await _cnt("SELECT COUNT(*) FROM users WHERE last_seen>=datetime('now','-30 days','localtime')")
+async def new_today():   return await _cnt("SELECT COUNT(*) FROM users WHERE DATE(joined_at)=DATE('now','localtime')")
+async def blk_count():   return await _cnt("SELECT COUNT(*) FROM users WHERE is_blocked=1")
+
+# ── catalog — از ووکامرس خوانده می‌شود (woo.py)
+# خروجی به فرمت tuple سازگار با کد موجود تبدیل می‌شود:
+#   دسته:   id(0),name(1),icon(2),parent_id(3),is_active(4)
+#   محصول:  id(0),name(1),price(2),description(3),photo_url(4),site_url(5),is_active(6),category_id(7)
+import woo
+
+def _cat_tuple(c):
+    # ووکامرس آیکون ندارد → از 📁/📦 استفاده می‌کنیم
+    icon = "📂" if c["parent"]==0 else "📦"
+    return (c["id"], c["name"], icon, c["parent"], 1)
+
+def _prod_tuple(p, cat_id=None):
+    return (p["id"], p["name"], p["price"], p["description"],
+            p["image"], p["permalink"], 1 if p["in_stock"] else 0,
+            cat_id if cat_id is not None else (p["category_ids"][0] if p["category_ids"] else 0),
+            1 if p.get("is_backorder") else 0)  # عضو ۸: پیش‌خرید
+
+async def get_root_cats(active_only=True):
+    cats = await woo.get_root_categories()
+    return [_cat_tuple(c) for c in cats]
+
+async def get_subcats(parent_id,active_only=True):
+    cats = await woo.get_subcategories(parent_id)
+    return [_cat_tuple(c) for c in cats]
+
+async def get_cat(cat_id):
+    c = await woo.get_category(cat_id)
+    return _cat_tuple(c) if c else None
+
+async def get_products(cat_id,active_only=True):
+    prods = await woo.get_products_by_category(cat_id)
+    return [_prod_tuple(p, cat_id) for p in prods]
+
+async def get_product(pid):
+    p = await woo.get_product(pid)
+    return _prod_tuple(p) if p else None
+
+async def search_products(q):
+    prods = await woo.search_products(q)
+    return [_prod_tuple(p) for p in prods]
+
+# ── requests db
+async def save_request(uid,username,first_name,phone,pid,pname):
+    # بررسی درخواست تکراری در ۲۴ ساعت اخیر
+    async with db.execute(
+        "SELECT id FROM requests WHERE user_id=? AND product_id=? AND created_at>=datetime('now','-1 day')",
+        (uid,pid)) as c:
+        if await c.fetchone(): return None   # تکراری
+    cur=await db.execute("INSERT INTO requests(user_id,username,first_name,phone,product_id,product_name,status,created_at) VALUES(?,?,?,?,?,?,?,?)",
+        (uid,username or"",first_name or"",phone,pid,pname,"new",gregorian_now()))
+    await db.commit()
+    return cur.lastrowid
+
+async def get_requests(offset=0,limit=25):
+    async with db.execute(
+        "SELECT id,user_id,username,first_name,phone,product_name,status,created_at FROM requests ORDER BY id DESC LIMIT ? OFFSET ?",
+        (limit,offset)) as c: return await c.fetchall()
+
+async def count_requests(): return await _cnt("SELECT COUNT(*) FROM requests")
+
+async def done_request(rid): await db.execute("UPDATE requests SET status='done' WHERE id=?",(rid,)); await db.commit()
+
+# ── anti-spam (سیستم سبک — sliding window، بدون DB query، بدون lock)
+_rate:       dict = {}   # uid → [timestamps]
+_warned:     dict = {}   # uid → زمان اولین هشدار
+_hard_block: dict = {}   # uid → blocked_until timestamp
+_RATE_MAX   = 8          # حداکثر کلیک مجاز در پنجره
+_RATE_WIN   = 10.0       # پنجره زمانی (ثانیه)
+_HARD_BLOCK = 10.0       # مدت بلاک سخت (ثانیه)
+
+async def _spam_cleanup_loop():
+    """هر ۶ ساعت دیکشنری‌های anti-spam را از کاربران منقضی پاک می‌کند.
+    صفر تاثیر روی سرعت — فقط در زمان idle اجرا می‌شود."""
+    while True:
+        await asyncio.sleep(6 * 3600)
+        now = time.time()
+        stale = [uid for uid, ts in list(_rate.items())
+                 if not ts or now - max(ts) > _RATE_WIN * 6]
+        for uid in stale:
+            _rate.pop(uid, None); _warned.pop(uid, None)
+        for uid in [u for u, t in list(_hard_block.items()) if t < now]:
+            del _hard_block[uid]
+        for uid in [u for u,(v,exp) in list(_block_cache.items()) if exp<now]:
+            del _block_cache[uid]
+        for uid in [u for u,ts in list(_seen_uids.items()) if now-ts>_SEEN_TTL*3]:
+            del _seen_uids[uid]
+        if stale: logger.debug(f"spam_cleanup: {len(stale)} رکورد منقضی پاک شد")
+
+def spam_check(uid: int) -> str:
+    """کاملاً sync — بدون await، بدون DB، صفر overhead.
+    بازگشتی: 'ok' | 'warn' | 'block'
+      ok    → درخواست معمولی، ادامه بده
+      warn  → اولین بار اسپم شناسایی شد — popup هشدار نشان بده، ریپلای نده
+      block → کاربر بعد از هشدار ادامه داد — ۱۰ ثانیه بی‌صدا بلاک"""
+    if uid == ADMIN_ID: return 'ok'
+    now = time.time()
+    # بلاک سخت فعال است؟
+    if _hard_block.get(uid, 0) > now: return 'block'
+    # پنجره نرخ — فقط timestamps داخل _RATE_WIN ثانیه اخیر
+    ts = [t for t in _rate.get(uid, ()) if now - t < _RATE_WIN]
+    if len(ts) >= _RATE_MAX:
+        _rate[uid] = ts
+        if uid in _warned:        # هشدار قبلاً داده شده → بلاک سخت ۱۰ ثانیه
+            del _warned[uid]
+            _hard_block[uid] = now + _HARD_BLOCK
+            return 'block'
+        _warned[uid] = now        # اولین تخطی → هشدار
+        return 'warn'
+    ts.append(now); _rate[uid] = ts
+    _warned.pop(uid, None)        # کاربر آرام گرفت → هشدار ریست شود
+    return 'ok'
+
+async def _trigger_warm():
+    """فراخوانی پس‌زمینه‌ای maybe_warm_cache — کاربر هیچ تاخیری احساس نمی‌کند."""
+    try: await woo.maybe_warm_cache()
+    except Exception as e: logger.debug(f"trigger_warm: {e}")
+
+# ════════════════════════════════════════════════
+#  KEYBOARDS
+# ════════════════════════════════════════════════
+def main_menu():
+    # به ترتیب order، با احترام به عرض هر دکمه:
+    #   full → یک ردیف کامل | half → کنار دکمه half بعدی
+    # نکته RTL: تلگرام لیست را چپ‌به‌راست می‌چیند، پس برای اینکه
+    # دکمه اولِ هر جفت سمت راست بیفتد، ترتیب لیست را معکوس می‌کنیم.
+    items=[m for m in menu_sorted() if m.get("enabled",True)]
+    rows=[]; pending=None
+    for m in items:
+        if m.get("width","half")=="full":
+            if pending: rows.append([pending]); pending=None
+            rows.append([m["label"]])
+        else:
+            if pending:
+                rows.append([m["label"],pending]); pending=None  # دومی چپ، اولی(pending) راست
+            else:
+                pending=m["label"]
+    if pending: rows.append([pending])
+    if not rows: rows=[["🏠 منو"]]
+    return ReplyKeyboardMarkup(rows,resize_keyboard=True)
+
+def cancel_menu(): return ReplyKeyboardMarkup([["❌ لغو عملیات"]],resize_keyboard=True)
+
+# یکپارچه برای تمام بخش‌ها — support_kb حذف شد (تکراری بود)
+def user_sec_kb(key):
+    sec=get_sec_btns(key)
+    if not sec.get("enabled",False): return None
+    items=[x for x in sec.get("items",[]) if x.get("url")]
+    if not items: return None
+    btns=[]; row=[]
+    for i,it in enumerate(items):
+        row.append(InlineKeyboardButton(it["title"],url=it["url"]))
+        if len(row)==2 or i==len(items)-1: btns.append(row); row=[]
+    return InlineKeyboardMarkup(btns) if btns else None
+
+# ── catalog keyboards (user)
+def cat_root_kb(cats):
+    btns=[[InlineKeyboardButton(f"{c[2]} {c[1]}",callback_data=f"cr_{c[0]}")] for c in cats]
+    btns.append([InlineKeyboardButton("🔍 جستجوی محصول",callback_data="cat_search")])
+    return InlineKeyboardMarkup(btns)
+
+def cat_sub_kb(subs,root_id):
+    btns=[[InlineKeyboardButton(f"{s[2]} {s[1]}",callback_data=f"cs_{s[0]}")] for s in subs]
+    btns.append([InlineKeyboardButton("🔙 برگشت",callback_data="cat_back")])
+    return InlineKeyboardMarkup(btns)
+
+def cat_products_kb(products,sub_id):
+    btns=[[InlineKeyboardButton(f"📱 {p[1]}",callback_data=f"prd_{p[0]}")] for p in products]
+    btns.append([InlineKeyboardButton("🔙 برگشت",callback_data=f"cr_back_{sub_id}")])
+    return InlineKeyboardMarkup(btns)
+
+def product_kb(p):
+    btns=[]
+    is_backorder = len(p)>8 and p[8]==1
+    if is_backorder:
+        # محصول پیش‌خرید: لینک سایت نده، فقط درخواست پیش‌خرید
+        btns.append([InlineKeyboardButton("📝 درخواست پیش‌خرید",callback_data=f"pre_{p[0]}")])
     else:
-        bot.send_message(
-            message.chat.id,
-            tf("MSG_WALLET_AMOUNT_REQUEST", min_amount=f"{MIN_TOPUP_AMOUNT:,}"),
-            parse_mode="HTML"
-        )
-        user_states[uid] = {"mode": "wallet_charge_amount"}
-        bot.register_next_step_handler(message, process_wallet_charge_amount)
+        # محصول موجود: لینک سایت + درخواست خرید
+        if p[5]: btns.append([InlineKeyboardButton("🌐 مشاهده / خرید از سایت",url=p[5])])
+        btns.append([InlineKeyboardButton("📋 درخواست خرید",callback_data=f"req_{p[0]}")])
+    btns.append([InlineKeyboardButton("🔙 برگشت",callback_data=f"cs_back_{p[7]}")])
+    return InlineKeyboardMarkup(btns)
 
+# ── admin keyboards
+def back_admin(): return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به پنل",callback_data="back_to_admin")]])
 
-def _get_quick_amounts() -> list[int]:
-    """خواندن مبالغ سریع از تنظیمات DB"""
-    try:
-        from db import get_ui_text
-        raw = get_ui_text("WALLET_QUICK_AMOUNTS")
-        if not raw:
-            return [10_000, 50_000, 100_000, 500_000]
-        parts = [p.strip() for p in raw.split(",")]
-        amounts = [int(p) for p in parts if p.isdigit() and int(p) > 0]
-        return amounts
-    except Exception:
-        return [10_000, 50_000, 100_000, 500_000]
-
-
-def process_wallet_charge_amount(message):
-    uid = message.from_user.id
-    text = (message.text or "").strip()
-
-    # اگه کاربر دکمه منو یا /cancel زد، state رو پاک کن
-    if text.startswith("/") or get_category_by_button_text(text):
-        clear_user_state(uid)
-        bot.send_message(message.chat.id, "عملیات شارژ لغو شد.", reply_markup=main_menu(user_id=uid))
-        # اگه دسته بود، نمایشش بده
-        cat = get_category_by_button_text(text)
-        if cat:
-            _show_category(message.chat.id, cat["id"], user_id=uid)
-        return
-
-    # چک کن متن دکمه‌های سیستمی (کیف‌پول، سفارش و ...) بود
-    system_buttons = [
-        t("MAIN_BTN_MY_ORDERS", DEFAULT_UI_TEXTS.get("MAIN_BTN_MY_ORDERS", "")),
-        t("MAIN_BTN_WALLET", DEFAULT_UI_TEXTS.get("MAIN_BTN_WALLET", "")),
-        t("MAIN_BTN_GUIDE", DEFAULT_UI_TEXTS.get("MAIN_BTN_GUIDE", "")),
-        t("MAIN_BTN_SUPPORT", DEFAULT_UI_TEXTS.get("MAIN_BTN_SUPPORT", "")),
-        t("MAIN_BTN_PARTNER_REQUEST", DEFAULT_UI_TEXTS.get("MAIN_BTN_PARTNER_REQUEST", "")),
-        t("MAIN_BTN_PARTNER_PANEL", DEFAULT_UI_TEXTS.get("MAIN_BTN_PARTNER_PANEL", "")),
+def backup_kb():
+    rows=[
+        [InlineKeyboardButton("💾 دریافت پشتیبان",callback_data="backup_get"),
+         InlineKeyboardButton("📥 بارگذاری فایل",callback_data="backup_import")]
     ]
-    if text in system_buttons:
-        clear_user_state(uid)
-        bot.send_message(message.chat.id, "عملیات شارژ لغو شد.", reply_markup=main_menu(user_id=uid))
+    if _backup_registry:
+        rows.append([InlineKeyboardButton("──── بکاپ‌های خودکار ────",callback_data="noop")])
+        for i,b in enumerate(reversed(_backup_registry)):
+            rows.append([InlineKeyboardButton(f"♻️ {b['date']}",callback_data=f"backup_auto_{i}")])
+    rows.append([InlineKeyboardButton("🔙 تنظیمات",callback_data="settings_menu")])
+    return InlineKeyboardMarkup(rows)
+
+def admin_menu():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📊 داشبورد",callback_data="dash"),
+         InlineKeyboardButton("👥 کاربران",callback_data="users_menu")],
+        [InlineKeyboardButton("🛍 محصولات سایت",callback_data="woo_status"),
+         InlineKeyboardButton("📬 درخواست‌ها",callback_data="admin_reqs")],
+        [InlineKeyboardButton("🕐 ساعت کاری",callback_data="wh_menu"),
+         InlineKeyboardButton("📣 پخش همگانی",callback_data="broadcast")],
+        [InlineKeyboardButton("⚙️ تنظیمات",callback_data="settings_menu")],
+    ])
+
+# ترتیب نمایش بخش‌ها — دقیقاً مطابق منوی کاربر
+SECTION_ORDER = ["welcome","1","2","3","4","5","catalog","workhours","6","7"]
+
+def sections_kb():
+    btns=[]; row=[]
+    for key in SECTION_ORDER:
+        if key not in SECTION_NAMES: continue
+        name=SECTION_NAMES[key]
+        cont=responses.get(key,"") if responses else ""
+        b=get_banner(key); sec=get_sec_btns(key)
+        mark=""
+        if cont and cont not in("تنظیم نشده",""): mark+="📝"
+        if b.get("active") and b.get("file_id"): mark+="🖼"
+        if sec.get("enabled") and sec.get("items"): mark+="🔗"
+        label=f"{name}  {mark}" if mark else name
+        row.append(InlineKeyboardButton(label,callback_data=f"sec_{key}"))
+        if len(row)==2: btns.append(row); row=[]
+    if row: btns.append(row)
+    btns.append([InlineKeyboardButton("🔙 تنظیمات",callback_data="settings_menu")])
+    return InlineKeyboardMarkup(btns)
+
+def section_kb(key):
+    b=get_banner(key)
+    ban_lbl="🖼 بنر  🟢 فعال" if(b.get("active") and b.get("file_id")) else("🖼 بنر  ⏸ آپلود‌شده" if b.get("file_id") else"🖼 بنر  ➕ ندارد")
+    rows=[]
+    if key != "catalog":  # catalog محتوا از ووکامرس می‌گیرد — متن و دکمه‌های ثابت ندارد
+        sec=get_sec_btns(key); n=len(sec.get("items",[])); en=sec.get("enabled")
+        btn_lbl=f"🔗 دکمه‌ها  {'🟢' if en else '🔴'}  ({to_fa(n)} عدد)"
+        rows.append([InlineKeyboardButton("✏️ ویرایش متن",callback_data=f"sec_text_{key}")])
+    rows.append([InlineKeyboardButton(ban_lbl,callback_data=f"sec_ban_{key}")])
+    if key != "catalog":
+        rows.append([InlineKeyboardButton(btn_lbl,callback_data=f"sec_btns_{key}")])
+    rows.append([InlineKeyboardButton("🔙 بازگشت",callback_data="sections")])
+    return InlineKeyboardMarkup(rows)
+
+def banner_kb(key):
+    b=get_banner(key); tg="🔴 غیرفعال‌سازی" if b.get("active") else "🟢 فعال‌سازی"
+    btns=[[InlineKeyboardButton("📤 آپلود تصویر",callback_data=f"ban_up_{key}")],
+          [InlineKeyboardButton(tg,callback_data=f"ban_tg_{key}")]]
+    if b.get("file_id"): btns.append([InlineKeyboardButton("🗑 حذف تصویر",callback_data=f"ban_dl_{key}")])
+    btns.append([InlineKeyboardButton("🔙 بازگشت",callback_data=f"sec_{key}")]); return InlineKeyboardMarkup(btns)
+
+def sec_btns_kb(key):
+    sec=get_sec_btns(key); tg="🔴 غیرفعال‌سازی" if sec.get("enabled") else "🟢 فعال‌سازی"
+    btns=[[InlineKeyboardButton(tg,callback_data=f"btn_tg_{key}")]]
+    for it in sec.get("items",[]):
+        btns.append([InlineKeyboardButton(f"🔗 {it['title']}",callback_data=f"btn_ed_{key}_{it['id']}"),
+                     InlineKeyboardButton("🗑 حذف",callback_data=f"btn_dl_{key}_{it['id']}")])
+    btns.append([InlineKeyboardButton("➕ افزودن دکمه",callback_data=f"btn_add_{key}"),
+                 InlineKeyboardButton("🔙 بازگشت",callback_data=f"sec_{key}")])
+    return InlineKeyboardMarkup(btns)
+
+def wh_kb():
+    en=workhours.get("enabled",True)
+    tg="🔴 غیرفعال‌سازی" if en else "🟢 فعال‌سازی"
+    btns=[[InlineKeyboardButton(tg,callback_data="wh_toggle")]]
+    day_list=list(DAY_FA.items())
+    for i in range(0,len(day_list),2):
+        row=[]
+        for k,name in day_list[i:i+2]:
+            day=workhours.get("schedule",{}).get(k,{})
+            row.append(InlineKeyboardButton(f"{'✅' if day.get('open') else '❌'} {name}",callback_data=f"wh_day_{k}"))
+        btns.append(row)
+    btns+=[[InlineKeyboardButton("✏️ پیام باز",callback_data="wh_mop"),
+            InlineKeyboardButton("✏️ پیام بسته",callback_data="wh_mcl")],
+           [InlineKeyboardButton("🔙 پنل اصلی",callback_data="back_to_admin")]]
+    return InlineKeyboardMarkup(btns)
+
+def wh_day_kb(dk):
+    day=workhours.get("schedule",{}).get(dk,{})
+    tg="🔴 تعطیل" if day.get("open") else "🟢 باز کردن"
+    return InlineKeyboardMarkup([[InlineKeyboardButton(tg,callback_data=f"wh_dtg_{dk}")],
+        [InlineKeyboardButton("✏️ ساعت‌ها",callback_data=f"wh_sh_{dk}")],
+        [InlineKeyboardButton("🔙",callback_data="wh_menu")]])
+
+def menu_mgr_kb():
+    """لیست دکمه‌های منو با وضعیت، برای مدیریت."""
+    btns=[]
+    items=menu_sorted()
+    for idx,m in enumerate(items):
+        status="🟢" if m.get("enabled",True) else "⚫️"
+        btns.append([InlineKeyboardButton(f"{status} {m['label']}",callback_data=f"mi_{m['key']}")])
+    btns.append([InlineKeyboardButton("♻️ بازگردانی به حالت پیش‌فرض",callback_data="menu_reset")])
+    btns.append([InlineKeyboardButton("🔙 تنظیمات",callback_data="settings_menu")])
+    return InlineKeyboardMarkup(btns)
+
+def menu_item_kb(key):
+    """تنظیمات یک دکمه: روشن/خاموش، تغییر نام، جابجایی بالا/پایین."""
+    m=menu_item(key)
+    if not m: return menu_mgr_kb()
+    items=menu_sorted()
+    idx=next((i for i,x in enumerate(items) if x["key"]==key),0)
+    en=m.get("enabled",True)
+    w=m.get("width","half")
+    w_lbl="📐 عرض: تمام‌صفحه" if w=="full" else "📐 عرض: نصف‌صفحه"
+    rows=[
+        [InlineKeyboardButton("🔴 خاموش کردن" if en else "🟢 روشن کردن",callback_data=f"mtg_{key}")],
+        [InlineKeyboardButton("✏️ تغییر نام",callback_data=f"mnm_{key}")],
+        [InlineKeyboardButton(w_lbl,callback_data=f"mw_{key}")],
+    ]
+    move=[]
+    if idx>0: move.append(InlineKeyboardButton("⬆️ بالا",callback_data=f"mup_{key}"))
+    if idx<len(items)-1: move.append(InlineKeyboardButton("⬇️ پایین",callback_data=f"mdn_{key}"))
+    if move: rows.append(move)
+    # جابجایی چپ/راست فقط وقتی این نیم‌دکمه با دکمه دیگری هم‌ردیف باشد
+    if w=="half" and menu_row_partner(key):
+        rows.append([InlineKeyboardButton("↔️ جابجایی چپ و راست",callback_data=f"msw_{key}")])
+    rows.append([InlineKeyboardButton("🔙 بازگشت",callback_data="menu_mgr")])
+    return InlineKeyboardMarkup(rows)
+
+def settings_kb():
+    notif="🟢" if get_setting("notify_new_user") else "⚫️"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎛 مدیریت منو",callback_data="menu_mgr")],
+        [InlineKeyboardButton("✏️ مدیریت بخش‌ها",callback_data="sections")],
+        [InlineKeyboardButton("💾 پشتیبان‌گیری",callback_data="backup")],
+        [InlineKeyboardButton(f"{notif} اعلان عضو جدید",callback_data="stg_notify_new_user")],
+        [InlineKeyboardButton("🔙 پنل اصلی",callback_data="back_to_admin")],
+    ])
+
+def users_menu_kb(): return InlineKeyboardMarkup([
+    [InlineKeyboardButton("👥 همه کاربران",callback_data="ul_all_0"),
+     InlineKeyboardButton("🆕 امروز",callback_data="ul_today_0")],
+    [InlineKeyboardButton("📆 این هفته",callback_data="ul_week_0"),
+     InlineKeyboardButton("🚫 بلاک‌شده‌ها",callback_data="ul_blocked_0")],
+    [InlineKeyboardButton("🔍 جستجوی کاربر",callback_data="users_search")],
+    [InlineKeyboardButton("🔙 پنل اصلی",callback_data="back_to_admin")]])
+
+def users_list_kb(rows,off,ft,total):
+    btns=[[InlineKeyboardButton(f"{'🚫 ' if r[4] else ''}{r[1] or '—'} | {r[0]}",callback_data=f"uv_{r[0]}")] for r in rows]
+    nav=[]
+    if off>0: nav.append(InlineKeyboardButton("◀️",callback_data=f"ul_{ft}_{off-15}"))
+    if off+15<total: nav.append(InlineKeyboardButton("▶️",callback_data=f"ul_{ft}_{off+15}"))
+    if nav: btns.append(nav)
+    btns.append([InlineKeyboardButton("🔙",callback_data="users_menu")]); return InlineKeyboardMarkup(btns)
+
+def udetail_kb(uid,is_bl): return InlineKeyboardMarkup([
+    [InlineKeyboardButton("✅ رفع بلاک" if is_bl else "🚫 بلاک",callback_data=f"utog_{uid}")],
+    [InlineKeyboardButton("🔙",callback_data="users_menu")]])
+
+def reqs_kb(reqs,offset=0,total=0):
+    btns=[[InlineKeyboardButton(f"{'🆕' if r[6]=='new' else '✅'} {r[5]} — {r[3]}",callback_data=f"rq_{r[0]}")] for r in reqs]
+    nav=[]
+    if offset>0: nav.append(InlineKeyboardButton("▶️ جدیدتر",callback_data=f"admin_reqs_{offset-25}"))
+    if offset+25<total: nav.append(InlineKeyboardButton("◀️ قدیمی‌تر",callback_data=f"admin_reqs_{offset+25}"))
+    if nav: btns.append(nav)
+    btns.append([InlineKeyboardButton("📊 Export CSV",callback_data="export_reqs")])
+    btns.append([InlineKeyboardButton("🔙",callback_data="back_to_admin")]); return InlineKeyboardMarkup(btns)
+
+def req_kb(rid,status,uid=0):
+    btns=[]
+    if status=="new":
+        btns.append([InlineKeyboardButton("✅ پیگیری شد",callback_data=f"rq_done_{rid}")])
+        if uid: btns.append([InlineKeyboardButton("💬 پیام به کاربر",callback_data=f"rq_msg_{uid}")])
+    else:
+        btns.append([InlineKeyboardButton("☑️ پیگیری شده — بسته شد",callback_data="noop")])
+    btns.append([InlineKeyboardButton("🔙",callback_data="admin_reqs")]); return InlineKeyboardMarkup(btns)
+
+# ── send with banner
+async def send_banner(msg,text,key,kb=None):
+    b=get_banner(key)
+    if b.get("active") and b.get("file_id"):
+        try: await msg.reply_photo(photo=b["file_id"],caption=text,reply_markup=kb); return
+        except Exception as e: logger.error(f"banner[{key}]: {e}")
+    await msg.reply_text(text,reply_markup=kb)
+
+# ── broadcast
+_broadcast_active = False
+_broadcast_cancel = False   # توقف اضطراری
+
+async def broadcast(ctx, text, photo=None):
+    global _broadcast_active, _broadcast_cancel
+    if _broadcast_active:
+        await ctx.bot.send_message(ADMIN_ID, "⚠️ یک پخش در حال اجراست — صبر کنید تا تمام شود.")
         return
-
-    text_clean = text.replace(",", "").replace("،", "")
-    amount = safe_int(text_clean)
-
-    if amount is None:
-        bot.reply_to(message, tf("MSG_WALLET_AMOUNT_INVALID"))
-        bot.register_next_step_handler(message, process_wallet_charge_amount)
-        return
-
-    if amount < MIN_TOPUP_AMOUNT:
-        bot.reply_to(message, tf("MSG_WALLET_MIN_AMOUNT", min_amount=f"{MIN_TOPUP_AMOUNT:,}"))
-        bot.register_next_step_handler(message, process_wallet_charge_amount)
-        return
-
-    clear_user_state(uid)
-    start_wallet_charge_payment(bot, message, uid, amount, clear_user_state)
-
-def start_product_payment(
-    bot,
-    message,
-    uid,
-    amount,
-    reserved_wallet_amount=0,
-    product_id=None
-):
-    from services.payments import start_wallet_charge_payment
-
-    # اجبار نوع پرداخت به product
-    start_wallet_charge_payment(
-        bot=bot,
-        message=message,
-        uid=uid,
-        amount=amount,
-        clear_user_state=clear_user_state,
-        payment_type="product",
-        product_id=product_id,
-        wallet_reserved=reserved_wallet_amount
-    )
-
-  
-# ========= PRODUCTS UI =========
-
-
-import sqlite3
-from datetime import datetime
-import html
-
-def finalize_product_order(call, uid, product, category, eff_price, wallet_used=0):
-
-    pid = int(product[0])
-    title = product[2]
-    buyer_type = "partner" if is_partner_approved(uid) else "customer"
-
-    # جلوگیری از دوباره کلیک
+    _broadcast_active = True; _broadcast_cancel = False
     try:
-        bot.edit_message_reply_markup(
-            call.message.chat.id,
-            call.message.message_id,
-            reply_markup=None
-        )
-    except:
-        pass
-
-    # ----------------------------
-    # بررسی سقف خرید روزانه
-    # ----------------------------
-    daily_lim_c = product[7] if len(product) > 7 else 0
-    daily_lim_p = product[8] if len(product) > 8 else 0
-    limit_val = daily_lim_p if buyer_type == "partner" else daily_lim_c
-    limit_val = int(limit_val or 0)
-
-    if limit_val > 0:
-        cnt = count_user_product_orders_today(uid, pid, buyer_type=buyer_type)
-        if cnt >= limit_val:
-            bot.answer_callback_query(
-                call.id,
-                f"سقف خرید روزانه ({limit_val}) تکمیل شده",
-                show_alert=True
-            )
-            return
-
-    # ----------------------------
-    # بررسی و کسر موجودی (نسخه قطعی)
-    # ----------------------------
-    conn = sqlite3.connect(DB_FULL_PATH)
-    cur = conn.cursor()
-
-    cur.execute("SELECT balance FROM wallets WHERE user_id=?", (uid,))
-    row = cur.fetchone()
-
-    if not row:
-        conn.close()
-        bot.answer_callback_query(call.id, "کیف پول یافت نشد", show_alert=True)
-        return
-
-    current_balance = int(row[0])
-
-    if current_balance < eff_price:
-        conn.close()
-        bot.answer_callback_query(call.id, "موجودی کافی نیست", show_alert=True)
-        return
-
-    new_balance = current_balance - eff_price
-
-    cur.execute(
-        "UPDATE wallets SET balance=?, updated_at=? WHERE user_id=?",
-        (new_balance, datetime.utcnow().isoformat(), uid)
-    )
-
-    conn.commit()
-    conn.close()
-
-    # ----------------------------
-    # ایجاد سفارش
-    # ----------------------------
-    order_id = create_order(
-        uid,
-        category,
-        title,
-        eff_price,
-        product_id=pid,
-        buyer_type=buyer_type
-    )
-
-    # پاداش معرفی — فقط اگه این اولین خرید کاربره
-    try:
-        from db import process_referral_reward, ensure_referral_schema
-        ensure_referral_schema()
-        ref_result = process_referral_reward(uid, order_id)
-        if ref_result.get("rewarded"):
-            try:
-                bot.send_message(ref_result["referrer_id"],
-                    f"🎉 یکی از دوستانی که معرفی کردید خرید کرد!\n"
-                    f"💰 <b>{ref_result['amount']:,}</b> تومان به کیف‌پول شما اضافه شد.",
-                    parse_mode="HTML")
-            except Exception:
-                pass
-    except Exception:
-        pass
-
-
-    # ----------------------------
-    # تحویل فوری در صورت وجود موجودی
-    # ----------------------------
-    # ── اول چک کن نیاز به راه‌اندازی داره یا نه ──────────────────────────
-    try:
-        ensure_product_support_schema()
-        if get_product_support_flag(pid):
-            from db import ticket_create, ticket_ensure_schema, ticket_add_message, get_product_setup_message
-            ticket_ensure_schema()
-
-            setup_msg = get_product_setup_message(pid) or "اطلاعات مورد نیاز را در این گفتگو ارسال کنید."
-
-            tid = ticket_create(
-                uid, type_="product_setup",
-                product_id=pid, order_id=order_id,
-                feed_id=None,
-                feed_data=None,
-                setup_status="waiting_info"
-            )
-            ticket_add_message(tid, "admin",
-                f"📦 سفارش #{order_id} — {title}\n\n{setup_msg}",
-                media_type=None)
-
-            kb_setup = types.InlineKeyboardMarkup()
-            kb_setup.add(types.InlineKeyboardButton(
-                "💬 ارسال اطلاعات", callback_data=f"ticket_v2_open_{tid}"
-            ))
-            bot.send_message(
-                call.message.chat.id,
-                f"✅ سفارش #{order_id} ثبت شد.\n\n"
-                f"📦 <b>{title}</b>\n\n"
-                f"🟡 <b>{setup_msg}</b>\n\n"
-                "پشتیبانی پس از دریافت اطلاعات، محصول را تحویل می‌دهد.",
-                parse_mode="HTML", reply_markup=kb_setup
-            )
-            try:
-                bot.send_message(ADMIN_ID,
-                    f"🟢 <b>گفتگوی راه‌اندازی محصول</b>\n"
-                    f"سفارش: #{order_id} | محصول: {title}\n"
-                    f"کاربر: <code>{uid}</code> | تیکت: #{tid}",
-                    parse_mode="HTML")
-            except Exception:
-                pass
-            return  # ← هیچ feed claim نمی‌شه
-    except Exception as _se:
-        logger.error("product_setup error: %s", _se)
-
-    # ── محصول معمولی: claim از DB ─────────────────────────────────────────
-    feed_item = claim_next_feed_item(pid, order_id=order_id)
-
-    if feed_item:
-        feed_id, feed_data = feed_item
-
-        # تحویل عادی
-        bot.send_message(
-            call.message.chat.id,
-            f"سفارش ثبت و تحویل شد ✅\n\n"
-            f"شماره سفارش: #{order_id}\n"
-            f"سرویس: {title}\n"
-            f"مبلغ: {eff_price:,} تومان\n"
-            f"موجودی فعلی: {new_balance:,} تومان\n\n"
-            f"<code>{html.escape(str(feed_data))}</code>",
-            parse_mode="HTML"
-        )
-        try:
-            bot.send_message(ADMIN_ID,
-                f"📦 تحویل فوری\nOrder: #{order_id} | User: {uid}\n{title} — {eff_price:,} ت")
-        except Exception:
-            pass
-
-    else:
-        # ثبت در صف pending
-        enqueue_pending_delivery(order_id, uid, call.message.chat.id, pid, title, eff_price)
-
-        bot.send_message(
-            call.message.chat.id,
-            f"سفارش ثبت شد ✅\n\n"
-            f"اما فعلاً موجودی این محصول تکمیل شده است.\n"
-            f"شکیبا باشید در اولین فرصت توسط ادمین ارسال خواهد شد.\n\n"
-            f"موجودی فعلی: {new_balance:,} تومان"
-        )
-
-        try:
-            bot.send_message(
-                ADMIN_ID,
-                "⚠️ سفارش بدون موجودی\n\n"
-                f"Order ID: #{order_id}\n"
-                f"User ID: {uid}\n"
-                f"محصول: {title} (#{pid})\n"
-                f"مبلغ: {eff_price:,} تومان"
-            )
-        except:
-            pass
-
-def send_products_menu(chat_id, category, admin_view=False, user_id=None):
-    products = get_products_by_category(category)
-    if not products:
-        if admin_view:
-            kb = types.InlineKeyboardMarkup(row_width=1)
-            kb.add(types.InlineKeyboardButton(
-                "➕ افزودن محصول جدید", callback_data=f"admin_new_product_{category}"
-            ))
-            kb.add(types.InlineKeyboardButton(
-                "🔙 بازگشت به دسته‌ها", callback_data="admin_products"
-            ))
-            bot.send_message(chat_id, "محصولی برای این دسته ثبت نشده است.", reply_markup=kb)
-        else:
-            bot.send_message(chat_id, "در حال حاضر محصولی برای این دسته ثبت نشده است.")
-        return
-
-    kb = types.InlineKeyboardMarkup(row_width=1)
-    partner_ok = (not admin_view) and (user_id is not None) and is_partner_approved(int(user_id))
-    has_visible = False
-    for p in products:
-        pid, _, title, price, desc, is_active, partner_price = p
-        if not admin_view and not is_active:
-            continue
-        has_visible = True
-        if admin_view:
-            status_icon = "✅" if is_active else "❌"
-            text = f"{status_icon} {title} | {price:,} تومان"
-            cb = f"admin_product_{pid}"
-        else:
-            eff_price = partner_price if (partner_ok and partner_price) else price
-            text = f"{title} | {eff_price:,} تومان"
-            cb = f"{category}_select_{pid}"
-        kb.add(types.InlineKeyboardButton(text, callback_data=cb))
-
-    if not has_visible and not admin_view:
-        bot.send_message(chat_id, "در حال حاضر محصولی برای این دسته ثبت نشده است.")
-        return
-
-    if admin_view:
-        kb.add(types.InlineKeyboardButton("➕ افزودن محصول جدید", callback_data=f"admin_new_product_{category}"))
-        kb.add(types.InlineKeyboardButton("🔙 بازگشت به دسته‌ها", callback_data="admin_products"))
-    else:
-        back_cb = "back_main" if category == "apple" else "other_categories"
-        kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data=back_cb))
-
-    bot.send_message(chat_id, "لطفا یکی از سرویس‌های زیر را انتخاب کنید:", reply_markup=kb)
-
-#======================= ORDER SUMMARY + DISCOUNT =======================
-
-def _get_eff_price(product, uid):
-    """قیمت موثر بر اساس همکار یا مشتری بودن."""
-    price = product[3]
-    partner_price = product[6] if len(product) > 6 else None
-    partner_ok = is_partner_approved(uid)
-    return partner_price if (partner_ok and partner_price) else price
-
-
-def _show_order_summary(chat_id, uid, product, category, pid):
-    """نمایش خلاصه سفارش — با یا بدون کد تخفیف."""
-    title     = product[2]
-    base      = _get_eff_price(product, uid)
-    state     = user_states.get(uid, {})
-    discount  = int(state.get("applied_discount", 0))
-    code_name = state.get("applied_code", "")
-    final     = max(0, base - discount)
-
-    lines = [f"🛒 <b>{title}</b>\n"]
-    lines.append(f"مبلغ کالا: <b>{base:,}</b> تومان")
-    if discount > 0:
-        lines.append(f"🎟 کد تخفیف: <code>{code_name}</code>")
-        lines.append(f"💸 تخفیف: <b>−{discount:,}</b> تومان")
-        lines.append(f"\n💰 مبلغ قابل پرداخت:\n<b>{final:,}</b> تومان")
-    else:
-        lines.append(f"\n💰 مبلغ قابل پرداخت:\n<b>{final:,}</b> تومان")
-
-    kb = types.InlineKeyboardMarkup(row_width=1)
-    kb.add(types.InlineKeyboardButton(
-        f"💳 پرداخت — {final:,} تومان",
-        callback_data=f"do_pay_{category}_{pid}"
-    ))
-    if discount > 0:
-        kb.row(
-            types.InlineKeyboardButton("🔄 تغییر کد", callback_data=f"enter_code_{category}_{pid}"),
-            types.InlineKeyboardButton("🗑 حذف کد",   callback_data=f"remove_code_{category}_{pid}")
-        )
-    else:
-        kb.add(types.InlineKeyboardButton(
-            "🎟 کد تخفیف دارم",
-            callback_data=f"enter_code_{category}_{pid}"
-        ))
-    kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="cancel_purchase"))
-
-    bot.send_message(chat_id, "\n".join(lines), parse_mode="HTML", reply_markup=kb)
-
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("confirm_full_"))
-def handle_confirm_full(call):
-    parts = call.data.split("_")
-    if len(parts) < 4:
-        bot.answer_callback_query(call.id, "داده نامعتبر است", show_alert=True); return
-    pid_str  = parts[-1]
-    category = "_".join(parts[2:-1])
-    if not pid_str.isdigit():
-        bot.answer_callback_query(call.id, "شناسه نامعتبر", show_alert=True); return
-    pid = int(pid_str); uid = call.from_user.id
-    product = get_product_by_id(pid)
-    if not product:
-        bot.answer_callback_query(call.id, "محصول یافت نشد", show_alert=True); return
-    exceeded, limit_val = _daily_limit_exceeded(uid, product, pid)
-    if exceeded:
-        bot.answer_callback_query(call.id, f"سقف روزانه ({limit_val}) تکمیل شد", show_alert=True); return
-    # ذخیره نوع پرداخت در state
-    user_states.setdefault(uid, {})["pay_type"] = "full"
-    _show_order_summary(call.message.chat.id, uid, product, category, pid)
-    bot.answer_callback_query(call.id)
-
-
-#======================== confirm_wallet =====================
-@bot.callback_query_handler(func=lambda call: call.data.startswith("confirm_wallet_"))
-def handle_confirm_wallet(call):
-    parts = call.data.split("_")
-    if len(parts) < 4:
-        bot.answer_callback_query(call.id, "داده نامعتبر است", show_alert=True); return
-    pid_str  = parts[-1]
-    category = "_".join(parts[2:-1])
-    if not pid_str.isdigit():
-        bot.answer_callback_query(call.id, "شناسه نامعتبر", show_alert=True); return
-    pid = int(pid_str); uid = call.from_user.id
-    product = get_product_by_id(pid)
-    if not product:
-        bot.answer_callback_query(call.id, "محصول یافت نشد", show_alert=True); return
-    exceeded, limit_val = _daily_limit_exceeded(uid, product, pid)
-    if exceeded:
-        bot.answer_callback_query(call.id, f"سقف روزانه ({limit_val}) تکمیل شد", show_alert=True); return
-    user_states.setdefault(uid, {})["pay_type"] = "wallet"
-    _show_order_summary(call.message.chat.id, uid, product, category, pid)
-    bot.answer_callback_query(call.id)
-
-
-# ─── ورود کد تخفیف ──────────────────────────────────────────────────────────
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("enter_code_"))
-def handle_enter_code(call):
-    uid  = call.from_user.id
-    suf  = call.data[len("enter_code_"):]
-    # ذخیره info برای برگشت بعد از کد
-    user_states.setdefault(uid, {})["code_context"] = suf
-    kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("❌ انصراف", callback_data=f"code_cancel_{suf}"))
-    bot.send_message(call.message.chat.id,
-        "🎟 کد تخفیف خود را ارسال کنید:", reply_markup=kb)
-    bot.register_next_step_handler(call.message, _handle_code_input)
-    bot.answer_callback_query(call.id)
-
-
-def _handle_code_input(message):
-    uid  = message.from_user.id
-    code = (message.text or "").strip().upper()
-    if not code:
-        return
-    state   = user_states.get(uid, {})
-    context = state.get("code_context", "")
-    # parse category و pid از context
-    parts = context.rsplit("_", 1)
-    if len(parts) != 2 or not parts[1].isdigit():
-        bot.send_message(message.chat.id, "❌ خطا — دوباره امتحان کنید"); return
-    category, pid_str = parts[0], parts[1]
-    pid     = int(pid_str)
-    product = get_product_by_id(pid)
-    if not product:
-        bot.send_message(message.chat.id, "❌ محصول یافت نشد"); return
-
-    base   = _get_eff_price(product, uid)
-    result = validate_discount(code, product_id=pid, amount=base)
-    if not result["valid"]:
-        kb = types.InlineKeyboardMarkup()
-        kb.add(types.InlineKeyboardButton("🔙 بازگشت به سفارش",
-            callback_data=f"code_cancel_{context}"))
-        bot.send_message(message.chat.id, f"❌ {result['error']}", reply_markup=kb)
-        return
-
-    use_discount(result["code_id"], user_id=uid)
-    state["applied_discount"]  = result["discount_amount"]
-    state["applied_code"]      = code
-    state["discount_code_id"]  = result["code_id"]
-    user_states[uid]           = state
-    _show_order_summary(message.chat.id, uid, product, category, pid)
-
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("code_cancel_"))
-def handle_code_cancel(call):
-    uid     = call.from_user.id
-    context = call.data[len("code_cancel_"):]
-    parts   = context.rsplit("_", 1)
-    if len(parts) == 2 and parts[1].isdigit():
-        pid     = int(parts[1])
-        category = parts[0]
-        product  = get_product_by_id(pid)
-        if product:
-            _show_order_summary(call.message.chat.id, uid, product, category, pid)
-    bot.answer_callback_query(call.id)
-
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("remove_code_"))
-def handle_remove_code(call):
-    uid = call.from_user.id
-    state = user_states.get(uid, {})
-    state.pop("applied_discount", None)
-    state.pop("applied_code", None)
-    user_states[uid] = state
-    context = call.data[len("remove_code_"):]
-    parts   = context.rsplit("_", 1)
-    if len(parts) == 2 and parts[1].isdigit():
-        product = get_product_by_id(int(parts[1]))
-        if product:
-            _show_order_summary(call.message.chat.id, uid, product, parts[0], int(parts[1]))
-    bot.answer_callback_query(call.id, "کد تخفیف حذف شد")
-
-
-# ─── پرداخت نهایی ────────────────────────────────────────────────────────────
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("do_pay_"))
-def handle_do_pay(call):
-    uid     = call.from_user.id
-    context = call.data[len("do_pay_"):]
-    parts   = context.rsplit("_", 1)
-    if len(parts) != 2 or not parts[1].isdigit():
-        bot.answer_callback_query(call.id, "خطا", show_alert=True); return
-    category, pid_str = parts[0], parts[1]
-    pid     = int(pid_str)
-    product = get_product_by_id(pid)
-    if not product:
-        bot.answer_callback_query(call.id, "محصول یافت نشد", show_alert=True); return
-
-    exceeded, limit_val = _daily_limit_exceeded(uid, product, pid)
-    if exceeded:
-        bot.answer_callback_query(call.id, f"سقف روزانه ({limit_val}) تکمیل شد", show_alert=True); return
-
-    base      = _get_eff_price(product, uid)
-    discount  = int(user_states.get(uid, {}).get("applied_discount", 0))
-    eff_price = max(0, base - discount)
-
-    # state رو پاک می‌کنیم (code_id قبلاً در _handle_code_input مصرف شده)
-    state = user_states.get(uid, {})
-    state.pop("applied_discount", None)
-    state.pop("applied_code", None)
-    state.pop("discount_code_id", None)
-    state.pop("pay_type", None)
-    state.pop("code_context", None)
-    state.pop("discount_asked", None)
-    user_states[uid] = state
-
-    wallet_balance = get_wallet_balance(uid)
-
-    if wallet_balance >= eff_price:
-        # کیف‌پول کافیه
-        finalize_product_order(call, uid, product, category, eff_price)
-    else:
-        # ارسال به درگاه
-        from services.payments import start_wallet_charge_payment
-        start_wallet_charge_payment(
-            bot=bot, message=call.message, uid=uid, amount=eff_price,
-            clear_user_state=clear_user_state,
-            payment_type="product", product_id=pid, wallet_reserved=0
-        )
-    bot.answer_callback_query(call.id)
-
-
-# ─── deprecated handlers (backward compat) ───────────────────────────────────
-@bot.callback_query_handler(func=lambda c: c.data.startswith("pay_nodiscount_"))
-def handle_pay_nodiscount(call):
-    uid = call.from_user.id
-    pending_cb = user_states.get(uid, {}).get("pending_cb", "")
-    if not pending_cb:
-        bot.answer_callback_query(call.id, "خطا", show_alert=True); return
-    user_states.setdefault(uid, {})["discount_asked"] = True
-    call.data = pending_cb
-    if pending_cb.startswith("confirm_full_"):
-        handle_confirm_full(call)
-    else:
-        handle_confirm_wallet(call)
-
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("discount_start_"))
-def handle_discount_start(call): pass
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("discount_skip_"))
-def handle_discount_skip(call): pass
-
-
-def _daily_limit_exceeded(uid, product, pid):
-    """True if the user's daily purchase cap for this product is reached."""
-    partner_ok = is_partner_approved(int(uid))
-    buyer_type = "partner" if partner_ok else "customer"
-    daily_lim_c = product[7] if len(product) > 7 else 0
-    daily_lim_p = product[8] if len(product) > 8 else 0
-    limit_val = int((daily_lim_p if buyer_type == "partner" else daily_lim_c) or 0)
-    if limit_val <= 0:
-        return False, 0
-    cnt = count_user_product_orders_today(int(uid), int(pid), buyer_type=buyer_type)
-    return (cnt >= limit_val), limit_val
-
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("confirm_full_"))
-def handle_confirm_full(call):
-
-    parts = call.data.split("_")
-    if len(parts) < 4:
-        bot.answer_callback_query(call.id, "داده نامعتبر است", show_alert=True)
-        return
-
-    pid_str = parts[-1]
-    category = "_".join(parts[2:-1])
-
-    if not pid_str.isdigit():
-        bot.answer_callback_query(call.id, "شناسه محصول نامعتبر است", show_alert=True)
-        return
-
-    pid = int(pid_str)
-    uid = call.from_user.id
-
-    product = get_product_by_id(pid)
-    if not product:
-        bot.answer_callback_query(call.id, "محصول یافت نشد", show_alert=True)
-        return
-
-    exceeded, limit_val = _daily_limit_exceeded(uid, product, pid)
-    if exceeded:
-        bot.answer_callback_query(call.id, f"سقف خرید روزانه ({limit_val}) تکمیل شده است.", show_alert=True)
-        return
-
-    title  = product[2]
-    price  = product[3]
-    partner_price = product[6] if len(product) > 6 else None
-    partner_ok    = is_partner_approved(uid)
-    eff_price     = partner_price if (partner_ok and partner_price) else price
-
-    # تخفیف اعمال شده؟
-    discount  = user_states.get(uid, {}).get("applied_discount", 0)
-    eff_price = max(0, eff_price - discount)
-
-    # کد تخفیف هنوز پرسیده نشده؟
-    if not discount and not user_states.get(uid, {}).get("discount_asked"):
-        st = user_states.setdefault(uid, {})
-        st["discount_asked"] = True
-        st["pending_cb"]     = call.data
-        st["pid"]            = pid
-        st["category"]       = category
-        st["eff_price"]      = eff_price
-
-        kb = types.InlineKeyboardMarkup()
-        kb.add(types.InlineKeyboardButton(
-            f"✅ ادامه بدون تخفیف — {eff_price:,} تومان",
-            callback_data=f"pay_nodiscount_full_{category}_{pid_str}"
-        ))
-        bot.send_message(
-            call.message.chat.id,
-            f"🛒 <b>{title}</b>\n"
-            f"💰 مبلغ: <b>{eff_price:,}</b> تومان\n\n"
-            "🎟 اگر کد تخفیف دارید همین الان ارسال کنید.\n"
-            "در غیر این صورت دکمه زیر را بزنید:",
-            parse_mode="HTML", reply_markup=kb
-        )
-        bot.register_next_step_handler(call.message, _process_discount_code)
-        bot.answer_callback_query(call.id)
-        return
-
-    # پاک کردن state
-    user_states.pop(uid, None)
-
-    from services.payments import start_wallet_charge_payment
-    start_wallet_charge_payment(
-        bot=bot,
-        message=call.message,
-        uid=uid,
-        amount=eff_price,
-        clear_user_state=clear_user_state,
-        payment_type="product",
-        product_id=pid,
-        wallet_reserved=0
-    )
-    
-#======================== confirm_wallet =====================
-@bot.callback_query_handler(func=lambda call: call.data.startswith("confirm_wallet_"))
-def handle_confirm_wallet(call):
-    parts = call.data.split("_")
-    if len(parts) < 4:
-        bot.answer_callback_query(call.id, "داده نامعتبر است", show_alert=True)
-        return
-    pid_str = parts[-1]
-    category = "_".join(parts[2:-1])
-    if not pid_str.isdigit():
-        bot.answer_callback_query(call.id, "شناسه محصول نامعتبر است", show_alert=True)
-        return
-    pid = int(pid_str)
-    uid = call.from_user.id
-
-    product = get_product_by_id(pid)
-    if not product:
-        bot.answer_callback_query(call.id, "محصول یافت نشد", show_alert=True)
-        return
-
-    exceeded, limit_val = _daily_limit_exceeded(uid, product, pid)
-    if exceeded:
-        bot.answer_callback_query(call.id, f"سقف خرید روزانه ({limit_val}) تکمیل شده است.", show_alert=True)
-        return
-
-    title = product[2]
-    price = product[3]
-    partner_price = product[6] if len(product) > 6 else None
-    partner_ok = is_partner_approved(uid)
-    eff_price = partner_price if (partner_ok and partner_price) else price
-
-    # تخفیف اعمال شده؟
-    discount = user_states.get(uid, {}).get("applied_discount", 0)
-    eff_price = max(0, eff_price - discount)
-
-    # اگه تخفیف هنوز پرسیده نشده → قبل از پرداخت کد بخواه
-    if not discount and not user_states.get(uid, {}).get("discount_asked"):
-        st = user_states.setdefault(uid, {})
-        st["discount_asked"] = True
-        st["pending_cb"] = call.data
-        st["pid"] = pid
-        st["category"] = category
-        st["eff_price"] = eff_price
-
-        kb = types.InlineKeyboardMarkup()
-        kb.add(types.InlineKeyboardButton(
-            f"✅ ادامه بدون تخفیف — {eff_price:,} تومان",
-            callback_data=f"pay_nodiscount_{category}_{pid_str}"
-        ))
-        bot.send_message(
-            call.message.chat.id,
-            f"🛒 <b>{title}</b>\n"
-            f"💰 مبلغ: <b>{eff_price:,}</b> تومان\n\n"
-            "🎟 اگر کد تخفیف دارید همین الان ارسال کنید.\n"
-            "در غیر این صورت دکمه زیر را بزنید:",
-            parse_mode="HTML", reply_markup=kb
-        )
-        bot.register_next_step_handler(call.message, _process_discount_code)
-        bot.answer_callback_query(call.id)
-        return
-
-    # پاک کردن state
-    user_states.pop(uid, None)
-
-    wallet_balance = get_wallet_balance(uid)
-    if wallet_balance >= eff_price:
-        finalize_product_order(call, uid, product, category, eff_price)
-        return
-
-    # 🔵 پرداخت ترکیبی: بخشی از کیف پول، بقیه از درگاه.
-    # مبلغ درگاه نباید کمتر از حداقل مجاز درگاه شود؛ در غیر این صورت
-    # سهم کیف پول را کم می‌کنیم تا سهم درگاه به حداقل برسد.
-    gateway_amount = max(MIN_TOPUP_AMOUNT, eff_price - wallet_balance)
-    wallet_reserved = eff_price - gateway_amount
-    if wallet_reserved < 0:
-        wallet_reserved = 0
-        gateway_amount = eff_price
-
-    from services.payments import start_wallet_charge_payment
-
-    start_wallet_charge_payment(
-        bot=bot,
-        message=call.message,
-        uid=uid,
-        amount=gateway_amount,
-        clear_user_state=clear_user_state,
-        payment_type="product",
-        product_id=pid,
-        wallet_reserved=wallet_reserved
-    )
-    
-    
-@bot.callback_query_handler(func=lambda c: c.data.startswith("pay_nodiscount_"))
-def handle_pay_nodiscount(call):
-    uid = call.from_user.id
-    pending_cb = user_states.get(uid, {}).get("pending_cb", "")
-    if not pending_cb:
-        bot.answer_callback_query(call.id, "خطا — دوباره امتحان کنید", show_alert=True)
-        return
-    user_states.setdefault(uid, {})["discount_asked"] = True
-    call.data = pending_cb
-    if pending_cb.startswith("confirm_full_"):
-        handle_confirm_full(call)
-    else:
-        handle_confirm_wallet(call)
-
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("discount_start_"))
-def handle_discount_start(call):
-    pass  # deprecated — kept for compat
-
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("discount_skip_"))
-def handle_discount_skip(call):
-    pass  # deprecated
-
-
-def _process_discount_code(message):
-    """کاربر کد تخفیف تایپ کرد."""
-    uid = message.from_user.id
-    code = (message.text or "").strip()
-
-    # اگه پیام واقعی نیست نادیده بگیر
-    if not code or len(code) < 2:
-        return
-
-    state = user_states.get(uid, {})
-    pid = state.get("pid", 0)
-    category = state.get("category", "")
-    eff_price = state.get("eff_price", 0)
-    pending_cb = state.get("pending_cb", "")
-
-    result = validate_discount(code, product_id=pid, amount=eff_price)
-
-    if not result["valid"]:
-        kb = types.InlineKeyboardMarkup()
-        kb.add(types.InlineKeyboardButton(
-            f"✅ ادامه بدون تخفیف — {eff_price:,} تومان",
-            callback_data=f"pay_nodiscount_{category}_{pid}"
-        ))
-        bot.send_message(message.chat.id,
-            f"❌ {result['error']}", reply_markup=kb)
-        return
-
-    discount = result["discount_amount"]
-    use_discount(result["code_id"])
-    final_price = max(0, eff_price - discount)
-
-    state["applied_discount"] = discount
-    state["eff_price"] = final_price
-    user_states[uid] = state
-
-    kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton(
-        f"✅ پرداخت — {final_price:,} تومان",
-        callback_data=pending_cb
-    ))
-    bot.send_message(message.chat.id,
-        f"✅ کد تخفیف اعمال شد!\n"
-        f"🎟 تخفیف: <b>{discount:,}</b> تومان\n"
-        f"💳 مبلغ نهایی: <b>{final_price:,}</b> تومان",
-        parse_mode="HTML", reply_markup=kb
-    )
-
-
-# ─── کد تخفیف ───────────────────────────────────────────────────────────────
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("apply_discount_"))
-def handle_discount_prompt(call):
-    """ارسال prompt برای دریافت کد تخفیف."""
-    uid = call.from_user.id
-    # save callback data so we can resume after discount
-    state = user_states.get(uid, {})
-    state["discount_resume_cb"] = call.data.replace("apply_discount_", "")
-    user_states[uid] = state
-    kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("❌ بدون تخفیف", callback_data="skip_discount"))
-    bot.send_message(call.message.chat.id,
-        "🎟 کد تخفیف خود را ارسال کنید:\n(در صورت نداشتن، گزینه «بدون تخفیف» را انتخاب کنید)",
-        reply_markup=kb)
-    bot.register_next_step_handler(call.message, _process_discount_code)
-
-
-def _process_discount_code(message):
-    uid = message.from_user.id
-    code = (message.text or "").strip()
-    state = user_states.get(uid, {})
-
-    pid = state.get("pid", 0)
-    category = state.get("category", "")
-    eff_price = state.get("eff_price", 0)
-
-    result = validate_discount(code, product_id=pid, amount=eff_price)
-    if not result["valid"]:
-        kb = types.InlineKeyboardMarkup()
-        kb.add(types.InlineKeyboardButton(
-            "❌ بدون تخفیف ← ادامه",
-            callback_data=f"discount_skip_{category}_{pid}"
-        ))
-        bot.send_message(message.chat.id,
-            f"❌ {result['error']}",
-            reply_markup=kb)
-        return
-
-    discount = result["discount_amount"]
-    use_discount(result["code_id"])
-    state["applied_discount"] = discount
-    user_states[uid] = state
-
-    final_price = max(0, eff_price - discount)
-    kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton(
-        f"✅ ادامه خرید — {final_price:,} تومان",
-        callback_data=f"confirm_wallet_{category}_{pid}"
-    ))
-    bot.send_message(message.chat.id,
-        f"✅ کد تخفیف اعمال شد!\n"
-        f"💰 تخفیف: <b>{discount:,}</b> تومان\n"
-        f"💳 مبلغ نهایی: <b>{final_price:,}</b> تومان",
-        parse_mode="HTML",
-        reply_markup=kb
-    )
-
-
-@bot.callback_query_handler(func=lambda c: c.data == "skip_discount")
-def handle_skip_discount(call):
-    uid = call.from_user.id
-    resume_cb = user_states.get(uid, {}).get("discount_resume_cb", "")
-    if resume_cb:
-        call.data = resume_cb
-        if resume_cb.startswith("confirm_wallet_"):
-            handle_confirm_wallet(call)
-        elif resume_cb.startswith("confirm_full_"):
-            handle_confirm_full(call)
-
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("resume_buy_"))
-def handle_resume_buy(call):
-    original_cb = call.data[len("resume_buy_"):]
-    call.data = original_cb
-    if original_cb.startswith("confirm_wallet_"):
-        handle_confirm_wallet(call)
-    elif original_cb.startswith("confirm_full_"):
-        handle_confirm_full(call)
-
-
-# ─── اشتراک موجودی ───────────────────────────────────────────────────────────
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("notify_stock_"))
-def handle_notify_stock(call):
-    uid = call.from_user.id
-    pid = int(call.data.split("_")[-1])
-    added = subscribe_stock(uid, pid)
-    if added:
-        bot.answer_callback_query(call.id, "✅ به‌محض موجود شدن اطلاع داده می‌شود", show_alert=True)
-    else:
-        bot.answer_callback_query(call.id, "قبلاً ثبت شده‌اید", show_alert=False)
-
-
-# ─── پشتیبانی محصول پس از خرید ───────────────────────────────────────────────
-
-
-
-def send_admin_categories(chat_id):
-    kb = types.InlineKeyboardMarkup()
-    kb.add(
-        types.InlineKeyboardButton(
-            "سایر محصولات فروشگاه🛍", callback_data="admin_other_products"
-        ),
-        types.InlineKeyboardButton(
-            "📱 سرویس‌های اپل آیدی", callback_data="admin_products_cat_apple"
-        ),
-    )
-    
-    kb.add(types.InlineKeyboardButton("⬅️ بازگشت", callback_data="admin_back"))
-    bot.send_message(chat_id, "یکی از دسته‌بندی‌های محصولات را انتخاب کنید:", reply_markup=kb)
-
-
-def send_admin_product_detail(call_message, product, edit=False):
-    pid = int(product[0])
-    try:
-        import sqlite3
-        _conn = sqlite3.connect(DB_FULL_PATH)
-        _row = _conn.execute(
-            'SELECT daily_limit_customer, daily_limit_partner FROM products WHERE id=?',
-            (pid,)
-        ).fetchone()
-        _conn.close()
-        _lim_c = _row[0] if _row else None
-        _lim_p = _row[1] if _row else None
-    except Exception:
-        _lim_c, _lim_p = None, None
-
-    pid, category, title, price, description, is_active = product[0:6]
-    partner_price = product[6] if len(product) > 6 else None
-    daily_lim_c = product[7] if len(product) > 7 else None
-    daily_lim_p = product[8] if len(product) > 8 else None
-
-    status = "✅ فعال" if is_active else "❌ غیرفعال"
-    lim_c_show = 'نامحدود' if (_lim_c is None or int(_lim_c) == 0) else str(int(_lim_c))
-    lim_p_show = 'نامحدود' if (_lim_p is None or int(_lim_p) == 0) else str(int(_lim_p))
-
-    text = (
-        f"مدیریت محصول #{pid}\n\n"
-        f"دسته: <b>{category}</b>\n"
-        f"عنوان: <b>{title}</b>\n"
-        f"قیمت: <b>{price:,}</b> تومان\n"
-        f"قیمت همکار: <b>{(partner_price if partner_price is not None else price):,}</b> تومان\n"
-        f"حد خرید روزانه مشتری: <b>{lim_c_show}</b>\n"
-        f"حد خرید روزانه همکار: <b>{lim_p_show}</b>\n"
-        f"وضعیت: {status}\n\n"
-        f"توضیحات:\n{description or '---'}"
-    )
-    total, remaining, delivered = get_feed_stats(pid)
-    threshold, _last = get_feed_alert_setting(pid)
-    text += (
-        "\n\n📦 موجودی خودکار:\n"
-        f"کل: <b>{total}</b> | باقی‌مانده: <b>{remaining}</b> | تحویل‌شده: <b>{delivered}</b>\n"
-        f"⚠️ آستانه هشدار: <b>{threshold}</b>"
-    )
-    kb = types.InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        types.InlineKeyboardButton("✏️ ویرایش عنوان", callback_data=f"admin_edit_title_{pid}"),
-        types.InlineKeyboardButton("✏️ ویرایش قیمت", callback_data=f"admin_edit_price_{pid}"),
-    )
-    kb.add(
-        types.InlineKeyboardButton("🤝 ویرایش قیمت همکار", callback_data=f"admin_edit_partner_price_{pid}"),
-        types.InlineKeyboardButton("🧾 ویرایش توضیحات", callback_data=f"admin_edit_desc_{pid}"),
-    )
-    kb.add(
-        types.InlineKeyboardButton("⛔️ حد خرید مشتری", callback_data=f"admin_set_limit_c_{pid}"),
-        types.InlineKeyboardButton("⛔️ حد خرید همکار", callback_data=f"admin_set_limit_p_{pid}"),
-    )
-    kb.add(
-        types.InlineKeyboardButton("📦 بارگذار محصول", callback_data=f"admin_feed_bulk_{pid}"),
-        types.InlineKeyboardButton("⚠️ تنظیم هشدار موجودی", callback_data=f"admin_feed_alert_{pid}"),
-    )
-    # product chat toggle
-    try:
-        _chat_on = _get_product_chat_enabled(pid)
-    except Exception:
-        _chat_on = 0
-    chat_label = ("💬 چت محصول: ✅ روشن" if int(_chat_on)==1 else "💬 چت محصول: ❌ خاموش")
-    kb.add(types.InlineKeyboardButton(chat_label, callback_data=f"admin_toggle_chat_{pid}"))
-    kb.add(types.InlineKeyboardButton("✏️ تنظیم متن چت", callback_data=f"admin_set_chattext_{pid}"))
-    kb.add(
-        types.InlineKeyboardButton(
-            "🔴 غیرفعال کردن" if is_active else "🟢 فعال کردن",
-            callback_data=f"admin_toggle_active_{pid}"
-        )
-    )
-    
-    kb.add(types.InlineKeyboardButton("⬅️ بازگشت", callback_data="admin_products_back"))
-    # Stack navigation policy: always send a new message; do not edit the previous one.
-    bot.send_message(call_message.chat.id, text, reply_markup=kb)
-
-
-FEED_PAGE_SIZE = 5
-
-def _feed_item_preview(data: str, max_len: int = 80) -> str:
-    data = (data or "").strip()
-    if not data:
-        return "---"
-    first_line = data.splitlines()[0].strip()
-    if len(first_line) > max_len:
-        return first_line[: max_len - 1] + "…"
-    return first_line
-
-
-def send_admin_feed_list(chat_id: int, product_id: int, page: int = 0, mode: int = 0, message_id: int | None = None):
-    pid = int(product_id)
-    page = max(int(page or 0), 0)
-    mode = int(mode or 0)
-
-    delivered_filter = 0 if mode == 0 else None
-    total = count_feed_items(pid, delivered_filter)
-    pages = max((total + FEED_PAGE_SIZE - 1) // FEED_PAGE_SIZE, 1)
-    if page >= pages:
-        page = pages - 1
-
-    offset = page * FEED_PAGE_SIZE
-    rows = list_feed_items(pid, delivered_filter, limit=FEED_PAGE_SIZE, offset=offset)
-
-    feed_ids = [int(r[0]) for r in rows] if rows else []
-    order_map = _get_order_id_map(feed_ids) if feed_ids else {}
-
-    total_all, remaining, delivered = get_feed_stats(pid)
-    header_mode = "فقط تحویل‌نشده" if mode == 0 else "همه"
-
-    text = (
-        f"📦 مدیریت بارگذاری محصول (Product ID) #{pid}\n"
-        f"حالت نمایش: <b>{header_mode}</b>\n"
-        f"صفحه: <b>{page+1}</b> / <b>{pages}</b>\n\n"
-        f"آمار: کل <b>{total_all}</b> | باقی‌مانده <b>{remaining}</b> | تحویل‌شده <b>{delivered}</b>\n"
-        f"نمایش فعلی: <b>{total}</b> آیتم\n"
-        f"شناسه‌های داخل لیست: <b>Feed ID</b> (Order ID فقط برای آیتم‌های تحویل‌شده نمایش داده می‌شود)\n\n"
-    )
-
-    if not rows:
-        text += "فعلاً آیتمی برای این حالت وجود ندارد."
-    else:
-        for rid, data, is_del, created_at in rows:
-            status = "✅" if int(is_del) == 1 else "📦"
-            prev = html.escape(_feed_item_preview(data))
-            oid = order_map.get(int(rid))
-            dn = _display_order_no(oid)
-            suffix = f" — <b>Order #{dn}</b>" if dn is not None else ""
-            text += f"{status} <b>Feed #{rid}</b>{suffix} — <code>{prev}</code>\n"
-
-    kb = types.InlineKeyboardMarkup(row_width=2)
-
-    if rows:
-        for rid, data, is_del, created_at in rows:
-            kb.add(
-                types.InlineKeyboardButton(f"👁 Feed #{rid}", callback_data=f"admin_feed_view_{rid}_{pid}_{page}_{mode}"),
-                types.InlineKeyboardButton(
-                    ("✅ موجود" if int(is_del) == 0 else "♻️ برگشت"),
-                    callback_data=f"admin_feed_toggle_{rid}_{pid}_{page}_{mode}",
-                ),
-            )
-            kb.add(
-                types.InlineKeyboardButton("🗑 حذف", callback_data=f"admin_feed_delete_{rid}_{pid}_{page}_{mode}"),
-            )
-
-    nav_row = []
-    if page > 0:
-        nav_row.append(types.InlineKeyboardButton("⬅️ قبلی", callback_data=f"admin_feed_list_{pid}_{page-1}_{mode}"))
-    if page < pages - 1:
-        nav_row.append(types.InlineKeyboardButton("بعدی ➡️", callback_data=f"admin_feed_list_{pid}_{page+1}_{mode}"))
-    if nav_row:
-        kb.add(*nav_row)
-
-    kb.add(
-        types.InlineKeyboardButton("📃 تحویل‌نشده‌ها", callback_data=f"admin_feed_list_{pid}_0_0"),
-        types.InlineKeyboardButton("📃 همه", callback_data=f"admin_feed_list_{pid}_0_1"),
-    )
-    kb.add(types.InlineKeyboardButton("⬅️ بازگشت به محصول", callback_data=f"admin_product_{pid}"))
-
-    if message_id:
-        safe_edit_message_text(text, chat_id=chat_id, message_id=message_id, reply_markup=kb, parse_mode="HTML")
-    else:
-        bot.send_message(chat_id, text, reply_markup=kb, parse_mode="HTML")
-
-
-
-# ========= FEED MANAGEMENT (GLOBAL PANEL) =========
-
-FEED_GLOBAL_PAGE_SIZE = 10
-
-def admin_feed_panel_menu():
-    kb = types.InlineKeyboardMarkup(row_width=1)
-    kb.add(
-        types.InlineKeyboardButton("📊 آمار دسته‌بندی / موجودی", callback_data="admin_feed_panel_stats"),
-        types.InlineKeyboardButton("📃 همه", callback_data="admin_feed_panel_0_0"),
-        types.InlineKeyboardButton("✅ محصولات ارسال‌شده", callback_data="admin_feed_panel_1_0"),
-        types.InlineKeyboardButton("📦 محصولات ارسال‌نشده", callback_data="admin_feed_panel_2_0"),
-        types.InlineKeyboardButton("⬅️ بازگشت", callback_data="admin_back"),
-    )
-    return kb
-
-
-
-def count_feed_items_global(delivered_filter: int | None, category_key: str | None = None):
-    import sqlite3
-    conn = sqlite3.connect(DB_FULL_PATH)
-    cur = conn.cursor()
-
-    where = []
-    params = []
-    if delivered_filter is not None:
-        where.append("pf.delivered=?")
-        params.append(int(delivered_filter))
-    if category_key:
-        where.append("p.category=?")
-        params.append(str(category_key))
-
-    if where:
-        cur.execute(
-            "SELECT COUNT(*) FROM product_feed pf LEFT JOIN products p ON p.id=pf.product_id WHERE " + " AND ".join(where),
-            tuple(params),
-        )
-    else:
-        cur.execute("SELECT COUNT(*) FROM product_feed")
-    total = cur.fetchone()[0]
-    conn.close()
-    return int(total or 0)
-
-
-def list_feed_items_global(delivered_filter: int | None, limit: int = 50, offset: int = 0, category_key: str | None = None):
-    import sqlite3
-    conn = sqlite3.connect(DB_FULL_PATH)
-    cur = conn.cursor()
-
-    where = []
-    params = []
-    if delivered_filter is not None:
-        where.append("pf.delivered=?")
-        params.append(int(delivered_filter))
-    if category_key:
-        where.append("p.category=?")
-        params.append(str(category_key))
-
-    base_sql = '''
-        SELECT pf.id, pf.product_id, COALESCE(p.category,''), COALESCE(p.title,''), pf.data, pf.delivered, pf.created_at
-        FROM product_feed pf
-        LEFT JOIN products p ON p.id = pf.product_id
-    '''
-    if where:
-        base_sql += " WHERE " + " AND ".join(where)
-    base_sql += " ORDER BY pf.id DESC LIMIT ? OFFSET ?"
-
-    params.extend([int(limit), int(offset)])
-    cur.execute(base_sql, tuple(params))
-
-    rows = cur.fetchall()
-    conn.close()
-    return rows
-
-
-def get_feed_stats_by_category():
-    """Return list of dicts: category, total, delivered, undelivered."""
-    import sqlite3
-    conn = sqlite3.connect(DB_FULL_PATH)
-    cur = conn.cursor()
-    cur.execute(
-        '''
-        SELECT COALESCE(p.category,'') AS category,
-               COUNT(*) AS total,
-               SUM(CASE WHEN pf.delivered=1 THEN 1 ELSE 0 END) AS delivered,
-               SUM(CASE WHEN pf.delivered=0 THEN 1 ELSE 0 END) AS undelivered
-        FROM product_feed pf
-        LEFT JOIN products p ON p.id = pf.product_id
-        GROUP BY COALESCE(p.category,'')
-        ORDER BY total DESC
-        '''
-    )
-    rows = cur.fetchall()
-    conn.close()
-    out = []
-    for cat, total, deliv, undel in rows:
-        out.append(
-            {
-                "category": str(cat or "").strip() or "uncategorized",
-                "total": int(total or 0),
-                "delivered": int(deliv or 0),
-                "undelivered": int(undel or 0),
-            }
-        )
-    return out
-
-
-def send_admin_feed_panel_stats(chat_id: int, message_id: int | None = None):
-    stats = get_feed_stats_by_category()
-    total_all = sum(s["total"] for s in stats)
-    delivered_all = sum(s["delivered"] for s in stats)
-    undelivered_all = sum(s["undelivered"] for s in stats)
-
-    text = (
-        "📊 <b>آمار بارگذاری محصول / موجودی (بر اساس دسته‌بندی)</b>\n\n"
-        f"کل آیتم‌ها: <b>{total_all}</b>\n"
-        f"ارسال‌شده: <b>{delivered_all}</b>\n"
-        f"ارسال‌نشده (موجودی): <b>{undelivered_all}</b>\n\n"
-        "—\n"
-    )
-
-    if not stats:
-        text += "هیچ آیتمی ثبت نشده است."
-    else:
-        for s in stats:
-            text += (
-                f"• <b>{html.escape(s['category'])}</b>: "
-                f"کل <b>{s['total']}</b> | "
-                f"ارسال‌شده <b>{s['delivered']}</b> | "
-                f"موجودی <b>{s['undelivered']}</b>\n"
-            )
-
-    kb = types.InlineKeyboardMarkup(row_width=2)
-    # quick category drill-down buttons (all items for that category)
-    if stats:
-        for s in stats[:8]:  # avoid huge keyboards
-            cat = s["category"]
-            # category keys are short (e.g. apple/gmail). if not safe, skip.
-            if len(cat) <= 20 and re.fullmatch(r"[A-Za-z0-9_-]+", cat):
-                kb.add(types.InlineKeyboardButton(f"📂 {cat}", callback_data=f"admin_feed_panel_cat_{cat}_0_0"))
-    kb.add(types.InlineKeyboardButton("⬅️ بازگشت به مدیریت محصول", callback_data="admin_feed_panel"))
-    kb.add(types.InlineKeyboardButton("⬅️ بازگشت", callback_data="admin_back"))
-
-    if message_id:
-        safe_edit_message_text(text, chat_id=chat_id, message_id=message_id, reply_markup=kb, parse_mode="HTML")
-    else:
-        bot.send_message(chat_id, text, reply_markup=kb, parse_mode="HTML")
-
-
-def send_admin_feed_panel_list_by_category(chat_id: int, category_key: str, page: int = 0, mode: int = 0, message_id: int | None = None):
-    # wrapper so callbacks remain distinct
-    send_admin_feed_panel_list(chat_id, page=page, mode=mode, message_id=message_id, category_key=category_key)
-
-def _date_key(created_at: str | None) -> str:
-    if not created_at:
-        return "بدون تاریخ"
-    # supports ISO or 'YYYY-MM-DD HH:MM:SS'
-    if "T" in created_at:
-        return created_at.split("T")[0]
-    return created_at.split(" ")[0]
-
-
-def send_admin_feed_panel_list(chat_id: int, page: int = 0, mode: int = 0, message_id: int | None = None, category_key: str | None = None):
-    page = max(int(page or 0), 0)
-    mode = int(mode or 0)
-
-    if mode == 1:
-        delivered_filter = 1
-        header_mode = "محصولات ارسال‌شده"
-    elif mode == 2:
-        delivered_filter = 0
-        header_mode = "محصولات ارسال‌نشده"
-    else:
-        delivered_filter = None
-        header_mode = "همه"
-
-    if category_key:
-        header_mode = f"{header_mode} | دسته: {category_key}"
-
-    total = count_feed_items_global(delivered_filter, category_key=category_key)
-    pages = max((total + FEED_GLOBAL_PAGE_SIZE - 1) // FEED_GLOBAL_PAGE_SIZE, 1)
-    if page >= pages:
-        page = pages - 1
-
-    offset = page * FEED_GLOBAL_PAGE_SIZE
-    rows = list_feed_items_global(delivered_filter, limit=FEED_GLOBAL_PAGE_SIZE, offset=offset, category_key=category_key)
-
-    feed_ids = [int(r[0]) for r in rows] if rows else []
-    order_map = _get_order_id_map(feed_ids) if feed_ids else {}
-
-    text = (
-        "📦 مدیریت محصولات (سراسری)\n"
-        f"حالت نمایش: <b>{header_mode}</b>\n"
-        f"صفحه: <b>{page+1}</b> / <b>{pages}</b>\n"
-        f"تعداد آیتم: <b>{total}</b>\n\n"
-        "نمایش به‌صورت مرتب‌سازی بر اساس زمان/شناسه بارگذاری (جدیدترین بالا).\n"
-        "شناسه: <b>Feed ID</b> و در صورت ارسال‌شده بودن، <b>Order ID</b> همان سفارش است.\n\n"
-    )
-
-    if not rows:
-        text += "فعلاً آیتمی وجود ندارد."
-    else:
-        last_day = None
-        for rid, pid, cat, title, data, is_del, created_at in rows:
-            day = _date_key(created_at)
-            if day != last_day:
-                text += f"\n🗓 <b>{html.escape(day)}</b>\n"
-                last_day = day
-            status = "✅" if int(is_del) == 1 else "📦"
-            prev = html.escape(_feed_item_preview(data))
-            oid = order_map.get(int(rid))
-            dn = _display_order_no(oid)
-            suffix = f" — <b>Order #{dn}</b>" if dn is not None else ""
-            prod = f"محصول #{pid} | {html.escape(title)}"
-            if cat:
-                prod = f"{html.escape(cat)} | {prod}"
-            text += f"{status} <b>Feed #{rid}</b>{suffix} — {prod} — <code>{prev}</code>\n"
-
-    panel_prefix = (f"admin_feed_panel_cat_{category_key}_" if category_key else "admin_feed_panel_")
-
-    kb = types.InlineKeyboardMarkup(row_width=2)
-
-    if rows:
-        for rid, pid, cat, title, data, is_del, created_at in rows:
-            kb.add(
-                types.InlineKeyboardButton(f"👁 Feed #{rid}", callback_data=(f"admin_feed_panel_view_{rid}_{page}_{mode}_{category_key}" if category_key else f"admin_feed_panel_view_{rid}_{page}_{mode}")),
-                types.InlineKeyboardButton(
-                    ("✅ موجود" if int(is_del) == 0 else "♻️ برگشت"),
-                    callback_data=(f"admin_feed_panel_toggle_{rid}_{page}_{mode}_{category_key}" if category_key else f"admin_feed_panel_toggle_{rid}_{page}_{mode}"),
-                ),
-            )
-            kb.add(types.InlineKeyboardButton("🗑 حذف", callback_data=(f"admin_feed_panel_delete_{rid}_{page}_{mode}_{category_key}" if category_key else f"admin_feed_panel_delete_{rid}_{page}_{mode}")))
-
-    nav_row = []
-    if page > 0:
-        nav_row.append(types.InlineKeyboardButton("⬅️ قبلی", callback_data=f"{panel_prefix}{mode}_{page-1}"))
-    if page < pages - 1:
-        nav_row.append(types.InlineKeyboardButton("بعدی ➡️", callback_data=f"{panel_prefix}{mode}_{page+1}"))
-    if nav_row:
-        kb.add(*nav_row)
-
-    kb.add(
-        types.InlineKeyboardButton("📃 همه", callback_data=(f"{panel_prefix}0_0")),
-        types.InlineKeyboardButton("✅ ارسال‌شده", callback_data=(f"{panel_prefix}1_0")),
-        types.InlineKeyboardButton("📦 ارسال‌نشده", callback_data=(f"{panel_prefix}2_0")),
-    )
-    if category_key:
-        kb.add(types.InlineKeyboardButton("🧹 پاک کردن فیلتر دسته", callback_data="admin_feed_panel_0_0"))
-    kb.add(types.InlineKeyboardButton("⬅️ بازگشت", callback_data="admin_back"))
-
-    #if message_id:
-        #safe_edit_message_text(text, chat_id=chat_id, message_id=message_id, reply_markup=kb, parse_mode="HTML")
-    #else:
-       #bot.send_message(chat_id, text, reply_markup=kb, parse_mode="HTML")
-    if message_id:
-        try:
-            bot.edit_message_text(
-                text=text,
-                chat_id=chat_id,
-                message_id=message_id,
-                reply_markup=kb,
-                parse_mode="HTML"
-            )
-        except Exception:
-            bot.send_message(
-                chat_id,
-                text,
-                reply_markup=kb,
-                parse_mode="HTML"
-            )
-    else:
-        bot.send_message(
-            chat_id,
-            text,
-            reply_markup=kb,
-            parse_mode="HTML"
-        )
-
-def send_admin_feed_panel_view(chat_id: int, feed_id: int, page: int = 0, mode: int = 0, message_id: int | None = None, category_key: str | None = None):
-    import sqlite3
-    fid = int(feed_id)
-    conn = sqlite3.connect(DB_FULL_PATH)
-    row = conn.execute(
-        '''
-        SELECT pf.id, pf.product_id, COALESCE(p.category,''), COALESCE(p.title,''), pf.data, pf.delivered, pf.created_at
-        FROM product_feed pf
-        LEFT JOIN products p ON p.id = pf.product_id
-        WHERE pf.id=?
-        ''',
-        (fid,),
-    ).fetchone()
-    conn.close()
-
-    if not row:
-        bot.send_message(chat_id, "این آیتم یافت نشد.")
-        return
-
-    rid, pid, cat, title, data, is_del, created_at = row
-    # Resolve Order ID (if this feed was delivered). Prefer persistent delivery_messages mapping.
-    oid = None
-    try:
-        _info = _get_delivery_message(int(rid))
-        if _info and len(_info) >= 3:
-            oid = _info[2]
-    except Exception:
-        oid = None
-    # Backward-compat: if an older helper exists in some versions, try it.
-    if oid is None:
-        try:
-            oid = _get_order_id_by_feed_id(int(rid))  # type: ignore[name-defined]
-        except Exception:
-            oid = None
-
-    dn = _display_order_no(oid)
-    order_line = f"Order ID: <b>{dn}</b>\n" if dn is not None else ""
-
-    text = (
-        f"👁 مشاهده محصولات\n\n"
-        f"Feed ID: <b>{rid}</b>\n"
-        f"Product ID: <b>{pid}</b>\n"
-        f"Category: <b>{html.escape(cat)}</b>\n"
-        f"Title: <b>{html.escape(title)}</b>\n"
-        f"{order_line}"
-        f"Status: <b>{('ارسال‌شده ✅' if int(is_del)==1 else 'ارسال‌نشده 📦')}</b>\n"
-        f"Created: <b>{html.escape(str(created_at or ''))}</b>\n\n"
-        f"<pre>{html.escape(str(data or ''))}</pre>"
-    )
-
-    kb = types.InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        types.InlineKeyboardButton(
-            ("✅ تحویل" if int(is_del) == 0 else "♻️ برگشت"),
-            callback_data=(f"admin_feed_panel_toggle_{rid}_{page}_{mode}_{category_key}" if category_key else f"admin_feed_panel_toggle_{rid}_{page}_{mode}"),
-        ),
-        types.InlineKeyboardButton("🗑 حذف", callback_data=(f"admin_feed_panel_delete_{rid}_{page}_{mode}_{category_key}" if category_key else f"admin_feed_panel_delete_{rid}_{page}_{mode}")),
-    )
-    kb.add(types.InlineKeyboardButton("⬅️ بازگشت به لیست", callback_data=(f"admin_feed_panel_cat_{category_key}_{mode}_{page}" if category_key else f"admin_feed_panel_{mode}_{page}")))
-
-    if message_id:
-        safe_edit_message_text(text, chat_id=chat_id, message_id=message_id, reply_markup=kb, parse_mode="HTML")
-    else:
-        bot.send_message(chat_id, text, reply_markup=kb, parse_mode="HTML")
-
-
-@bot.message_handler(commands=["myid"])
-def handle_myid(message):
-    bot.send_message(
-        message.chat.id, f"آیدی عددی شما: <code>{message.from_user.id}</code>"
-    )
-
-
-@bot.message_handler(commands=["admin"])
-def handle_admin_cmd(message):
-    if not ensure_admin(message.from_user.id):
-        return
-    bot.send_message(
-        message.chat.id,
-        "پنل مدیریت 👇",
-        reply_markup=admin_main_inline(),
-    )
-
-
-# ========= TEXT HANDLERS (USER) =========
-
-
-def _show_category(chat_id: int, cat_id: int, user_id: int = None, msg_id: int = None):
-    """نمایش محتوای یک دسته — زیردسته‌ها یا محصولات"""
-    cat = get_category(cat_id)
-    if not cat:
-        bot.send_message(chat_id, "دسته‌بندی یافت نشد.")
-        return
-
-    emoji = (cat["emoji"] or "").strip()
-    title = f"{emoji} {cat['name']}".strip() if emoji else cat["name"]
-
-    # breadcrumb
-    path = get_category_path(cat_id)
-    breadcrumb = " › ".join(
-        f"{(c['emoji'] or '').strip()} {c['name']}".strip() for c in path
-    )
-
-    subcats = get_subcategories(cat_id, active_only=True)
-    if subcats:
-        text = f"📂 {breadcrumb}\n\nیکی از دسته‌بندی‌های زیر را انتخاب کنید:"
-    else:
-        prods = get_category_products(cat_id, active_only=True)
-        if not prods:
-            text = f"📂 {breadcrumb}\n\nدر حال حاضر محصولی در این دسته موجود نیست."
-        else:
-            text = f"📂 {breadcrumb}\n\nیکی از محصولات زیر را انتخاب کنید:"
-
-    kb = category_inline_keyboard(cat_id, user_id=user_id)
-
-    if msg_id:
-        try:
-            bot.edit_message_text(text, chat_id, msg_id, reply_markup=kb)
-            return
-        except Exception:
-            pass
-    bot.send_message(chat_id, text, reply_markup=kb)
-
-
-# هندلر داینامیک دسته‌بندی‌ها (Reply Keyboard)
-@bot.message_handler(func=lambda m: bool(get_category_by_button_text(m.text or "")))
-def handle_category_button(message):
-    cat = get_category_by_button_text(message.text)
-    if not cat:
-        return
-    _show_category(message.chat.id, cat["id"], user_id=message.from_user.id)
-
-
-@bot.message_handler(func=lambda m: m.text == t("MAIN_BTN_WALLET"))
-def handle_wallet(message):
-    if not is_main_button_enabled("MAIN_BTN_WALLET"):
-        bot.reply_to(message, t("MSG_BTN_DISABLED"))
-        return
-
-    uid = message.from_user.id
-    balance = get_wallet_balance(uid)
-    text = tf("MSG_WALLET_BALANCE", balance=f"{balance:,}")
-    bot.send_message(message.chat.id, text, reply_markup=wallet_inline_keyboard(), parse_mode="HTML")
-
-
-def _is_my_orders_button(txt: str) -> bool:
-    if not txt:
-        return False
-    txt = txt.strip()
-    candidates = {
-        t("MAIN_BTN_MY_ORDERS", DEFAULT_UI_TEXTS.get("MAIN_BTN_MY_ORDERS", "خریدهای من 🧾")).strip(),
-        "🧾 خریدهای من",
-        "خریدهای من 🧾",
-        "خریدهای من",
-    }
-    return txt in candidates or "خریدهای من" in txt
-
-
-@bot.message_handler(func=lambda m: _is_my_orders_button(m.text or ""))
-def handle_my_orders_menu(message):
-    if not is_main_button_enabled("MAIN_BTN_MY_ORDERS"):
-        bot.reply_to(message, t("MSG_BTN_DISABLED"))
-        return
-    _show_my_orders(message.chat.id, message.from_user.id)
-
-
-def _show_my_orders(chat_id, uid):
-    """نمایش ۵ خرید آخر — لیست خطی + کلیک برای باز کردن محصول."""
-    try:
-        orders = get_recent_orders_by_user(int(uid), limit=5)
-    except Exception as ex:
-        logger.error("my_orders fetch error: %s", ex)
-        orders = []
-    if not orders:
-        bot.send_message(chat_id, "🛒 هنوز خریدی انجام نداده‌اید.")
-        return
-    lines = ["🛒 <b>خریدهای من</b>\n"]
-    kb = types.InlineKeyboardMarkup(row_width=1)
-    for i, o in enumerate(orders, 1):
-        oid, title, price, created_at = o
-        date_str = (created_at or "")[:10]
-        lines.append(f"{i}. {title} — {int(price):,} ت | {date_str}")
-        kb.add(types.InlineKeyboardButton(
-            f"📦 {i}. {str(title)[:40]}",
-            callback_data=f"myord_{oid}"
-        ))
-    lines.append("\n👇 برای مشاهده محصول روی هر سفارش بزنید:")
-    bot.send_message(chat_id, "\n".join(lines), parse_mode="HTML", reply_markup=kb)
-
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("myord_"))
-def cb_myord_detail(call):
-    uid = call.from_user.id
-    bot.answer_callback_query(call.id)
-    try:
-        oid = int(call.data.split("_")[-1])
-    except ValueError:
-        return
-    import sqlite3 as _sq
-    from config import DB_PATH as _DBP
-    conn = _sq.connect(_DBP)
-    conn.row_factory = _sq.Row
-    try:
-        order = conn.execute(
-            "SELECT * FROM orders WHERE id=? AND CAST(user_id AS INTEGER)=?;",
-            (oid, int(uid))
-        ).fetchone()
-        if not order:
-            bot.answer_callback_query(call.id, "سفارش یافت نشد", show_alert=True)
-            return
-        # محتوا از product_feed با feed_id
-        feed = None
-        try:
-            fid = order["feed_id"]
-            if fid:
-                feed = conn.execute(
-                    "SELECT data FROM product_feed WHERE id=?;", (fid,)
-                ).fetchone()
-        except Exception:
-            pass
-    finally:
-        conn.close()
-
-    title    = order["title"] or "—"
-    price    = int(order["price"] or 0)
-    date_str = (order["created_at"] or "")[:10]
-    feed_data = feed["data"] if feed else None
-
-    if feed_data:
-        text = (f"📦 <b>سفارش #{oid}</b>\n\n"
-                f"محصول: {title}\n"
-                f"مبلغ: {price:,} تومان\n"
-                f"تاریخ: {date_str}\n\n"
-                f"━━━━━━━━━━━━━━━\n<code>{feed_data}</code>")
-    else:
-        text = (f"📦 <b>سفارش #{oid}</b>\n\n"
-                f"محصول: {title}\n"
-                f"مبلغ: {price:,} تومان\n"
-                f"تاریخ: {date_str}\n\n"
-                f"ℹ️ محتوای این سفارش توسط پشتیبانی تحویل داده می‌شود.")
-
-    kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="myord_back"))
-    try:
-        bot.edit_message_text(text, call.message.chat.id, call.message.message_id,
-                              parse_mode="HTML", reply_markup=kb)
-    except Exception:
-        bot.send_message(call.message.chat.id, text, parse_mode="HTML", reply_markup=kb)
-
-
-@bot.callback_query_handler(func=lambda c: c.data == "myord_back")
-def cb_myord_back(call):
-    uid = call.from_user.id
-    bot.answer_callback_query(call.id)
-    orders = get_recent_orders_by_user(int(uid), limit=5)
-    if not orders:
-        try:
-            bot.edit_message_text("🛒 هنوز خریدی انجام نداده‌اید.",
-                                  call.message.chat.id, call.message.message_id)
-        except Exception:
-            bot.send_message(call.message.chat.id, "🛒 هنوز خریدی انجام نداده‌اید.")
-        return
-    lines = ["🛒 <b>خریدهای من</b>\n"]
-    kb = types.InlineKeyboardMarkup(row_width=1)
-    for i, o in enumerate(orders, 1):
-        oid, title, price, created_at = o
-        date_str = (created_at or "")[:10]
-        lines.append(f"{i}. {title} — {int(price):,} ت | {date_str}")
-        kb.add(types.InlineKeyboardButton(
-            f"📦 {i}. {str(title)[:40]}", callback_data=f"myord_{oid}"
-        ))
-    lines.append("\n👇 برای مشاهده محصول روی هر سفارش بزنید:")
-    try:
-        bot.edit_message_text("\n".join(lines), call.message.chat.id,
-                              call.message.message_id, parse_mode="HTML", reply_markup=kb)
-    except Exception:
-        bot.send_message(call.message.chat.id, "\n".join(lines),
-                         parse_mode="HTML", reply_markup=kb)
-
-
-@bot.message_handler(func=lambda m: m.text == t("MAIN_BTN_SUPPORT"))
-def handle_support(message):
-    if not is_main_button_enabled("MAIN_BTN_SUPPORT"):
-        bot.reply_to(message, t("MSG_BTN_DISABLED"))
-        return
-
-    uid = message.from_user.id
-    text_support = t("SUPPORT_TEXT", DEFAULT_UI_TEXTS.get("SUPPORT_TEXT", ""))
-    ticket_ensure_schema()
-    existing = ticket_get_open_support(uid)
-
-    kb = types.InlineKeyboardMarkup()
-    if existing:
-        kb.add(types.InlineKeyboardButton(
-            f"💬 ادامه مکالمه (تیکت #{existing['id']})",
-            callback_data=f"ticket_v2_continue_{existing['id']}"
-        ))
-    else:
-        kb.add(types.InlineKeyboardButton(
-            "📩 ارسال پیام به پشتیبانی",
-            callback_data="ticket_v2_new"
-        ))
-
-    bot.send_message(message.chat.id, text_support, reply_markup=kb)
-
-
-@bot.message_handler(func=lambda m: m.text == t("MAIN_BTN_PARTNER_PANEL"))
-def handle_partner_panel(message):
-    if not is_main_button_enabled("MAIN_BTN_PARTNER_PANEL"):
-        bot.reply_to(message, t("MSG_BTN_DISABLED"))
-        return
-
-    uid = message.from_user.id
-    if not is_partner_approved(uid):
-        bot.send_message(message.chat.id,
-            "پنل همکار 🤝\n\n"
-            "شما هنوز به‌عنوان همکار تایید نشده‌اید.\n"
-            "برای ثبت درخواست از «درخواست نمایندگی 📝» استفاده کنید.")
-        return
-
-    _show_partner_dashboard(message.chat.id, uid)
-
-
-def _show_partner_dashboard(chat_id, uid):
-    """داشبورد کامل همکار با سطح، آمار و لینک معرفی."""
-    from db import (get_partner_order_count, get_partner_tier_for, get_partner_tiers,
-                    get_referral_stats_for, ensure_partner_system_schema)
-    ensure_partner_system_schema()
-
-    order_count = get_partner_order_count(uid)
-    tier        = get_partner_tier_for(order_count)
-    all_tiers   = get_partner_tiers()
-    ref_stats   = get_referral_stats_for(uid)
-
-    # سطح بعدی و پیشرفت
-    next_tier = None
-    for t_ in all_tiers:
-        if t_["min_orders"] > order_count:
-            next_tier = t_
-            break
-
-    if next_tier:
-        prev_min = tier.get("min_orders", 0)
-        span     = next_tier["min_orders"] - prev_min
-        done     = order_count - prev_min
-        pct      = int((done / span) * 100) if span > 0 else 0
-        filled   = int(pct / 10)
-        bar      = "▓" * filled + "░" * (10 - filled)
-        next_line = (
-            f"\n📈 پیشرفت تا {next_tier['icon']} {next_tier['name']}:\n"
-            f"<code>{bar}</code> {pct}%\n"
-            f"({next_tier['min_orders'] - order_count} خرید دیگر تا ارتقا)"
-        )
-    else:
-        next_line = "\n🎉 شما در بالاترین سطح هستید!"
-
-    # سود و صرفه‌جویی
-    conn = None
-    saving = profit = 0
-    try:
-        import sqlite3 as _sq
-        from config import DB_PATH as _DBP
-        conn = _sq.connect(_DBP)
-        # مجموع خریدهای همکاری
-        row = conn.execute("""
-            SELECT COALESCE(SUM(price),0) FROM orders
-            WHERE CAST(user_id AS INTEGER)=? AND buyer_type='partner';
-        """, (uid,)).fetchone()
-        partner_total = int(row[0] or 0) if row else 0
-        profit = partner_total
-    except Exception:
-        partner_total = 0
-    finally:
-        if conn: conn.close()
-
-    text = (
-        f"🤝 <b>داشبورد همکار</b>\n"
-        f"━━━━━━━━━━━━━━━\n\n"
-        f"سطح فعلی: <b>{tier['icon']} {tier['name']}</b>\n"
-        f"🛒 خریدهای همکاری: <b>{order_count}</b>\n"
-        f"💰 مجموع خرید: <b>{partner_total:,}</b> تومان"
-        f"{next_line}\n\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"👥 <b>زیرمجموعه‌ها</b>\n"
-        f"معرفی‌ها: {ref_stats['total']} | پاداش دریافتی: {ref_stats['total_reward']:,} ت"
-    )
-
-    kb = types.InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        types.InlineKeyboardButton("🔗 لینک معرفی من", callback_data="partner_ref_link"),
-        types.InlineKeyboardButton("📊 آمار زیرمجموعه", callback_data="partner_sub_stats")
-    )
-    kb.add(
-        types.InlineKeyboardButton("💼 کیف‌پول همکاری", callback_data="partner_wallet"),
-        types.InlineKeyboardButton("💬 چت با پشتیبان", callback_data="partner_support")
-    )
-    kb.add(
-        types.InlineKeyboardButton("📖 راهنمای همکاری در فروش", callback_data="partner_guide")
-    )
-    bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=kb)
-
-
-@bot.callback_query_handler(func=lambda c: c.data == "partner_ref_link")
-def cb_partner_ref_link(call):
-    uid = call.from_user.id
-    bot.answer_callback_query(call.id)
-    from db import get_referral_stats_for, get_referral_settings
-    settings = get_referral_settings()
-    stats    = get_referral_stats_for(uid)
-    try:
-        bot_username = bot.get_me().username
-    except Exception:
-        bot_username = "your_bot"
-    link   = f"https://t.me/{bot_username}?start=ref_{uid}"
-    reward = settings.get("reward_amount", 5000)
-
-    text = (
-        f"🔗 <b>لینک معرفی اختصاصی شما</b>\n\n"
-        f"کد معرفی: <code>{uid}</code>\n\n"
-        f"لینک (برای کپی ضربه بزنید):\n"
-        f"<code>{link}</code>\n\n"
-        f"💡 دوستتان را به این لینک هدایت کنید.\n"
-        f"با اولین خرید موفق، <b>{reward:,}</b> تومان پاداش دریافت می‌کنید!\n\n"
-        f"📊 آمار:\n"
-        f"• معرفی‌ها: {stats['total']}\n"
-        f"• پاداش دریافتی: {stats['total_reward']:,} تومان"
-    )
-    kb = types.InlineKeyboardMarkup(row_width=1)
-    kb.add(
-        types.InlineKeyboardButton(
-            "🚀 ارسال لینک به دوستان",
-            url=f"https://t.me/share/url?url={link}&text=با+این+لینک+وارد+شو"
-        ),
-        types.InlineKeyboardButton("🔙 بازگشت", callback_data="partner_back")
-    )
-    bot.edit_message_text(text, call.message.chat.id, call.message.message_id,
-                          parse_mode="HTML", reply_markup=kb)
-
-
-@bot.callback_query_handler(func=lambda c: c.data == "partner_sub_stats")
-def cb_partner_sub_stats(call):
-    uid = call.from_user.id
-    bot.answer_callback_query(call.id)
-    import sqlite3 as _sq
-    from config import DB_PATH as _DBP
-    try:
-        conn = _sq.connect(_DBP)
-        # تعداد زیرمجموعه‌ها
-        total_refs = conn.execute(
-            "SELECT COUNT(*) FROM referrals WHERE referrer_id=?;", (uid,)
-        ).fetchone()[0]
-        # زیرمجموعه‌های فعال (خرید کردن)
-        active_refs = conn.execute(
-            "SELECT COUNT(*) FROM referrals WHERE referrer_id=? AND rewarded=1;", (uid,)
-        ).fetchone()[0]
-        # جمع کل خرید زیرمجموعه‌ها (کلی - بدون ID)
-        sub_ids = [r[0] for r in conn.execute(
-            "SELECT referred_id FROM referrals WHERE referrer_id=?;", (uid,)
-        ).fetchall()]
-        total_purchase = 0
-        total_orders = 0
-        if sub_ids:
-            placeholders = ",".join("?" * len(sub_ids))
-            row = conn.execute(
-                f"SELECT COUNT(*), COALESCE(SUM(price),0) FROM orders WHERE CAST(user_id AS INTEGER) IN ({placeholders});",
-                sub_ids
-            ).fetchone()
-            total_orders  = int(row[0] or 0)
-            total_purchase = int(row[1] or 0)
-        conn.close()
-    except Exception:
-        total_refs = active_refs = total_orders = total_purchase = 0
-
-    text = (
-        f"📊 <b>آمار زیرمجموعه‌ها</b>\n\n"
-        f"👥 کل معرفی‌ها: <b>{total_refs}</b>\n"
-        f"✅ معرفی‌های فعال (خرید کرده): <b>{active_refs}</b>\n\n"
-        f"━━━━━━━━━━━━━━━\n"
-        f"🛒 تعداد کل خریدها: <b>{total_orders}</b>\n"
-        f"💰 مجموع خرید: <b>{total_purchase:,}</b> تومان"
-    )
-    kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="partner_back"))
-    bot.edit_message_text(text, call.message.chat.id, call.message.message_id,
-                          parse_mode="HTML", reply_markup=kb)
-
-
-@bot.callback_query_handler(func=lambda c: c.data == "partner_wallet")
-def cb_partner_wallet(call):
-    uid = call.from_user.id
-    bot.answer_callback_query(call.id)
-    from db import get_partner_wallet_balance, get_partner_transactions, ensure_partner_wallet_schema
-    ensure_partner_wallet_schema()
-    bal = get_partner_wallet_balance(uid)
-    txns = get_partner_transactions(uid, 5)
-
-    type_map = {
-        "credit": "💚 واریز پورسانت",
-        "transfer_out": "🔄 انتقال به کیف‌پول اصلی",
-        "payout_request": "📤 درخواست تسویه",
-        "payout_rejected": "↩️ برگشت تسویه",
-    }
-    txn_lines = "\n".join(
-        f"{'+'if t['type'] in ('credit','payout_rejected') else '-'}"
-        f"{int(t['amount']):,} ت — {type_map.get(t['type'],t['type'])} ({(t['created_at'] or '')[:10]})"
-        for t in txns
-    ) if txns else "تراکنشی ثبت نشده"
-
-    text = (
-        f"💼 <b>کیف‌پول همکاری</b>\n\n"
-        f"موجودی: <b>{bal:,}</b> تومان\n\n"
-        f"📋 <b>آخرین تراکنش‌ها:</b>\n{txn_lines}"
-    )
-    kb = types.InlineKeyboardMarkup(row_width=1)
-    kb.add(
-        types.InlineKeyboardButton("🔄 انتقال به کیف‌پول اصلی", callback_data="partner_transfer"),
-        types.InlineKeyboardButton("📤 درخواست تسویه", callback_data="partner_payout"),
-        types.InlineKeyboardButton("🔙 بازگشت", callback_data="partner_back"),
-    )
-    bot.edit_message_text(text, call.message.chat.id, call.message.message_id,
-                          parse_mode="HTML", reply_markup=kb)
-
-
-@bot.callback_query_handler(func=lambda c: c.data == "partner_transfer")
-def cb_partner_transfer(call):
-    uid = call.from_user.id
-    bot.answer_callback_query(call.id)
-    from db import get_partner_wallet_balance
-    bal = get_partner_wallet_balance(uid)
-    if bal <= 0:
-        bot.answer_callback_query(call.id, "موجودی کیف‌پول همکاری صفر است", show_alert=True)
-        return
-    user_states[uid] = {"mode": "partner_transfer", "max": bal}
-    bot.send_message(call.message.chat.id,
-        f"🔄 <b>انتقال به کیف‌پول اصلی</b>\n\n"
-        f"موجودی: <b>{bal:,}</b> تومان\n\n"
-        "مبلغ مورد نظر را وارد کنید (تومان):\n"
-        "(یا «همه» برای انتقال کل موجودی)",
-        parse_mode="HTML")
-
-
-@bot.message_handler(func=lambda m: user_states.get(m.from_user.id, {}).get("mode") == "partner_transfer")
-def handle_partner_transfer(message):
-    uid = message.from_user.id
-    if _exit_chat_if_needed(message):
-        return
-    st = user_states.pop(uid, {})
-    max_bal = st.get("max", 0)
-    txt = (message.text or "").strip()
-    if txt == "همه":
-        amount = max_bal
-    elif txt.isdigit():
-        amount = int(txt)
-    else:
-        bot.reply_to(message, "مبلغ نامعتبر. عدد وارد کنید.")
-        return
-    from db import transfer_partner_to_main
-    result = transfer_partner_to_main(uid, amount)
-    if result["ok"]:
-        bot.send_message(message.chat.id,
-            f"✅ <b>{amount:,}</b> تومان به کیف‌پول اصلی منتقل شد.",
-            parse_mode="HTML", reply_markup=main_menu(user_id=uid))
-    else:
-        bot.reply_to(message, f"❌ {result['error']}")
-
-
-@bot.callback_query_handler(func=lambda c: c.data == "partner_payout")
-def cb_partner_payout(call):
-    uid = call.from_user.id
-    bot.answer_callback_query(call.id)
-    from db import get_partner_wallet_balance, get_partner_payout_settings, ensure_partner_wallet_schema
-    ensure_partner_wallet_schema()
-    settings = get_partner_payout_settings()
-    if not settings.get("is_active"):
-        bot.answer_callback_query(call.id, "تسویه در حال حاضر غیرفعال است", show_alert=True)
-        return
-    bal = get_partner_wallet_balance(uid)
-    min_a = int(settings.get("min_amount") or 0)
-    if bal < min_a:
-        bot.answer_callback_query(call.id,
-            f"حداقل موجودی برای تسویه {min_a:,} تومان است.\nموجودی شما: {bal:,} تومان",
-            show_alert=True)
-        return
-    max_a = int(settings.get("max_amount") or 0)
-    max_pm = int(settings.get("max_per_month") or 0)
-    user_states[uid] = {"mode": "partner_payout", "bal": bal}
-    text = (
-        f"📤 <b>درخواست تسویه</b>\n\n"
-        f"موجودی: <b>{bal:,}</b> تومان\n"
-        f"{'حداقل: '+format(min_a,',')+'تومان' if min_a else ''}\n"
-        f"{'حداکثر: '+format(max_a,',')+'تومان' if max_a else ''}\n"
-        f"{'سقف ماهانه: '+str(max_pm)+' درخواست' if max_pm else ''}\n\n"
-        "مبلغ درخواستی را وارد کنید:"
-    )
-    bot.send_message(call.message.chat.id, text, parse_mode="HTML")
-
-
-@bot.message_handler(func=lambda m: user_states.get(m.from_user.id, {}).get("mode") == "partner_payout")
-def handle_partner_payout(message):
-    uid = message.from_user.id
-    if _exit_chat_if_needed(message):
-        return
-    st = user_states.pop(uid, {})
-    txt = (message.text or "").strip()
-    if not txt.isdigit():
-        bot.reply_to(message, "مبلغ نامعتبر. عدد وارد کنید.")
-        return
-    amount = int(txt)
-    from db import request_partner_payout
-    result = request_partner_payout(uid, amount)
-    if result["ok"]:
-        bot.send_message(message.chat.id,
-            f"✅ درخواست تسویه <b>{amount:,}</b> تومان ثبت شد.\n"
-            "پس از بررسی، نتیجه اعلام می‌شود.",
-            parse_mode="HTML", reply_markup=main_menu(user_id=uid))
-        try:
-            bot.send_message(ADMIN_ID,
-                f"📤 <b>درخواست تسویه همکار</b>\n"
-                f"کاربر: <code>{uid}</code>\n"
-                f"مبلغ: <b>{amount:,}</b> تومان\n\n"
-                f"برای بررسی: /admin → همکاران → تسویه‌ها",
-                parse_mode="HTML")
-        except Exception:
-            pass
-    else:
-        bot.reply_to(message, f"❌ {result['error']}")
-
-
-@bot.callback_query_handler(func=lambda c: c.data == "partner_guide")
-def cb_partner_guide(call):
-    uid = call.from_user.id
-    bot.answer_callback_query(call.id)
-    guide_text = t("PARTNER_GUIDE_TEXT",
-        "📖 <b>راهنمای همکاری در فروش</b>\n\n"
-        "متن راهنما توسط مدیر تنظیم نشده است.\n"
-        "لطفاً با پشتیبانی تماس بگیرید.")
-    kb = types.InlineKeyboardMarkup()
-    kb.add(types.InlineKeyboardButton("🔙 بازگشت", callback_data="partner_back"))
-    bot.edit_message_text(
-        guide_text, call.message.chat.id, call.message.message_id,
-        parse_mode="HTML", reply_markup=kb
-    )
-
-
-@bot.callback_query_handler(func=lambda c: c.data == "partner_support")
-def cb_partner_support(call):
-    uid = call.from_user.id
-    bot.answer_callback_query(call.id)
-    # باز کردن تیکت با نوع «همکاران»
-    from db import ticket_create, ticket_ensure_schema, ticket_get_open_support
-    ticket_ensure_schema()
-    # اگه تیکت همکاری باز داره، ادامه بده
-    existing = None
-    try:
-        import sqlite3 as _sq
-        from config import DB_PATH as _DBP
-        _c = _sq.connect(_DBP); _c.row_factory = _sq.Row
-        existing = _c.execute(
-            "SELECT * FROM tickets WHERE user_id=? AND type='partner_support' AND status!='closed' ORDER BY id DESC LIMIT 1;",
-            (uid,)
-        ).fetchone()
-        _c.close()
-    except Exception:
-        pass
-
-    if existing:
-        tid = existing["id"]
-        try:
-            cur_cnt = int(existing["user_msg_count"] or 0)
-        except Exception:
-            cur_cnt = 0
-        user_states[uid] = {"mode": "ticket_v2", "ticket_id": tid}
-        if cur_cnt >= TICKET_MAX_USER_MSGS:
-            bot.send_message(call.message.chat.id,
-                f"💬 <b>گفتگوی همکاری #{tid}</b>\n\n"
-                "🔒 گفتگو در انتظار پاسخ پشتیبانی است.\n"
-                "پس از پاسخ، می‌توانید ادامه دهید.",
-                parse_mode="HTML")
-        else:
-            bot.send_message(call.message.chat.id,
-                f"💬 <b>ادامه گفتگوی همکاری #{tid}</b>\n\n"
-                "پیام خود را ارسال کنید.",
-                parse_mode="HTML")
-    else:
-        tid = ticket_create(uid, type_="partner_support")
-        user_states[uid] = {"mode": "ticket_v2", "ticket_id": tid}
-        bot.send_message(call.message.chat.id,
-            f"💬 <b>چت با پشتیبان همکاران</b> (تیکت #{tid})\n\n"
-            "پیام خود را ارسال کنید. تیم پشتیبانی به‌زودی پاسخ می‌دهد.",
-            parse_mode="HTML")
-
-
-@bot.callback_query_handler(func=lambda c: c.data == "partner_back")
-def cb_partner_back(call):
-    uid = call.from_user.id
-    bot.answer_callback_query(call.id)
-    try:
-        bot.delete_message(call.message.chat.id, call.message.message_id)
-    except Exception:
-        pass
-    _show_partner_dashboard(call.message.chat.id, uid)
-
-
-@bot.message_handler(func=lambda m: m.text == t("MAIN_BTN_PARTNER_REQUEST"))
-def handle_reseller_request(message):
-    if not is_main_button_enabled("MAIN_BTN_PARTNER_REQUEST"):
-        bot.reply_to(message, t("MSG_BTN_DISABLED"))
-        return
-    uid = message.from_user.id
-    ok, msg = can_submit_partner_request(uid)
-    if not ok:
-        bot.send_message(message.chat.id, msg)
-        return
-
-    kb = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-    kb.add(types.KeyboardButton("📱 ارسال شماره تلفن", request_contact=True))
-    kb.add(types.KeyboardButton("❌ انصراف"))
-    bot.send_message(
-        message.chat.id,
-        "🏪 <b>درخواست فروشندگی StockLand</b>\n\n"
-        "با ثبت درخواست فروشنده می‌شوید و از مزایا زیر بهره‌مند می‌شوید:\n"
-        "• لینک اختصاصی فروش\n"
-        "• پورسانت به ازای هر فروش\n"
-        "• قیمت ویژه محصولات\n"
-        "• پنل اختصاصی آمار\n\n"
-        "ابتدا شماره تلفن خود را ارسال کنید:",
-        reply_markup=kb, parse_mode="HTML"
-    )
-    bot.register_next_step_handler(message, process_reseller_contact)
-
-
-def process_reseller_contact(message):
-    uid = message.from_user.id
-
-    if message.text and message.text.strip() == "❌ انصراف":
-        bot.send_message(message.chat.id, "لغو شد.", reply_markup=main_menu(user_id=uid))
-        return
-    if message.content_type != "contact" or not message.contact:
-        bot.send_message(message.chat.id, "لطفاً شماره را فقط با دکمه «📱 ارسال شماره تلفن» ارسال کنید.",
-                         reply_markup=main_menu(user_id=uid))
-        return
-    if message.contact.user_id and message.contact.user_id != uid:
-        bot.send_message(message.chat.id, "شماره ارسالی متعلق به همین اکانت نیست.",
-                         reply_markup=main_menu(user_id=uid))
-        return
-
-    phone = (message.contact.phone_number or "").strip()
-    ok, msg = can_submit_partner_request(uid, phone=phone)
-    if not ok:
-        bot.send_message(message.chat.id, msg, reply_markup=main_menu(user_id=uid))
-        return
-
-    full_name = f"{message.from_user.first_name or ''} {message.from_user.last_name or ''}".strip()
-    reseller_signup[uid] = {
-        "phone": phone, "username": message.from_user.username or "",
-        "full_name": full_name, "city": "", "shop_name": "",
-    }
-
-    kb = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-    kb.add(types.KeyboardButton("❌ انصراف"))
-    bot.send_message(message.chat.id, "شهر فعالیت خود را وارد کنید:", reply_markup=kb)
-    bot.register_next_step_handler(message, process_reseller_city)
-
-
-def process_reseller_city(message):
-    uid = message.from_user.id
-    if message.text and message.text.strip() == "❌ انصراف":
-        reseller_signup.pop(uid, None)
-        bot.send_message(message.chat.id, "لغو شد.", reply_markup=main_menu(user_id=uid))
-        return
-    city = (message.text or "").strip()
-    if not city or len(city) < 2:
-        bot.send_message(message.chat.id, "نام شهر نامعتبر است. دوباره ارسال کنید:")
-        bot.register_next_step_handler(message, process_reseller_city)
-        return
-    if uid not in reseller_signup:
-        bot.send_message(message.chat.id, "درخواست شما منقضی شد. دوباره شروع کنید.",
-                         reply_markup=main_menu(user_id=uid))
-        return
-    reseller_signup[uid]["city"] = city
-
-    kb = types.ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
-    kb.add(types.KeyboardButton("❌ انصراف"))
-    bot.send_message(message.chat.id, "نام فروشگاه / پیج / مجموعه را وارد کنید:", reply_markup=kb)
-    bot.register_next_step_handler(message, process_reseller_shop)
-
-
-def process_reseller_shop(message):
-    uid = message.from_user.id
-    if message.text and message.text.strip() == "❌ انصراف":
-        reseller_signup.pop(uid, None)
-        bot.send_message(message.chat.id, "لغو شد.", reply_markup=main_menu(user_id=uid))
-        return
-    shop_name = (message.text or "").strip()
-    if not shop_name or len(shop_name) < 2:
-        bot.send_message(message.chat.id, "نام فروشگاه نامعتبر است. دوباره ارسال کنید:")
-        bot.register_next_step_handler(message, process_reseller_shop)
-        return
-
-    data = reseller_signup.pop(uid, None)
-    if not data:
-        bot.send_message(message.chat.id, "درخواست شما منقضی شد. دوباره شروع کنید.",
-                         reply_markup=main_menu(user_id=uid))
-        return
-
-    upsert_partner_request(uid, data["phone"], username=data["username"],
-                           full_name=data["full_name"], note="",
-                           city=data["city"], shop_name=shop_name)
-
-    bot.send_message(message.chat.id,
-        "✅ <b>درخواست فروشندگی شما ثبت شد!</b>\n\n"
-        "پس از بررسی توسط ادمین، نتیجه به شما اعلام می‌شود.\n"
-        "معمولاً در کمتر از ۲۴ ساعت پاسخ داده می‌شود.",
-        parse_mode="HTML", reply_markup=main_menu(user_id=uid))
-
-    # نوتیف به ادمین
-    try:
-        kb_adm = types.InlineKeyboardMarkup()
-        kb_adm.add(types.InlineKeyboardButton("🌐 بررسی در پنل", url="https://panel.stland.ir/admin/sellers"))
-        bot.send_message(ADMIN_ID,
-            f"🔔 <b>درخواست فروشندگی جدید</b>\n"
-            f"کاربر: <code>{uid}</code> — {data['full_name']}\n"
-            f"شهر: {data['city']} | فروشگاه: {shop_name}",
-            reply_markup=kb_adm, parse_mode="HTML")
-    except Exception:
-        pass
-
-
-@bot.message_handler(func=lambda m: m.text == t("MAIN_BTN_GUIDE"))
-def handle_help(message):
-    if not is_main_button_enabled("MAIN_BTN_GUIDE"):
-        bot.reply_to(message, t("MSG_BTN_DISABLED"))
-        return
-
-    text = t("HELP_TEXT", DEFAULT_UI_TEXTS.get("HELP_TEXT", ""))
-    bot.send_message(message.chat.id, text)
-
-
-@bot.message_handler(func=lambda m: ensure_admin(m.from_user.id) and (
-    m.from_user.id in admin_states or
-    user_states.get(m.from_user.id, {}).get("mode") == "ticket_support"
-))
-def handle_admin_text(message):
-    aid = message.from_user.id
-
-    # دکمه‌های منوی اصلی هرگز توسط این handler گرفته نشوند
-    if _is_my_orders_button(message.text or ""):
-        _show_my_orders(message.chat.id, aid)
-        return
-
-    # ─── اگه ادمین در حالت تیکت کاربر (تست) باشه → به handler تیکت برو ──
-    user_st = user_states.get(aid, {})
-    if user_st.get("mode") == "ticket_support":
-        handle_ticket_chat_user(message)
-        return
-
-    state = admin_states.get(aid)
-    if not state:
-        return
-
-    mode = state.get("mode")
-
-    # ─── پاسخ ادمین به تیکت از تلگرام (v2) ──────────────────────────────
-    if mode == "ticket_v2_admin_reply":
-        tid_val = int(state.get("ticket_id") or 0)
-        target_uid = int(state.get("target_uid") or 0)
-        if not tid_val or not target_uid:
-            clear_admin_state(aid)
-            bot.reply_to(message, "تیکت نامعتبر.")
-            return
-
-        txt = (message.text or "").strip()
-        if txt == "/done":
-            clear_admin_state(aid)
-            bot.reply_to(message, "پایان حالت پاسخ.")
-            return
-        if not txt:
-            bot.reply_to(message, "پیام خالی — دوباره ارسال کنید:")
-            return
-
-        ticket = ticket_get(tid_val)
-        if not ticket or ticket["status"] == "closed":
-            clear_admin_state(aid)
-            bot.reply_to(message, "این تیکت بسته شده است.")
-            return
-
-        # ذخیره پاسخ ادمین در DB
-        ticket_add_message(tid_val, "admin", txt, source="telegram")
-        ticket_admin_replied(tid_val)
-
-        # ارسال به کاربر
-        try:
-            _tg_send_to_user(
-                target_uid,
-                f"💬 <b>پاسخ پشتیبانی</b> (تیکت #{tid_val}):\n\n{html.escape(txt)}"
-            )
-        except Exception:
-            pass
-
-        bot.reply_to(message, "✅ پاسخ ارسال شد.")
-        return
-
-    if mode == "ticket_reply":  # backward compat
-        clear_admin_state(aid)
-        bot.reply_to(message, "لطفاً از پنل یا دستور /ticket پاسخ دهید.")
-        return
-
-    if mode == "ui_edit":
-        k = state.get("ui_key")
-        if not k:
-            admin_states.pop(aid, None)
-            bot.reply_to(message, "خطا در وضعیت. دوباره از تنظیمات اقدام کنید.")
-            return
-        txt = (message.text or "").strip()
-        if not txt:
-            bot.reply_to(message, "متن خالی قابل ذخیره نیست. دوباره ارسال کنید:")
-            return
-        if txt == "/reset":
-            try:
-                delete_ui_text(k)
-                ui_cache_clear()
-            except Exception:
-                pass
-            admin_states.pop(aid, None)
-            bot.reply_to(message, f"✅ بازنشانی شد: {t(k, DEFAULT_UI_TEXTS.get(k, k))}")
-            return
-        try:
-            set_ui_text(k, txt)
-            ui_cache_clear()
-        except Exception as e:
-            bot.reply_to(message, f"خطا در ذخیره: {e}")
-            return
-        admin_states.pop(aid, None)
-        bot.reply_to(message, f"✅ ذخیره شد: {t(k, DEFAULT_UI_TEXTS.get(k, k))}")
-        return
-
-    if mode == "product_chat_text":
-        pid = int(state.get("product_id") or 0)
-        txt = (message.text or "").strip()
-        if not pid:
-            admin_states.pop(aid, None)
-            bot.reply_to(message, "خطا در وضعیت. دوباره از پنل محصول اقدام کنید.")
-            return
-        if not txt:
-            bot.reply_to(message, "متن خالی قابل ذخیره نیست. دوباره ارسال کنید:")
-            return
-        if txt == "/reset":
-            _set_product_chat_text(pid, "")
-            admin_states.pop(aid, None)
-            bot.reply_to(message, "✅ متن چت این محصول پاک شد.")
-            try:
-                product = get_product_by_id(pid)
-                if product:
-                    send_admin_product_detail(message, product)
-            except Exception:
-                pass
-            return
-        _set_product_chat_text(pid, txt)
-        admin_states.pop(aid, None)
-        bot.reply_to(message, "✅ متن چت این محصول ذخیره شد.")
-        try:
-            product = get_product_by_id(pid)
-            if product:
-                send_admin_product_detail(message, product)
-        except Exception:
-            pass
-        return
-
-    if mode == "partner_search":
-        q = (message.text or "").strip()
-        if not q:
-            bot.reply_to(message, "عبارت جستجو معتبر نیست. دوباره ارسال کنید:")
-            return
-        admin_states.pop(aid, None)
-        send_partner_list(message.chat.id, status=None, query=q)
-        return
-
-    if mode == "partner_edit_city":
-        new_city = (message.text or "").strip()
-        if not new_city:
-            bot.reply_to(message, "شهر معتبر نیست. دوباره ارسال کنید (یا - برای عدم تغییر):")
-            return
-        if new_city in ("-", "—", "_", "ـ"):
-            new_city = ""
-        state["new_city"] = new_city
-        state["mode"] = "partner_edit_shop"
-        bot.reply_to(message, "✏️ نام فروشگاه/پیج جدید را وارد کنید (برای عدم تغییر: - ):")
-        return
-
-    if mode == "partner_edit_shop":
-        new_shop = (message.text or "").strip()
-        if not new_shop:
-            bot.reply_to(message, "نام فروشگاه معتبر نیست. دوباره ارسال کنید (یا - برای عدم تغییر):")
-            return
-        if new_shop in ("-", "—", "_", "ـ"):
-            new_shop = ""
-        target_uid = int(state.get("target_user_id") or 0)
-        if not target_uid:
-            admin_states.pop(aid, None)
-            bot.reply_to(message, "هدف ویرایش نامعتبر است.")
-            return
-        new_city = state.get("new_city", "")
-        admin_states.pop(aid, None)
-
-        update_partner_city_shop(target_uid, city=new_city, shop_name=new_shop)
-        bot.send_message(message.chat.id, "✅ اطلاعات همکار بروزرسانی شد.")
-        return
-
-    if mode == "wallet_credit_user_id":
-        target = safe_int(message.text)
-        if not target:
-            bot.reply_to(message, "آیدی کاربر باید فقط عدد باشد. دوباره ارسال کنید.")
-            return
-        admin_states[aid] = {"mode": "wallet_credit_amount", "target_user_id": target}
-        bot.reply_to(message, "مبلغ شارژ (تومان) را ارسال کنید:")
-        return
-
-    if mode == "wallet_credit_amount":
-        amount = safe_int(message.text.replace(",", ""))
-        if not amount or amount <= 0:
-            bot.reply_to(message, "مبلغ نامعتبر است. فقط عدد مثبت ارسال کنید.")
-            return
-        target_id = state["target_user_id"]
-        new_balance = add_wallet_balance(target_id, amount)
-        clear_admin_state(aid)
-        bot.reply_to(
-            message,
-            f"کیف پول کاربر {target_id} به مقدار {amount:,} تومان شارژ شد.\n"
-            f"موجودی جدید: {new_balance:,} تومان",
-        )
-        try:
-            bot.send_message(
-                target_id,
-                f"کیف پول شما توسط ادمین به مقدار <b>{amount:,}</b> تومان شارژ شد.\n"
-                f"موجودی فعلی: <b>{new_balance:,}</b> تومان",
-            )
-        except Exception:
-            logger.info("could not notify target user about manual credit")
-        return
-
-    if mode == "wallet_debit_user_id":
-        target = safe_int(message.text)
-        if not target:
-            bot.reply_to(message, "آیدی کاربر باید فقط عدد باشد. دوباره ارسال کنید.")
-            return
-        admin_states[aid] = {"mode": "wallet_debit_amount", "target_user_id": target}
-        bot.reply_to(message, "مبلغ کسر (تومان) را ارسال کنید:")
-        return
-
-    if mode == "wallet_debit_amount":
-        amount = safe_int(message.text.replace(",", ""))
-        if not amount or amount <= 0:
-            bot.reply_to(message, "مبلغ نامعتبر است. فقط عدد مثبت ارسال کنید.")
-            return
-        target_id = state["target_user_id"]
-        ok = subtract_wallet_balance(target_id, amount)
-        if not ok:
-            current_balance = get_wallet_balance(target_id)
-            bot.reply_to(
-                message,
-                f"موجودی کاربر برای کسر این مبلغ کافی نیست.\n"
-                f"موجودی فعلی: {current_balance:,} تومان",
-            )
-            return
-        new_balance = get_wallet_balance(target_id)
-        clear_admin_state(aid)
-        bot.reply_to(
-            message,
-            f"از کیف پول کاربر {target_id} مقدار {amount:,} تومان کسر شد.\n"
-            f"موجودی جدید: {new_balance:,} تومان",
-        )
-        try:
-            bot.send_message(
-                target_id,
-                f"از کیف پول شما توسط ادمین مقدار <b>{amount:,}</b> تومان کسر شد.\n"
-                f"موجودی فعلی: <b>{new_balance:,}</b> تومان",
-            )
-        except Exception:
-            logger.info("could not notify target user about manual debit")
-        return
-
-    if mode == "wallet_set_user_id":
-        target = safe_int(message.text)
-        if not target:
-            bot.reply_to(message, "آیدی کاربر باید فقط عدد باشد. دوباره ارسال کنید.")
-            return
-        admin_states[aid] = {"mode": "wallet_set_amount", "target_user_id": target}
-        bot.reply_to(message, "موجودی نهایی (تومان) را ارسال کنید:")
-        return
-
-    if mode == "wallet_set_amount":
-        new_balance_val = safe_int(message.text.replace(",", ""))
-        if new_balance_val is None or new_balance_val < 0:
-            bot.reply_to(message, "موجودی نامعتبر است. فقط عدد ۰ یا مثبت ارسال کنید.")
-            return
-        target_id = state["target_user_id"]
-        final_balance = set_wallet_balance(target_id, new_balance_val)
-        clear_admin_state(aid)
-        bot.reply_to(
-            message,
-            f"موجودی کیف پول کاربر {target_id} روی {final_balance:,} تومان تنظیم شد.",
-        )
-        try:
-            bot.send_message(
-                target_id,
-                f"موجودی کیف پول شما توسط ادمین روی <b>{final_balance:,}</b> تومان تنظیم شد.",
-            )
-        except Exception:
-            logger.info("could not notify target user about wallet set")
-        return
-
-    if mode == "edit_title":
-        pid = state["product_id"]
-        update_product_field(pid, "title", message.text.strip())
-        clear_admin_state(aid)
-        bot.reply_to(message, "عنوان محصول به‌روزرسانی شد.")
-        return
-
-    if mode == "edit_price":
-        pid = state["product_id"]
-        amount = safe_int(message.text.replace(",", ""))
-        if not amount or amount <= 0:
-            bot.reply_to(message, "قیمت نامعتبر است. فقط عدد مثبت ارسال کنید.")
-            return
-        update_product_field(pid, "price", amount)
-        clear_admin_state(aid)
-        bot.reply_to(message, "قیمت محصول به‌روزرسانی شد.")
-        return
-
-    if mode == "edit_partner_price":
-        pid = int(state.get("product_id") or 0)
-        amount = safe_int((message.text or "").replace(",", "").strip())
-
-        if amount is None:
-            bot.reply_to(message, "عدد ارسال کنید. برای قیمت عادی، 0 بفرستید.")
-            return
-        if amount < 0:
-            bot.reply_to(message, "عدد منفی مجاز نیست. برای قیمت عادی، 0 بفرستید.")
-            return
-
-        update_product_field(pid, "partner_price", None if amount == 0 else int(amount))
-        clear_admin_state(aid)
-        bot.reply_to(message, "✅ قیمت همکار به‌روزرسانی شد.")
-
-        product = get_product_by_id(pid)
-        if product:
-            send_admin_product_detail(message, product)
-        return
-
-    if mode in ("edit_limit_c", "edit_limit_p"):
-        raw = (message.text or "").replace(",", "").strip()
-        lim = safe_int(raw)
-        if lim is None or lim < 0:
-            bot.reply_to(message, "عدد نامعتبر است. فقط عدد 0 یا مثبت ارسال کنید.")
-            return
-
-        pid = int(state.get("product_id") or 0)
-        if not pid:
-            clear_admin_state(aid)
-            bot.reply_to(message, "محصول نامعتبر است.")
-            return
-
-        field = "daily_limit_customer" if mode == "edit_limit_c" else "daily_limit_partner"
-        update_product_field(pid, field, int(lim))
-        clear_admin_state(aid)
-        bot.send_message(message.chat.id, "✅ حد خرید روزانه بروزرسانی شد.")
-
-        product = get_product_by_id(pid)
-        if product:
-            send_admin_product_detail(message, product)
-        return
-
-    if mode == "edit_desc":
-        pid = state["product_id"]
-        update_product_field(pid, "description", message.text.strip())
-        clear_admin_state(aid)
-        bot.reply_to(message, "توضیحات محصول به‌روزرسانی شد.")
-        return
-
-    if mode == "feed_bulk":
-        if message.text and message.text.strip() == "/cancel":
-            clear_admin_state(aid)
-            bot.reply_to(message, "لغو شد.")
-            return
-        pid = state["product_id"]
-        raw = message.text or ""
-        items = parse_feed_bulk_items(raw)
-        if not items:
-            bot.reply_to(message, "هیچ آیتمی دریافت نشد. هر خط یک آیتم ارسال کنید یا /cancel")
-            return
-        add_feed_items(pid, items)
-        reset_feed_alert_notification(pid)
-        dispatched_from_queue = try_dispatch_pending_for_product(pid)
-        total, remaining, delivered = get_feed_stats(pid)
-        clear_admin_state(aid)
-        bot.reply_to(
-            message,
-            f"✅ {len(items)} آیتم به محصول اضافه شد.\n"
-            f"📦 وضعیت فعلی: کل={total} | باقی‌مانده={remaining} | تحویل‌شده={delivered}"
-            + (f"\n📤 تحویل خودکار از صف: {dispatched_from_queue}" if dispatched_from_queue else "")
-        )
-        return
-
-    if mode == "feed_alert":
-        if message.text and message.text.strip() == "/cancel":
-            clear_admin_state(aid)
-            bot.reply_to(message, "لغو شد.")
-            return
-        pid = state["product_id"]
-        th = safe_int((message.text or "").replace(",", "").strip())
-        if th is None or th < 0:
-            bot.reply_to(message, "عدد نامعتبر است. یک عدد 0 یا بزرگ‌تر ارسال کنید یا /cancel")
-            return
-        set_feed_alert_threshold(pid, th)
-        reset_feed_alert_notification(pid)
-        clear_admin_state(aid)
-        bot.reply_to(message, f"✅ آستانه هشدار روی {th} تنظیم شد.")
-        return
-
-    if mode == "new_other_service_title":
-        title = message.text.strip()
-        if not title:
-            bot.reply_to(message, "عنوان نمی‌تواند خالی باشد. دوباره ارسال کنید.")
-            return
-
-        skey = _make_service_key(title)
-        ok = add_other_service(skey, title, "")
-        if not ok:
-            bot.reply_to(message, "این سرویس قبلاً ثبت شده یا کلید تکراری است. یک عنوان دیگر ارسال کنید.")
-            return
-
-        clear_admin_state(aid)
-        bot.reply_to(message, f"سرویس «{title}» اضافه شد.")
-        bot.send_message(message.chat.id, "سایر محصولات (ادمین):", reply_markup=admin_other_products_menu())
-        return
-
-    if mode == "new_product_title":
-        category = state["category"]
-        title = message.text.strip()
-        admin_states[aid] = {
-            "mode": "new_product_price",
-            "category": category,
-            "title": title,
-        }
-        bot.reply_to(message, "قیمت محصول (تومان) را ارسال کنید:")
-        return
-
-    if mode == "new_product_price":
-        category = state["category"]
-        title = state["title"]
-        amount = safe_int(message.text.replace(",", ""))
-        if not amount or amount <= 0:
-            bot.reply_to(message, "قیمت نامعتبر است. فقط عدد مثبت ارسال کنید.")
-            return
-        admin_states[aid] = {
-            "mode": "new_product_partner_price",
-            "category": category,
-            "title": title,
-            "price": amount,
-        }
-        bot.reply_to(message, "قیمت همکار (تومان) را ارسال کنید. برای استفاده از قیمت عادی، 0 بفرستید:")
-        return
-
-    if mode == "new_product_partner_price":
-        category = state["category"]
-        title = state["title"]
-        price = state["price"]
-        pp = safe_int(message.text.replace(",", ""))
-        if pp is None:
-            bot.reply_to(message, "عدد ارسال کنید. برای قیمت عادی، 0 بفرستید.")
-            return
-        if pp < 0:
-            bot.reply_to(message, "عدد منفی مجاز نیست. برای قیمت عادی، 0 بفرستید.")
-            return
-        partner_price = None if pp == 0 else pp
-        admin_states[aid] = {
-            "mode": "new_product_desc",
-            "category": category,
-            "title": title,
-            "price": price,
-            "partner_price": partner_price,
-        }
-        bot.reply_to(message, "توضیحات محصول را ارسال کنید (یا خط تیره -):")
-        return
-
-    if mode == "new_product_desc":
-        category = state["category"]
-        title = state["title"]
-        price = state["price"]
-        partner_price = state.get("partner_price")
-        desc = message.text.strip()
-        if desc == "-":
-            desc = ""
-        pid = add_product(category, title, price, desc, is_active=1, partner_price=partner_price)
-        clear_admin_state(aid)
-        bot.reply_to(
-            message,
-            f"محصول جدید با شناسه #{pid} اضافه شد.\n"
-            f"دسته: {category}\n"
-            f"عنوان: {title}\n"
-            f"قیمت: {price:,} تومان",
-        )
-        return
-
-                    # ========= CALLBACKS =========
-@bot.callback_query_handler(func=lambda c: bool(getattr(c, "data", None)) and c.data.startswith("admin_toggle_chat_"))
-def cb_admin_toggle_chat(call: types.CallbackQuery):
-    """Toggle per-product chat flag from admin product detail UI."""
-    uid = call.from_user.id
-    if not ensure_admin(uid):
-        bot.answer_callback_query(call.id, "دسترسی غیرمجاز", show_alert=True)
-        return
-    bot.answer_callback_query(call.id)
-
-    # ensure schema exists even if bot started before migrations ran
-    try:
-        ticket_ensure_schema()
-    except Exception:
-        pass
-
-    pid = safe_int(call.data.replace("admin_toggle_chat_", "", 1))
-    if not pid:
-        bot.answer_callback_query(call.id, "داده نامعتبر", show_alert=True)
-        return
-
-    cur = _get_product_chat_enabled(int(pid))
-    newv = 0 if int(cur) == 1 else 1
-    _set_product_chat_enabled(int(pid), int(newv))
-
-    # refresh admin product detail
-    product = get_product_by_id(int(pid))
-    if product:
-        try:
-            send_admin_product_detail(call.message, product, edit=True)
-        except Exception:
-            try:
-                send_admin_product_detail(call.message, product)
-            except Exception:
-                pass
-
-
-@bot.callback_query_handler(func=lambda c: True)
-def handle_callbacks(call: types.CallbackQuery):
-    data = call.data
-    uid = call.from_user.id
-    # --- toggle active/inactive for other_services ---
-    if data.startswith("toggle_other_"):
-        if not ensure_admin(uid):
-            bot.answer_callback_query(call.id, "دسترسی غیرمجاز", show_alert=True)
-            return
-        service_key = data.replace("toggle_other_", "")
-
-        import sqlite3
-        with sqlite3.connect(DB_PATH) as conn:
-            cur = conn.cursor()
-            cur.execute("""
-                UPDATE other_services
-                SET is_active = CASE WHEN is_active=1 THEN 0 ELSE 1 END
-                WHERE service_key = ?
-            """, (service_key,))
-            conn.commit()
-
-        bot.answer_callback_query(call.id, "وضعیت دسته تغییر کرد")
-        return
-    # ---------------------------------------------------
-    
-    # ─── TICKET v2 callbacks ──────────────────────────────────────────────
-    if data == "ticket_v2_new":
-        bot.answer_callback_query(call.id)
-        _support_ticket_start(call.message.chat.id, uid)
-        return
-
-    if data.startswith("ticket_v2_open_"):
-        # باز کردن تیکت راه‌اندازی — کاربر می‌تونه پیام بفرسته
-        bot.answer_callback_query(call.id)
-        try:
-            tid_val = int(data.split("_")[-1])
-        except ValueError:
-            return
-        ticket = ticket_get(tid_val)
-        if not ticket:
-            bot.send_message(call.message.chat.id, "❌ تیکت یافت نشد.")
-            return
-        if ticket["status"] == "closed":
-            bot.send_message(call.message.chat.id, "این سفارش قبلاً تکمیل شده است.", reply_markup=main_menu(user_id=uid))
-            return
-        user_states[uid] = {"mode": "ticket_v2", "ticket_id": tid_val}
-        bot.send_message(
-            call.message.chat.id,
-            f"💬 <b>گفتگوی راه‌اندازی #{tid_val}</b>\n\n"
-            "اطلاعات مورد نیاز را ارسال کنید.\n"
-            "می‌توانید متن، عکس، فایل یا اسکرین‌شات بفرستید.",
-            parse_mode="HTML"
-        )
-        return
-
-    if data.startswith("ticket_v2_continue_"):
-        bot.answer_callback_query(call.id)
-        try:
-            tid_val = int(data.split("_")[-1])
-        except ValueError:
-            return
-        ticket = ticket_get(tid_val)
-        if not ticket:
-            bot.send_message(call.message.chat.id, "❌ تیکت یافت نشد.")
-            return
-        if ticket["status"] == "closed":
-            bot.send_message(call.message.chat.id,
-                "این گفتگو بسته شده است.", reply_markup=main_menu(user_id=uid))
-            return
-        # بازگشت به حالت چت تیکت
-        user_states[uid] = {"mode": "ticket_v2", "ticket_id": tid_val}
-        bot.send_message(
-            call.message.chat.id,
-            f"💬 <b>گفتگوی #{tid_val} ادامه دارد</b>\n\nپیام خود را ارسال کنید:",
-            parse_mode="HTML"
-        )
-        return
-
-    if data.startswith("ticket_v2_close_"):
-        bot.answer_callback_query(call.id)
-        try:
-            tid_val = int(data.split("_")[-1])
-        except ValueError:
-            return
-        clear_user_state(uid)
-        ticket_close(tid_val)
-        bot.send_message(call.message.chat.id, "✅ مکالمه پشتیبانی پایان یافت.", reply_markup=main_menu(user_id=uid))
-        return
-
-    if data.startswith("ticket_v2_reply_"):
-        # ادمین می‌خواد از تلگرام پاسخ بده
-        bot.answer_callback_query(call.id)
-        if not ensure_admin(uid):
-            return
-        parts = data.split("_")
-        try:
-            tid_val = int(parts[3])
-            target_uid = int(parts[4])
-        except (IndexError, ValueError):
-            return
-        admin_states[uid] = {"mode": "ticket_v2_admin_reply", "ticket_id": tid_val, "target_uid": target_uid}
-        bot.send_message(
-            uid,
-            f"✏️ پاسخ به تیکت #{tid_val} (کاربر {target_uid}):\n\n"
-            "پیام خود را ارسال کنید. برای لغو: /done",
-            reply_markup=types.ForceReply(selective=True)
-        )
-        return
-
-    if data.startswith("ticket_v2_admin_close_"):
-        bot.answer_callback_query(call.id, "تیکت بسته شد ✅")
-        if not ensure_admin(uid):
-            return
-        try:
-            tid_val = int(data.split("_")[-1])
-        except ValueError:
-            return
-        ticket_close(tid_val)
-        ticket_row = ticket_get(tid_val)
-        if ticket_row:
-            try:
-                _tg_send_to_user(
-                    ticket_row["user_id"],
-                    f"✅ تیکت #{tid_val} توسط پشتیبانی بسته شد."
-                )
-            except Exception:
-                pass
-        return
-
-    if data == "create_support_ticket" or data.startswith("continue_support_ticket_"):
-        # backward compat — هدایت به سیستم جدید
-        bot.answer_callback_query(call.id)
-        _support_ticket_start(call.message.chat.id, uid)
-        return
-
-    if data == "noop":
-        bot.answer_callback_query(call.id)
-        return
-
-    if data == "cancel_purchase":
-        bot.answer_callback_query(call.id)
-        clear_user_state(uid)
-        bot.send_message(call.message.chat.id, "خرید لغو شد.",
-                         reply_markup=main_menu(user_id=uid))
-        return
-
-    # ─── ناوبری دسته‌بندی داینامیک ────────────────────────────────────────
-    if data == "wallet_charge_custom":
-        bot.answer_callback_query(call.id)
-        user_states[uid] = {"mode": "wallet_charge_amount"}
-        bot.send_message(
-            call.message.chat.id,
-            tf("MSG_WALLET_AMOUNT_REQUEST", min_amount=f"{MIN_TOPUP_AMOUNT:,}"),
-            parse_mode="HTML"
-        )
-        bot.register_next_step_handler(call.message, process_wallet_charge_amount)
-        return
-
-    if data.startswith("quick_charge_"):
-        bot.answer_callback_query(call.id)
-        try:
-            amount = int(data.replace("quick_charge_", ""))
-        except ValueError:
-            return
-        if amount < MIN_TOPUP_AMOUNT:
-            amount = MIN_TOPUP_AMOUNT
-        start_wallet_charge_payment(bot, call.message, uid, amount, clear_user_state)
-        return
-
-    if data.startswith("cat_"):
-        bot.answer_callback_query(call.id)
-        parts = data.split("_")
-        # cat_{id}
-        if len(parts) == 2:
-            cat_id = int(parts[1])
-            _show_category(call.message.chat.id, cat_id, user_id=uid, msg_id=call.message.message_id)
-            return
-        # cat_{cat_id}_p_{pid}  →  نمایش جزئیات محصول
-        if len(parts) == 4 and parts[2] == "p":
-            cat_id = int(parts[1])
-            pid = int(parts[3])
-            product = get_product_by_id(pid)
-            if not product:
-                bot.send_message(call.message.chat.id, "محصول یافت نشد.")
+        users = await get_all_uids(); total = len(users); ok = fail = 0
+        cancel_kb=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 توقف پخش",callback_data="broadcast_cancel")]])
+        st = await ctx.bot.send_message(ADMIN_ID, f"📢 شروع پخش به {to_fa(total)} کاربر...", reply_markup=cancel_kb)
+        for i, uid in enumerate(users, 1):
+            if _broadcast_cancel:
+                await st.edit_text(f"🛑 پخش متوقف شد!\n✔️ {to_fa(ok)} | ❌ {to_fa(fail)}",reply_markup=None)
                 return
-            # نمایش جزئیات با استفاده از تابع موجود — user_id برای قیمت همکار
-            send_product_detail(call.message, product, user_id=uid, cat_id=cat_id)
-            return
-        return
-
-    if data.startswith("ticket_close_"):
-        # backward compat → v2
-        bot.answer_callback_query(call.id)
-        tid = safe_int(data.replace("ticket_close_", "", 1))
-        if tid:
-            ticket_close(int(tid))
-            clear_user_state(uid)
-        bot.send_message(call.message.chat.id, "✅ چت بسته شد.", reply_markup=main_menu(user_id=uid))
-        return
-
-    if data.startswith("ticket_admin_close_"):
-        # backward compat → v2
-        if not ensure_admin(uid):
-            bot.answer_callback_query(call.id, "دسترسی غیرمجاز", show_alert=True)
-            return
-        bot.answer_callback_query(call.id)
-        tid = safe_int(data.replace("ticket_admin_close_", "", 1))
-        if tid:
-            t_row = ticket_get(int(tid))
-            ticket_close(int(tid))
-            if t_row:
-                clear_user_state(int(t_row["user_id"]))
-                try:
-                    bot.send_message(int(t_row["user_id"]), "⛔️ چت بسته شد.", reply_markup=main_menu(user_id=int(t_row["user_id"])))
-                except Exception:
-                    pass
-        return
-
-    if data.startswith("ticket_reply_"):
-        # backward compat → v2
-        if not ensure_admin(uid):
-            bot.answer_callback_query(call.id, "دسترسی غیرمجاز", show_alert=True)
-            return
-        bot.answer_callback_query(call.id)
-        parts = data.split("_")
-        tid = safe_int(parts[2]) if len(parts) >= 3 else None
-        target_uid_old = safe_int(parts[3]) if len(parts) >= 4 else None
-        if tid and target_uid_old:
-            admin_states[uid] = {"mode": "ticket_v2_admin_reply", "ticket_id": int(tid), "target_uid": int(target_uid_old)}
-            bot.send_message(uid, f"✏️ پاسخ به تیکت #{tid}: پیام بفرست. /done برای لغو.")
-        return
-    if data.startswith("admin_toggle_chat_"):
-        if not ensure_admin(uid):
-            bot.answer_callback_query(call.id, "دسترسی غیرمجاز", show_alert=True)
-            return
-        pid = safe_int(data.replace("admin_toggle_chat_", "", 1))
-        if not pid:
-            bot.answer_callback_query(call.id, "داده نامعتبر", show_alert=True)
-            return
-        cur = _get_product_chat_enabled(int(pid))
-        newv = 0 if int(cur) == 1 else 1
-        _set_product_chat_enabled(int(pid), int(newv))
-        # refresh product detail UI
-        product = get_product_by_id(int(pid))
-        if product:
             try:
-                send_admin_product_detail(call.message, product, edit=True)
-            except Exception:
-                # fallback: send new message if edit fails
-                send_admin_product_detail(call.message, product)
-        bot.answer_callback_query(call.id, "✅ انجام شد")
-        return
-
-    if data.startswith("admin_set_chattext_"):
-        if not ensure_admin(uid):
-            bot.answer_callback_query(call.id, "دسترسی غیرمجاز", show_alert=True)
-            return
-        pid = safe_int(data.replace("admin_set_chattext_", "", 1))
-        if not pid:
-            bot.answer_callback_query(call.id, "داده نامعتبر", show_alert=True)
-            return
-        bot.answer_callback_query(call.id)
-        admin_states[uid] = {"mode": "product_chat_text", "product_id": int(pid)}
-        current = _get_product_chat_text(int(pid))
-        hint = ("(فعلی: " + (current[:80] + ("…" if len(current)>80 else "")) + ")\n\n") if current else ""
-        bot.send_message(call.message.chat.id, "✏️ متن چت این محصول را ارسال کنید.\nبرای پاک کردن: /reset\n" + hint)
-        return
-    if data == "wallet_charge":
-        kb = types.InlineKeyboardMarkup()
-        kb.add(
-            types.InlineKeyboardButton(
-                "💳 کارت به کارت", callback_data="wallet_card2card"
-            ),
-            types.InlineKeyboardButton(
-                "🌐 درگاه پرداخت", callback_data="wallet_gateway"
-            ),
-        )
-        bot.answer_callback_query(call.id)
-        bot.send_message(
-            call.message.chat.id,
-            "لطفاً روش پرداخت را انتخاب کنید:",
-            reply_markup=kb,
-        )
-        return
-
-    if data == "wallet_gateway":
-        bot.answer_callback_query(call.id)
-        start_wallet_charge(call.message)
-        return
-
-    if data == "wallet_card2card":
-        bot.answer_callback_query(call.id)
-        user_states[uid] = {"mode": "card2card_receipt"}
-        text_msg = (
-            "برای افزایش موجودی کیف پول، مبلغ مورد نظر را به حساب زیر واریز کرده و سپس عکس رسید را در همین چت ارسال کنید:\n\n"
-            "💳 شماره کارت:\n"
-            "<code>6037701608004393</code>\n"
-            "به نام: <b>سید فیروز ایازی</b>\n\n"
-            "📍 پس از بررسی، موجودی کیف پول شما شارژ خواهد شد.\n\n"
-            "⚠️ فقط عکس واضح از رسید را ارسال کنید.\n"
-        )
-        kb = types.InlineKeyboardMarkup()
-        kb.add(
-            types.InlineKeyboardButton(
-                "❌ انصراف", callback_data="wallet_cancel_card2card"
-            )
-        )
-        bot.send_message(call.message.chat.id, text_msg, reply_markup=kb)
-        return
-
-    if data == "wallet_cancel_card2card":
-        bot.answer_callback_query(call.id, "درخواست کارت به کارت لغو شد.")
-        clear_user_state(uid)
-        try:
-            bot.edit_message_reply_markup(
-                call.message.chat.id,
-                call.message.message_id,
-                reply_markup=None,
-            )
-        except Exception:
-            pass
-        return
-
-    if data.startswith("other_cat_"):
-        bot.answer_callback_query(call.id)
-        category = data[len("other_cat_") :]
-        send_products_menu(call.message.chat.id, category, user_id=uid)
-        return
-
-    if data == "other_categories":
-        bot.answer_callback_query(call.id)
-        bot.send_message(
-            call.message.chat.id,
-            "لطفا یکی از دسته‌بندی‌های زیر را انتخاب کنید:",
-            reply_markup=other_products_menu(),
-        )
-        return
-
-    if data.startswith("back_list_"):
-        bot.answer_callback_query(call.id)
-        category = data[len("back_list_") :]
-        send_products_menu(call.message.chat.id, category, user_id=uid)
-        return
-
-    if data == "back_main":
-        bot.answer_callback_query(call.id)
-        bot.send_message(call.message.chat.id, t("TXT_MAIN_MENU_TITLE","منوی اصلی"),
-                         reply_markup=main_menu(user_id=uid))
-        return
-
-    if data == "other_back":
-        bot.answer_callback_query(call.id)
-        bot.send_message(call.message.chat.id, t("TXT_MAIN_MENU_TITLE","منوی اصلی"),
-                         reply_markup=main_menu(user_id=uid))
-        return
-
-    if data == "admin_products_back":
-        data = "admin_products"
-
-    if data == "admin_back":
-        if not ensure_admin(uid):
-            bot.answer_callback_query(call.id, "دسترسی غیرمجاز", show_alert=True)
-            return
-        bot.answer_callback_query(call.id)
-        bot.send_message(call.message.chat.id, "پنل مدیریت 👇", reply_markup=admin_main_inline())
-        return
-
-    if data == "admin_settings":
-        bot.answer_callback_query(call.id)
-        panel_url = f"https://stockland-bot-production.up.railway.app/admin/settings"
-        kb = types.InlineKeyboardMarkup()
-        kb.add(types.InlineKeyboardButton("🌐 باز کردن پنل تنظیمات", url=panel_url))
-        bot.send_message(call.message.chat.id, "تنظیمات به پنل وب منتقل شده است:", reply_markup=kb)
-        return
-
-    if data in ("admin_main_btn_manage", "admin_ui_main_buttons", "admin_ui_texts",
-                "admin_ui_captions", "admin_backup_menu"):
-        bot.answer_callback_query(call.id)
-        panel_url = f"https://stockland-bot-production.up.railway.app/admin/"
-        kb = types.InlineKeyboardMarkup()
-        kb.add(types.InlineKeyboardButton("🌐 باز کردن پنل مدیریت", url=panel_url))
-        bot.send_message(call.message.chat.id, "این بخش به پنل وب منتقل شده:", reply_markup=kb)
-        return
-
-    if (data.startswith("admin_main_btn_toggle_") or data.startswith("admin_ui_edit_") or
-            data in ("admin_export_backup", "admin_import_backup",
-                     "admin_full_reset_1", "admin_full_reset_2", "admin_full_reset_do")):
-        bot.answer_callback_query(call.id)
-        panel_url = "https://stockland-bot-production.up.railway.app/admin/"
-        kb = types.InlineKeyboardMarkup()
-        kb.add(types.InlineKeyboardButton("🌐 پنل مدیریت وب", url=panel_url))
-        bot.send_message(call.message.chat.id, "این بخش از پنل وب مدیریت می‌شود:", reply_markup=kb)
-        return
-
-    if data == "admin_feed_panel":
-        if not ensure_admin(uid):
-            bot.answer_callback_query(call.id, "دسترسی غیرمجاز", show_alert=True)
-            return
-        bot.answer_callback_query(call.id)
-        bot.send_message(call.message.chat.id, "مدیریت محصول 👇", reply_markup=admin_feed_panel_menu())
-        return
-
-    if data == "admin_feed_panel_stats":
-        if not ensure_admin(uid):
-            bot.answer_callback_query(call.id, "دسترسی غیرمجاز", show_alert=True)
-            return
-        bot.answer_callback_query(call.id)
-        send_admin_feed_panel_stats(call.message.chat.id, message_id=call.message.message_id)
-        return
-
-    mcat = re.fullmatch(r"admin_feed_panel_cat_([A-Za-z0-9_-]+)_([0-9]+)_([0-9]+)", data)
-    if mcat:
-        if not ensure_admin(uid):
-            bot.answer_callback_query(call.id, "دسترسی غیرمجاز", show_alert=True)
-            return
-        try:
-            cat = str(mcat.group(1))
-            mode = int(mcat.group(2))
-            page = int(mcat.group(3))
-        except Exception:
-            bot.answer_callback_query(call.id, "فرمت نامعتبر", show_alert=True)
-            return
-        bot.answer_callback_query(call.id)
-        send_admin_feed_panel_list(call.message.chat.id, page=page, mode=mode, message_id=call.message.message_id, category_key=cat)
-        return
-
-    m = re.fullmatch(r"admin_feed_panel_([0-9]+)_([0-9]+)", data)
-    if m:
-        if not ensure_admin(uid):
-            bot.answer_callback_query(call.id, "دسترسی غیرمجاز", show_alert=True)
-            return
-        try:
-            mode = int(m.group(1))
-            page = int(m.group(2))
-        except Exception:
-            bot.answer_callback_query(call.id, "فرمت نامعتبر", show_alert=True)
-            return
-        bot.answer_callback_query(call.id)
-        send_admin_feed_panel_list(call.message.chat.id, page=page, mode=mode, message_id=call.message.message_id, category_key=None)
-        return
-
-    if data.startswith("admin_feed_panel_view_"):
-        if not ensure_admin(uid):
-            bot.answer_callback_query(call.id, "دسترسی غیرمجاز", show_alert=True)
-            return
-        try:
-            _parts = data.split("_")
-            # admin_feed_panel_view_{feed_id}_{page}_{mode}(_{category_key})?
-            fid = int(_parts[4]); page = int(_parts[5]); mode = int(_parts[6])
-            category_key = _parts[7] if len(_parts) > 7 else None
-        except Exception:
-            bot.answer_callback_query(call.id, "فرمت نامعتبر", show_alert=True)
-            return
-        bot.answer_callback_query(call.id)
-        send_admin_feed_panel_view(call.message.chat.id, fid, page=page, mode=mode, message_id=call.message.message_id, category_key=category_key)
-        return
-
-    if data.startswith("admin_feed_panel_toggle_"):
-        if not ensure_admin(uid):
-            bot.answer_callback_query(call.id, "دسترسی غیرمجاز", show_alert=True)
-            return
-        try:
-            _parts = data.split("_")
-            # admin_feed_panel_toggle_{feed_id}_{page}_{mode}(_{category_key})?
-            fid = int(_parts[4]); page = int(_parts[5]); mode = int(_parts[6])
-            category_key = _parts[7] if len(_parts) > 7 else None
-        except Exception:
-            bot.answer_callback_query(call.id, "فرمت نامعتبر", show_alert=True)
-            return
-        # toggle delivered flag only (safely)
-        try:
-            import sqlite3
-            conn = sqlite3.connect(DB_FULL_PATH)
-            cur = conn.cursor()
-            cur.execute("SELECT delivered FROM product_feed WHERE id=?", (fid,))
-            r = cur.fetchone()
-            if not r:
-                conn.close()
-                bot.answer_callback_query(call.id, "یافت نشد", show_alert=True)
-                return
-            new_val = 0 if int(r[0]) == 1 else 1
-
-            # اگر از حالت «ارسال‌شده» به «برگشت/ارسال‌نشده» می‌رویم،
-            # پیام تحویل مرتبط با همین Feed را از چت مشتری پاک کن و رکوردش را هم حذف کن.
-            if int(r[0]) == 1 and int(new_val) == 0:
-                _info = _get_delivery_message(int(fid))
-                if _info:
-                    _chat_id, _msg_id = _info[0], _info[1]
+                if photo: await ctx.bot.send_photo(uid, photo=photo, caption=text)
+                else:     await ctx.bot.send_message(uid, text)
+                ok += 1
+                await asyncio.sleep(0.05)
+            except Exception as e:
+                retry = getattr(e, "retry_after", None)
+                if retry:
+                    await asyncio.sleep(retry + 1)
                     try:
-                        bot.delete_message(int(_chat_id), int(_msg_id))
-                    except Exception:
-                        pass
-                _delete_delivery_message_record(int(fid))
-
-            cur.execute("UPDATE product_feed SET delivered=? WHERE id=?", (new_val, fid))
-            conn.commit()
-            conn.close()
-        except Exception:
-            bot.answer_callback_query(call.id, "خطا در تغییر وضعیت", show_alert=True)
-            return
-
-        bot.answer_callback_query(call.id, "انجام شد ✅", show_alert=False)
-        # refresh list
-        send_admin_feed_panel_list(call.message.chat.id, page=page, mode=mode, message_id=call.message.message_id, category_key=None)
-        return
-
-    if data.startswith("admin_feed_panel_delete_"):
-        if not ensure_admin(uid):
-            bot.answer_callback_query(call.id, "دسترسی غیرمجاز", show_alert=True)
-            return
-        try:
-            _parts = data.split("_")
-            # admin_feed_panel_delete_{feed_id}_{page}_{mode}(_{category_key})?
-            fid = int(_parts[4]); page = int(_parts[5]); mode = int(_parts[6])
-            category_key = _parts[7] if len(_parts) > 7 else None
-        except Exception:
-            bot.answer_callback_query(call.id, "فرمت نامعتبر", show_alert=True)
-            return
-        try:
-            import sqlite3
-            conn = sqlite3.connect(DB_FULL_PATH)
-            # اگر پیام تحویل برای این محصول ذخیره شده، قبل از حذف آیتم تلاش کن آن پیام را پاک کنی
-            _info = _get_delivery_message(int(fid))
-            if _info:
-                try:
-                    bot.delete_message(int(_info[0]), int(_info[1]))
-                except Exception:
-                    pass
-                _delete_delivery_message_record(int(fid))
-            conn.execute("DELETE FROM product_feed WHERE id=?", (fid,))
-            conn.commit()
-            conn.close()
-        except Exception:
-            bot.answer_callback_query(call.id, "خطا در حذف", show_alert=True)
-            return
-
-        bot.answer_callback_query(call.id, "حذف شد 🗑", show_alert=False)
-        send_admin_feed_panel_list(call.message.chat.id, page=page, mode=mode, message_id=call.message.message_id)
-        return
-
-    if data == "admin_products":
-        if not ensure_admin(uid):
-            bot.answer_callback_query(call.id, "دسترسی غیرمجاز", show_alert=True)
-            return
-        bot.answer_callback_query(call.id)
-        kb = types.InlineKeyboardMarkup()
-        kb.add(
-            types.InlineKeyboardButton(" سایر محصولات فروشگاه 🛍", callback_data="admin_other_products"),
-            types.InlineKeyboardButton(" سرویس‌های اپل آیدی 📱", callback_data="admin_products_cat_apple"),
-        )
-        kb.add(types.InlineKeyboardButton("⬅️ بازگشت", callback_data="admin_back"))
-        safe_edit_message_text(
-            "یکی از دسته‌بندی‌های محصولات را انتخاب کنید:",
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            reply_markup=kb,
-        )
-        return
-
-    if data == "admin_partner_requests":
-        if not ensure_admin(uid):
-            bot.answer_callback_query(call.id, "دسترسی غیرمجاز", show_alert=True)
-            return
-        bot.answer_callback_query(call.id)
-        bot.send_message(call.message.chat.id, "مدیریت درخواست‌های همکار 👇", reply_markup=admin_partner_requests_menu())
-        return
-
-    if data.startswith("admin_partner_list_"):
-        if not ensure_admin(uid):
-            bot.answer_callback_query(call.id, "دسترسی غیرمجاز", show_alert=True)
-            return
-        bot.answer_callback_query(call.id)
-        suffix = data.replace("admin_partner_list_", "", 1)
-        status = None
-        if suffix in ("pending", "approved", "rejected"):
-            status = suffix
-        send_partner_list(call.message.chat.id, status=status, query=None)
-        return
-
-    if data == "admin_partner_search":
-        if not ensure_admin(uid):
-            bot.answer_callback_query(call.id, "دسترسی غیرمجاز", show_alert=True)
-            return
-        bot.answer_callback_query(call.id)
-        admin_states[uid] = {"mode": "partner_search"}
-        bot.send_message(call.message.chat.id, "عبارت جستجو را ارسال کنید (شماره/شهر/نام فروشگاه/نام/یوزرنیم):")
-        return
-
-    if data == "admin_other_products":
-        if not ensure_admin(uid):
-            bot.answer_callback_query(call.id, "دسترسی غیرمجاز", show_alert=True)
-            return
-        bot.answer_callback_query(call.id)
-        bot.send_message(
-            call.message.chat.id,
-            "سایر محصولات (ادمین):",
-            reply_markup=admin_other_products_menu(),
-        )
-        return
-
-    if data == "admin_other_add_service":
-        if not ensure_admin(uid):
-            bot.answer_callback_query(call.id, "دسترسی غیرمجاز", show_alert=True)
-            return
-        bot.answer_callback_query(call.id)
-        admin_states[uid] = {"mode": "new_other_service_title"}
-        bot.send_message(call.message.chat.id, "عنوان سرویس جدید را ارسال کنید:")
-        return
-
-    if data == "admin_other_delete_service":
-        if not ensure_admin(uid):
-            bot.answer_callback_query(call.id, "دسترسی غیرمجاز", show_alert=True)
-            return
-
-        bot.answer_callback_query(call.id)
-
-        services = list_other_services(active_only=False)
-        kb = types.InlineKeyboardMarkup(row_width=1)
-
-        has_deletable = False
-
-        for skey, title, emoji, _is_active in services:
-            # جلوگیری کامل از نمایش general در لیست حذف
-            if skey == "general":
-                continue
-
-            has_deletable = True
-            label = (
-                f"🗑 {emoji.strip()} {title}".strip()
-                if (emoji and str(emoji).strip())
-                else f"🗑 {str(title).strip()}"
-            )
-
-            kb.add(
-                types.InlineKeyboardButton(
-                    label,
-                    callback_data=f"admin_other_del_{skey}"
-                )
-            )
-
-        if not has_deletable:
-            kb.add(
-                types.InlineKeyboardButton(
-                    "هیچ زیر‌دسته‌ای برای حذف وجود ندارد",
-                    callback_data="noop"
-                )
-            )
-
-        kb.add(
-            types.InlineKeyboardButton("🔙 بازگشت", callback_data="admin_other_back")
-        )
-
-        bot.send_message(
-            call.message.chat.id,
-            "کدام زیر‌دسته حذف شود؟",
-            reply_markup=kb
-        )
-        return
-
-    if data.startswith("admin_other_del_"):
-        if not ensure_admin(uid):
-            bot.answer_callback_query(call.id, "دسترسی غیرمجاز", show_alert=True)
-            return
-
-        skey = data[len("admin_other_del_"):]
-
-        if skey == "general":
-            bot.answer_callback_query(call.id, "امکان حذف این دسته وجود ندارد", show_alert=True)
-            return
-
-        delete_other_service(skey)
-
-        bot.answer_callback_query(call.id, "سرویس حذف شد.")
-        bot.send_message(
-            call.message.chat.id,
-            "سایر محصولات (ادمین):",
-            reply_markup=admin_other_products_menu()
-        )
-        return
-
-    if data == "admin_other_back":
-        if not ensure_admin(uid):
-            bot.answer_callback_query(call.id, "دسترسی غیرمجاز", show_alert=True)
-            return
-        bot.answer_callback_query(call.id)
-        send_admin_categories(call.message.chat.id)
-        return
-
-    if data.startswith("admin_partner_edit_"):
-        if not ensure_admin(uid):
-            bot.answer_callback_query(call.id, "دسترسی غیرمجاز", show_alert=True)
-            return
-        target_uid = safe_int(data.replace("admin_partner_edit_", "", 1))
-        if not target_uid:
-            bot.answer_callback_query(call.id, "داده نامعتبر", show_alert=True)
-            return
-        bot.answer_callback_query(call.id)
-        admin_states[uid] = {"mode": "partner_edit_city", "target_user_id": int(target_uid)}
-        bot.send_message(call.message.chat.id, "✏️ شهر جدید را وارد کنید (برای عدم تغییر: - )")
-        return
-
-    if data.startswith("admin_partner_approve_") or data.startswith("admin_partner_reject_"):
-        if not ensure_admin(uid):
-            bot.answer_callback_query(call.id, "دسترسی غیرمجاز", show_alert=True)
-            return
-        parts = data.split("_")
-        action = parts[2] if len(parts) >= 3 else ""
-        target_uid = safe_int(parts[-1])
-        if not target_uid:
-            bot.answer_callback_query(call.id, "داده نامعتبر", show_alert=True)
-            return
-        if action == "approve":
-            ok = approve_partner(target_uid)
-            bot.answer_callback_query(call.id, "تایید شد" if ok else "یافت نشد", show_alert=True)
-            if ok:
-                try:
-                    bot.send_message(target_uid, "✅ درخواست نمایندگی شما تایید شد. قیمت همکار برای شما فعال است.")
-                except Exception:
-                    pass
-        else:
-            ok = reject_partner(target_uid)
-            bot.answer_callback_query(call.id, "رد شد" if ok else "یافت نشد", show_alert=True)
-            if ok:
-                try:
-                    bot.send_message(target_uid, "❌ درخواست نمایندگی شما رد شد.")
-                except Exception:
-                    pass
-        try:
-            bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
-        except Exception:
-            pass
-        return
-
-
-    if data.startswith("admin_other_toggle_"):
-        if not ensure_admin(uid):
-            return
-
-        skey = data.replace("admin_other_toggle_", "")
-
-        import sqlite3
-        conn = sqlite3.connect(DB_PATH)
-        row = conn.execute(
-            "SELECT is_active FROM other_services WHERE service_key=?",
-            (skey,)
-        ).fetchone()
-
-        if row:
-            new_status = 0 if int(row[0]) == 1 else 1
-            conn.execute(
-                "UPDATE other_services SET is_active=? WHERE service_key=?",
-                (new_status, skey)
-            )
-            conn.commit()
-
-        conn.close()
-
-        bot.answer_callback_query(call.id, "وضعیت تغییر کرد")
-        bot.send_message(call.message.chat.id, "سایر محصولات (ادمین):", reply_markup=admin_other_products_menu())
-        return
-
-
-    if data.startswith("admin_products_cat_"):
-        if not ensure_admin(uid):
-            bot.answer_callback_query(call.id, "دسترسی غیرمجاز", show_alert=True)
-            return
-        cat_key = data.split("_")[-1]
-        if cat_key == "apple":
-            category = "apple"
-        else:
-            keys = {row[0] for row in list_other_services(active_only=True)}
-            if cat_key not in keys:
-                bot.answer_callback_query(call.id, "دسته‌بندی نامعتبر است.", show_alert=True)
-                return
-            category = cat_key
-
-        bot.answer_callback_query(call.id)
-
-        products = get_products_by_category(category)
-        kb = types.InlineKeyboardMarkup(row_width=2)
-        if products:
-            for p in products:
-                pid, _, title, price, _desc, is_active, _partner_price = p
-                status_icon = "✅" if is_active else "❌"
-                label = f"{status_icon} {title} | {price:,} تومان"
-                kb.add(types.InlineKeyboardButton(label, callback_data=f"admin_product_{pid}"))
-            kb.add(types.InlineKeyboardButton("➕ افزودن محصول جدید", callback_data=f"admin_new_product_{category}"))
-            kb.add(types.InlineKeyboardButton("🔙 بازگشت به دسته‌ها", callback_data="admin_products"))
-            text_msg = f"🧾 مدیریت محصولات دسته: {category}\n\nبرای مدیریت، روی هر محصول بزنید."
-        else:
-            kb.add(types.InlineKeyboardButton("➕ افزودن محصول جدید", callback_data=f"admin_new_product_{category}"))
-            kb.add(types.InlineKeyboardButton("🔙 بازگشت به دسته‌ها", callback_data="admin_products"))
-            text_msg = f"🧾 مدیریت محصولات دسته: {category}\n\nمحصولی برای این دسته ثبت نشده است."
-
-        safe_edit_message_text(
-            text_msg,
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            reply_markup=kb,
-        )
-        return
-
-    if data.startswith("admin_back_cat_"):
-        if not ensure_admin(uid):
-            bot.answer_callback_query(call.id)
-            return
-        category = data.split("_")[-1]
-        bot.answer_callback_query(call.id)
-        send_products_menu(call.message.chat.id, category, admin_view=True)
-        return
-
-    if data.startswith("admin_product_"):
-        if not ensure_admin(uid):
-            bot.answer_callback_query(call.id)
-            return
-        pid = safe_int(data.split("_")[-1])
-        product = get_product_by_id(pid)
-        if not product:
-            bot.answer_callback_query(call.id, "محصول یافت نشد", show_alert=True)
-            return
-        bot.answer_callback_query(call.id)
-        send_admin_product_detail(call.message, product)
-        return
-
-    if data.startswith("admin_feed_list_"):
-        if not ensure_admin(uid):
-            bot.answer_callback_query(call.id)
-            return
-        try:
-            _parts = data.split("_")
-            pid = safe_int(_parts[3])
-            page = safe_int(_parts[4]) or 0
-            mode = safe_int(_parts[5]) or 0
-        except Exception:
-            pid, page, mode = None, 0, 0
-
-        bot.answer_callback_query(call.id)
-        send_admin_feed_list(
-            chat_id=call.message.chat.id,
-            product_id=pid,
-            page=page,
-            mode=mode,
-            message_id=call.message.message_id,
-        )
-        return
-
-    if data.startswith("admin_feed_view_"):
-        if not ensure_admin(uid):
-            bot.answer_callback_query(call.id)
-            return
-        _p = data.split("_")
-        feed_id = safe_int(_p[3])
-        pid = safe_int(_p[4])
-        page = safe_int(_p[5]) or 0
-        mode = safe_int(_p[6]) or 0
-        bot.answer_callback_query(call.id)
-        row = list_feed_items(pid, None, limit=1, offset=0)
-        try:
-            import sqlite3
-            _conn = sqlite3.connect(DB_FULL_PATH)
-            _r = _conn.execute(
-                "SELECT id, data, delivered, created_at FROM product_feed WHERE id=? AND product_id=?;",
-                (int(feed_id), int(pid)),
-            ).fetchone()
-            _conn.close()
-        except Exception:
-            _r = None
-        if not _r:
-            bot.send_message(call.message.chat.id, "آیتم مورد نظر پیدا نشد.")
-            return
-        _id, _data, _del, _created = _r
-        status = "✅ تحویل‌شده" if int(_del) == 1 else "📦 تحویل‌نشده"
-        _oid = None
-        _info = _get_delivery_message(int(_id))
-        if _info:
-            _oid = _info[2]
-        txt = (
-            f"📄 آیتم محصول (Feed ID) #{_id}\n"
-            f"محصول (Product ID) #{pid}\n"
-        )
-        if _oid is not None:
-            txt += f"Order ID: #{_display_order_no(_oid)}\n"
-        txt += (
-            f"وضعیت: {status}\n"
-            f"تاریخ ثبت: {_created}\n\n"
-            f"<code>{html.escape(_data)}</code>"
-        )
-        kb = types.InlineKeyboardMarkup(row_width=2)
-        if int(_del) == 0:
-            kb.add(types.InlineKeyboardButton("✅ علامت تحویل", callback_data=f"admin_feed_toggle_{_id}_{pid}_{page}_{mode}"))
-        else:
-            kb.add(types.InlineKeyboardButton("♻️ برگشت به تحویل‌نشده", callback_data=f"admin_feed_toggle_{_id}_{pid}_{page}_{mode}"))
-        kb.add(types.InlineKeyboardButton("🗑 حذف آیتم", callback_data=f"admin_feed_delete_{_id}_{pid}_{page}_{mode}"))
-        kb.add(types.InlineKeyboardButton("⬅️ بازگشت به لیست", callback_data=f"admin_feed_list_{pid}_{page}_{mode}"))
-        bot.send_message(call.message.chat.id, txt, reply_markup=kb, parse_mode="HTML")
-        return
-
-    if data.startswith("admin_feed_toggle_"):
-        if not ensure_admin(uid):
-            bot.answer_callback_query(call.id)
-            return
-        _p = data.split("_")
-        feed_id = safe_int(_p[3])
-        pid = safe_int(_p[4])
-        page = safe_int(_p[5]) or 0
-        mode = safe_int(_p[6]) or 0
-        try:
-            import sqlite3
-            _conn = sqlite3.connect(DB_FULL_PATH)
-            _r = _conn.execute("SELECT delivered FROM product_feed WHERE id=? AND product_id=?;", (int(feed_id), int(pid))).fetchone()
-            _conn.close()
-            cur_del = int(_r[0]) if _r else 0
-        except Exception:
-            cur_del = 0
-        new_del = 0 if cur_del == 1 else 1
-        # اگر از حالت تحویل‌شده به برگشت (تحویل‌نشده) می‌رویم، پیام تحویل را از چت مشتری پاک کن.
-        if int(cur_del) == 1 and int(new_del) == 0 and feed_id is not None:
-            _info = _get_delivery_message(int(feed_id))
-            if _info:
-                _chat_id, _msg_id = _info[0], _info[1]
-                try:
-                    bot.delete_message(int(_chat_id), int(_msg_id))
-                except Exception:
-                    pass
-            _delete_delivery_message_record(int(feed_id))
-        set_feed_item_delivered(feed_id, new_del)
-        bot.answer_callback_query(call.id, "انجام شد.")
-        send_admin_feed_list(
-            chat_id=call.message.chat.id,
-            product_id=pid,
-            page=page,
-            mode=mode,
-            message_id=call.message.message_id,
-        )
-        return
-
-    if data.startswith("admin_feed_delete_"):
-        if not ensure_admin(uid):
-            bot.answer_callback_query(call.id)
-            return
-        _p = data.split("_")
-        feed_id = safe_int(_p[3])
-        pid = safe_int(_p[4])
-        page = safe_int(_p[5]) or 0
-        mode = safe_int(_p[6]) or 0
-        delete_feed_item(feed_id)
-        bot.answer_callback_query(call.id, "حذف شد.")
-        send_admin_feed_list(
-            chat_id=call.message.chat.id,
-            product_id=pid,
-            page=page,
-            mode=mode,
-            message_id=call.message.message_id,
-        )
-        return
-
-    if data.startswith("admin_feed_bulk_"):
-        if not ensure_admin(uid):
-            bot.answer_callback_query(call.id)
-            return
-        pid = safe_int(data.split("_")[-1])
-        admin_states[uid] = {"mode": "feed_bulk", "product_id": pid}
-        bot.answer_callback_query(call.id)
-        bot.send_message(
-            call.message.chat.id,
-            """📦 ارسال موجودی به صورت چندخطی:
-
-    ✅ استاندارد جدید: هر آیتم می‌تواند چندخطی باشد.
-    برای جدا کردن آیتم‌ها، یک خط فقط شامل 3 ستاره یا بیشتر بفرستید (*** یا **** و ...).
-    اگر ستاره‌ها را نفرستید، حالت قدیمی فعال است: هر خط = یک آیتم.
-    برای لغو: /cancel
-
-    نمونه چندخطی:
-    <code>Apple Id
-
-    email: testone.com
-    pass: 23884890HAd
-    date: 1983/02/12
-
-    در حفظ اپل آیدی کوشا باشید
-
-    ***
-    Apple Id 2
-
-    email: testone2.com
-    pass: 23884890HAd
-    date: 1983/02/12
-
-    در حفظ اپل آیدی کوشا باشید</code>""",
-            parse_mode="HTML",
-        )
-        return
-
-    if data.startswith("admin_feed_alert_"):
-        if not ensure_admin(uid):
-            bot.answer_callback_query(call.id)
-            return
-        pid = safe_int(data.split("_")[-1])
-        admin_states[uid] = {"mode": "feed_alert", "product_id": pid}
-        bot.answer_callback_query(call.id)
-        bot.send_message(
-            call.message.chat.id,
-            "⚠️ آستانه هشدار موجودی را ارسال کنید (فقط عدد).\n"
-            "مثلاً 5 یعنی وقتی باقی‌مانده ≤ 5 شد به ادمین هشدار بده.\n"
-            "برای لغو: /cancel",
-        )
-        return
-
-    if data.startswith("admin_edit_title_"):
-        if not ensure_admin(uid):
-            bot.answer_callback_query(call.id)
-            return
-        pid = safe_int(data.split("_")[-1])
-        admin_states[uid] = {"mode": "edit_title", "product_id": pid}
-        bot.answer_callback_query(call.id)
-        bot.send_message(call.message.chat.id, "عنوان جدید محصول را ارسال کنید:")
-        return
-
-    if data.startswith("admin_edit_price_"):
-        if not ensure_admin(uid):
-            bot.answer_callback_query(call.id)
-            return
-        pid = safe_int(data.split("_")[-1])
-        admin_states[uid] = {"mode": "edit_price", "product_id": pid}
-        bot.answer_callback_query(call.id)
-        bot.send_message(
-            call.message.chat.id, "قیمت جدید (فقط عدد) را ارسال کنید:"
-        )
-        return
-
-    if data.startswith("admin_set_limit_c_") or data.startswith("admin_set_limit_p_"):
-        if not ensure_admin(uid):
-            bot.answer_callback_query(call.id, "دسترسی غیرمجاز", show_alert=True)
-            return
-        bot.answer_callback_query(call.id)
-        is_c = data.startswith("admin_set_limit_c_")
-        pid = int(data.split("_")[-1])
-        admin_states[uid] = {"mode": ("edit_limit_c" if is_c else "edit_limit_p"), "product_id": pid}
-        bot.send_message(call.message.chat.id, "عدد حد خرید روزانه را ارسال کنید (0 یعنی نامحدود):")
-        return
-
-    if data.startswith("admin_edit_partner_price_"):
-        if not ensure_admin(uid):
-            bot.answer_callback_query(call.id)
-            return
-        pid = safe_int(data.split("_")[-1])
-        admin_states[uid] = {"mode": "edit_partner_price", "product_id": pid}
-        bot.answer_callback_query(call.id)
-        bot.send_message(
-            call.message.chat.id,
-            "قیمت همکار جدید (فقط عدد) را ارسال کنید. برای استفاده از قیمت عادی، 0 بفرستید:",
-        )
-        return
-
-    if data.startswith("admin_edit_desc_"):
-        if not ensure_admin(uid):
-            bot.answer_callback_query(call.id)
-            return
-        pid = safe_int(data.split("_")[-1])
-        admin_states[uid] = {"mode": "edit_desc", "product_id": pid}
-        bot.answer_callback_query(call.id)
-        bot.send_message(call.message.chat.id, "توضیحات جدید محصول را ارسال کنید:")
-        return
-
-    if data.startswith("admin_toggle_active_"):
-        if not ensure_admin(uid):
-            bot.answer_callback_query(call.id)
-            return
-        pid = safe_int(data.split("_")[-1])
-        product = get_product_by_id(pid)
-        if not product:
-            bot.answer_callback_query(call.id, "محصول یافت نشد", show_alert=True)
-            return
-        toggle_product_active(pid)
-        bot.answer_callback_query(call.id, "وضعیت محصول به‌روزرسانی شد.")
-        product = get_product_by_id(pid)
-        send_admin_product_detail(call.message, product)
-        return
-
-    if data.startswith("admin_delete_"):
-        if not ensure_admin(uid):
-            bot.answer_callback_query(call.id)
-            return
-        pid = safe_int(data.split("_")[-1])
-        product = get_product_by_id(pid)
-        if not product:
-            bot.answer_callback_query(call.id, "محصول یافت نشد", show_alert=True)
-            return
-
-        category = product[1]
-        delete_product(pid)
-
-        bot.answer_callback_query(call.id, "محصول به‌صورت کامل حذف شد.")
-        safe_edit_message_text(
-            f"مدیریت محصولات دسته: {category}",
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-        )
-        send_products_menu(call.message.chat.id, category, admin_view=True)
-        return
-
-    if data.startswith("admin_new_product_"):
-        if not ensure_admin(uid):
-            bot.answer_callback_query(call.id)
-            return
-        category = data.split("_")[-1]
-        admin_states[uid] = {"mode": "new_product_title", "category": category}
-        bot.answer_callback_query(call.id)
-        bot.send_message(
-            call.message.chat.id,
-            f"عنوان محصول جدید برای دستهٔ {category} را ارسال کنید:",
-        )
-        return
-
-    if data == "admin_wallet":
-        if not ensure_admin(uid):
-            bot.answer_callback_query(call.id)
-            return
-        kb = types.InlineKeyboardMarkup()
-        kb.add(
-            types.InlineKeyboardButton(
-                "➕ شارژ کیف پول کاربر", callback_data="admin_wallet_credit"
-            ),
-        )
-        kb.add(
-            types.InlineKeyboardButton(
-                "➖ کاهش کیف پول کاربر", callback_data="admin_wallet_debit"
-            ),
-        )
-        kb.add(
-            types.InlineKeyboardButton(
-                "✏️ تنظیم مستقیم موجودی", callback_data="admin_wallet_set"
-            ),
-        )
-        bot.answer_callback_query(call.id)
-        bot.send_message(
-            call.message.chat.id,
-            "یکی از عملیات کیف پول را انتخاب کنید:",
-            reply_markup=kb,
-        )
-        return
-
-    if data == "admin_wallet_credit":
-        if not ensure_admin(uid):
-            bot.answer_callback_query(call.id)
-            return
-        admin_states[uid] = {"mode": "wallet_credit_user_id"}
-        bot.answer_callback_query(call.id)
-        bot.send_message(
-            call.message.chat.id, "آیدی عددی کاربر برای شارژ کیف پول را ارسال کنید:"
-        )
-        return
-
-    if data == "admin_wallet_debit":
-        if not ensure_admin(uid):
-            bot.answer_callback_query(call.id)
-            return
-        admin_states[uid] = {"mode": "wallet_debit_user_id"}
-        bot.answer_callback_query(call.id)
-        bot.send_message(
-            call.message.chat.id, "آیدی عددی کاربر برای کاهش موجودی را ارسال کنید:"
-        )
-        return
-
-    if data == "admin_wallet_set":
-        if not ensure_admin(uid):
-            bot.answer_callback_query(call.id)
-            return
-        admin_states[uid] = {"mode": "wallet_set_user_id"}
-        bot.answer_callback_query(call.id)
-        bot.send_message(
-            call.message.chat.id, "آیدی عددی کاربر برای تنظیم موجودی را ارسال کنید:"
-        )
-        return
-
-    if data == "admin_stats":
-        if not ensure_admin(uid):
-            bot.answer_callback_query(call.id)
-            return
-        stats = get_stats()
-        total_wallets, total_balance, total_orders, total_sales, active_products = stats
-        text = (
-            "📊 آمار کلی ربات:\n\n"
-            f"تعداد کیف پول‌ها: <b>{total_wallets}</b>\n"
-            f"مجموع موجودی کیف پول‌ها: <b>{total_balance:,}</b> تومان\n\n"
-            f"تعداد سفارش‌ها: <b>{total_orders}</b>\n"
-            f"مجموع فروش: <b>{total_sales:,}</b> تومان\n\n"
-            f"تعداد محصولات فعال: <b>{active_products}</b>\n"
-        )
-        bot.answer_callback_query(call.id)
-        bot.send_message(call.message.chat.id, text)
-        return
-
-    if data == "admin_payments":
-        if not ensure_admin(uid):
-            bot.answer_callback_query(call.id)
-            return
-        orders = get_recent_orders_global(limit=15)
-        if not orders:
-            text = t("MSG_NO_ORDERS")
-        else:
-            lines = []
-            for o in orders:
-                oid, user_id, title, amount, created_at = o
-                date_str = created_at.split("T")[0] if created_at else ""
-                lines.append(
-                    f"#{oid} | کاربر {user_id} | {title} | {amount:,} تومان | {date_str}"
-                )
-            text = "\n".join(lines)
-        bot.answer_callback_query(call.id)
-        bot.send_message(call.message.chat.id, text)
-        return
-
-    if "_select_" in data:
-        _, _, pid_str = data.partition("_select_")
-        pid = safe_int(pid_str)
-        product = get_product_by_id(pid)
-        if not product:
-            bot.answer_callback_query(call.id, "محصول یافت نشد", show_alert=True)
-            return
-        category = product[1]
-        send_product_detail(
-            call.message.chat.id,
-            product,
-            category,
-            user_id=uid,
-            message=call.message
-        )
-        bot.answer_callback_query(call.id)
-        return
-        
-# ===== بررسی ادامه خرید بعد از شارژ =====
-        import sqlite3
-
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
-        cur = conn.cursor()
-
-        cur.execute("""
-            SELECT id FROM pending_product_resumes
-            WHERE user_id=?
-            ORDER BY id DESC
-            LIMIT 1
-        """, (uid,))
-
-        resume_row = cur.fetchone()
-
-        if resume_row and not data.startswith("confirm_"):
-           # حذف رکورد
-            cur.execute("DELETE FROM pending_product_resumes WHERE id=?", (resume_row["id"],))
-            conn.commit()
-            conn.close()
-
-          # اجرای confirm خودکار
-            data = f"confirm_{state_category}_{state_pid}"
-        else:
-            conn.close()
-            
-
-    # ===== confirm_full =====
-    if data.startswith("confirm_full_"):
-
-        parts = data.split("_")
-        if len(parts) < 3:
-            bot.answer_callback_query(call.id, "داده نامعتبر است", show_alert=True)
-            return
-
-        pid = safe_int(parts[-1])
-        category = "_".join(parts[2:-1])
-
-        product = get_product_by_id(pid)
-        if not product:
-            bot.answer_callback_query(call.id, "محصول یافت نشد")
-            return
-
-        price = product[3]
-
-        start_product_payment(
-            bot,
-            call.message,
-            uid,
-            price,
-            reserved_wallet_amount=0,
-            product_id=pid
-        )
-
-        bot.answer_callback_query(call.id)
-        return
-
-
-
-            # ===== confirm_wallet =====
-    if data.startswith("confirm_wallet_"):
-
-        parts = data.split("_")
-        pid = safe_int(parts[-1])
-        category = "_".join(parts[2:-1])
-
-        product = get_product_by_id(pid)
-        if not product:
-            bot.answer_callback_query(call.id, "محصول یافت نشد")
-            return
-
-        partner_price = product[6] if len(product) > 6 else None
-        eff_price = partner_price if (is_partner_approved(uid) and partner_price) else product[3]
-
-        wallet_balance = get_wallet_balance(uid)
-
-        if wallet_balance <= 0:
-            bot.answer_callback_query(call.id, "موجودی کیف پول صفر است")
-            return
-
-        use_wallet = min(wallet_balance, eff_price)
-
-        ok = subtract_wallet_balance(uid, use_wallet)
-        if not ok:
-            bot.answer_callback_query(call.id, "خطا در برداشت", show_alert=True)
-            return
-
-        finalize_product_order(call, uid, product, category, eff_price, wallet_used=use_wallet)
-
-        bot.answer_callback_query(call.id)
-        return
-
-        bot.reply_to(
-            message,
-            "رسید شما ثبت شد ✅\n"
-            "پس از تأیید توسط پشتیبانی، کیف پول شما شارژ خواهد شد.",
-        )
-
-
-@bot.message_handler(
-    func=lambda m: user_states.get(m.from_user.id, {}).get("mode")
-    == "card2card_receipt",
-    content_types=["text"],
-)
-def handle_card2card_text(message):
-    bot.reply_to(
-        message,
-        "در حال حاضر فقط عکس رسید کارت به کارت را ارسال کنید. برای لغو از دکمه ❌ انصراف استفاده کنید.",
-    )
-
-
-# ========= MAIN =========
-
-
-
-
-@bot.message_handler(content_types=["document"])
-def handle_admin_backup_restore_document(message):
-    uid = message.from_user.id
-    if not ensure_admin(uid):
-        return
-    st = admin_states.get(uid) or {}
-    if st.get("mode") != "await_backup_upload":
-        return
-
-    try:
-        file_id = message.document.file_id
-        file_info = bot.get_file(file_id)
-        downloaded = bot.download_file(file_info.file_path)
-
-        _ensure_backup_dir()
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        tmp_path = os.path.join(BACKUP_DIR, f"upload_{uid}_{ts}.sqlite")
-        with open(tmp_path, "wb") as f:
-            f.write(downloaded)
-
-        ok, msg = validate_backup_db(tmp_path)
-        if not ok:
-            bot.send_message(message.chat.id, f"فایل بکاپ معتبر نیست: {msg}")
-            try: os.remove(tmp_path)
-            except: pass
-            admin_states.pop(uid, None)
-            return
-
-        old_bak = restore_db_from_backup(tmp_path)
-        admin_states.pop(uid, None)
-
-        bot.send_message(
-            message.chat.id,
-            f"بازیابی انجام شد ✅\nنسخه قبلی ذخیره شد: {old_bak}\nربات برای اعمال تغییرات ریستارت می‌شود."
-        )
-
-        # Exit so systemd restarts cleanly.
-        os._exit(0)
-
-    except Exception as e:
-        admin_states.pop(uid, None)
-        bot.send_message(message.chat.id, f"خطا در بازیابی بکاپ: {e}")
-
-
-if __name__ == "__main__":
-    init_db(DB_PATH)
-    ticket_ensure_schema()
-    _ensure_delivery_table()
-    logger.info("Bot started (ticket system v2)...")
-
-    import time
+                        if photo: await ctx.bot.send_photo(uid, photo=photo, caption=text)
+                        else:     await ctx.bot.send_message(uid, text)
+                        ok += 1
+                    except: fail += 1
+                else: fail += 1
+            if i % 20 == 0 or i == total:
+                try: await st.edit_text(f"📢 {to_fa(ok)}✔️ {to_fa(fail)}❌  {to_fa(i)}/{to_fa(total)}",reply_markup=cancel_kb if i<total else None)
+                except: pass
+        await st.edit_text(f"✅ پخش تمام شد!\nموفق: {to_fa(ok)} | شکست: {to_fa(fail)}", reply_markup=None)
+    finally:
+        _broadcast_active = False; _broadcast_cancel = False
+
+# ── backup
+_backup_registry: list = []  # [{"msg_id": int, "file_id": str, "date": str}]
+MAX_BACKUPS = 5
+
+async def send_backup(bot):
+    global _backup_registry
+    ts=shamsi_now().replace(" ","_").replace("—","-").replace(":","-")
+    buf=io.BytesIO()
+    files=[(DATA_FILE,"data.json"),(BANNER_FILE,"banner.json"),(WORKHOURS_FILE,"workhours.json"),
+           (BUTTONS_FILE,"buttons.json"),(SETTINGS_FILE,"settings.json"),(STATS_FILE,"stats.json"),(MENU_FILE,"menu.json"),(DB_FILE,"users.db")]
+    with zipfile.ZipFile(buf,"w",zipfile.ZIP_DEFLATED) as zf:
+        for fp,name in files:
+            try:
+                async with aiofiles.open(fp,"rb") as f: zf.writestr(name,await f.read())
+            except Exception as e: logger.warning(f"backup skip {fp}: {e}")
+    buf.seek(0)
+    msg=await bot.send_document(ADMIN_ID,document=buf,filename=f"backup_{ts}.zip",
+                                caption=f"💾 بک‌آپ — {shamsi_now()}")
+    _backup_registry.append({"msg_id":msg.message_id,"file_id":msg.document.file_id,"date":shamsi_now()})
+    # اگر بیشتر از MAX_BACKUPS داریم، قدیمی‌ترین را حذف کن
+    while len(_backup_registry)>MAX_BACKUPS:
+        old=_backup_registry.pop(0)
+        try: await bot.delete_message(ADMIN_ID,old["msg_id"])
+        except Exception as e: logger.debug(f"backup delete old: {e}")
+
+async def _auto_backup_loop(bot):
+    """هر شب ساعت ۳ بامداد به وقت تهران، بکاپ خودکار به ادمین می‌فرستد."""
+    _tz = pytz.timezone("Asia/Tehran")
+    last_backup_date = None   # جلوگیری از backup تکراری در همان روز
     while True:
         try:
-            bot.infinity_polling(timeout=60, long_polling_timeout=60)
+            now = datetime.now(_tz)
+            today = now.date()
+            target = now.replace(hour=3, minute=0, second=0, microsecond=0)
+            if now >= target and last_backup_date != today:
+                await send_backup(bot)
+                last_backup_date = today
+                logger.info("✅ بکاپ خودکار ارسال شد")
+                await asyncio.sleep(3600)   # یک ساعت صبر کن تا دوباره چک نشود
+                continue
+            if now < target:
+                wait = (target - now).total_seconds()
+            else:
+                target += timedelta(days=1)
+                wait = (target - now).total_seconds()
+            logger.info(f"auto_backup: بعد از {int(wait//3600)}h {int((wait%3600)//60)}m")
+            await asyncio.sleep(wait)
         except Exception as e:
-            logger.exception("Polling crashed, restarting in 5s: %s", e)
-            time.sleep(5)
+            logger.error(f"auto_backup: {e}")
+            await asyncio.sleep(3600)
+
+async def restore_backup(bot,file_id):
+    try:
+        f=await bot.get_file(file_id); buf=io.BytesIO()
+        await f.download_to_memory(buf); buf.seek(0)
+        with zipfile.ZipFile(buf,"r") as zf:
+            mapping={"data.json":DATA_FILE,"banner.json":BANNER_FILE,"workhours.json":WORKHOURS_FILE,
+                     "buttons.json":BUTTONS_FILE,"settings.json":SETTINGS_FILE,"stats.json":STATS_FILE,"menu.json":MENU_FILE,"users.db":DB_FILE}
+            restored=[]
+            for name in zf.namelist():
+                if name in mapping:
+                    async with aiofiles.open(mapping[name],"wb") as out: await out.write(zf.read(name))
+                    restored.append(name)
+        await load_data(); await load_banners(); await load_workhours()
+        await load_buttons(); await load_settings(); await load_stats(); await load_menu()
+        # نرمال‌سازی فرمت فایل‌ها روی دیسک (جلوگیری از مشکل فرمت قدیمی بعد از restart)
+        await save_banners(); await save_buttons()
+        # پاک کردن کش ووکامرس تا محصولات تازه از سایت خوانده شوند
+        woo.clear_cache()
+        return True,restored
+    except Exception as e:
+        logger.error(f"restore: {e}"); return False,str(e)
+
+# ════════════════════════════════════════════════
+#  HANDLERS — cmd_start / cmd_admin
+# ════════════════════════════════════════════════
+async def loading_animation(chat, ctx):
+    """انیمیشن حرفه‌ای صبر: اکشن تایپ + پیام متحرک."""
+    try: await ctx.bot.send_chat_action(chat_id=chat.id, action="typing")
+    except Exception: pass
+    msg = await chat.send_message("🛍 در حال دریافت محصولات از سایت…")
+    async def animate():
+        frames = ["🛍 در حال دریافت محصولات از سایت ⏳",
+                  "🛍 در حال دریافت محصولات از سایت ⌛️",
+                  "🛍 لحظه‌ای صبر کنید، تقریباً آماده است…"]
+        i = 0
+        try:
+            while True:
+                await asyncio.sleep(0.8)
+                try:
+                    await ctx.bot.send_chat_action(chat_id=chat.id, action="typing")
+                    await msg.edit_text(frames[i % len(frames)])
+                except Exception: pass
+                i += 1
+        except asyncio.CancelledError: pass
+    return msg, asyncio.ensure_future(animate())
+
+async def cmd_start(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
+    asyncio.ensure_future(_trigger_warm())  # warm در پس‌زمینه — اگر ۱۰ دقیقه گذشته باشد
+    user=update.effective_user; is_new=False
+    async with db.execute("SELECT user_id FROM users WHERE user_id=?",(user.id,)) as c: is_new=(await c.fetchone()) is None
+    await save_user(user)
+    if get_setting("notify_new_user") and is_new:
+        try: await ctx.bot.send_message(ADMIN_ID,f"🆕 کاربر جدید!\n👤 {user.first_name or'—'}\n{'@'+user.username if user.username else'—'}\n🆔 {user.id}")
+        except: pass
+    wt=responses.get("welcome","✨ خوش آمدید")
+    full=build_msg("خوش‌آمدگویی",wt,"welcome")
+    kb=user_sec_kb("welcome")
+    await send_banner(update.message,full,"welcome",kb=kb or main_menu())
+
+async def cmd_admin(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id!=ADMIN_ID: return await update.message.reply_text("⛔ دسترسی ندارید")
+    await update.message.reply_text("👑 پنل مدیریت استوک لند",reply_markup=admin_menu())
+
+# ════════════════════════════════════════════════
+#  USER CALLBACKS
+# ════════════════════════════════════════════════
+async def user_cb(query,ctx):
+    data=query.data
+
+    if data=="wh_weekly":
+        table=wh_full_table(); sep="━"*15
+        msg=f"{sep}\n📆 ساعت کار هفتگی مجموعه\n{sep}\n{table}\n{sep}"
+        kb=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 برگشت",callback_data="wh_back_today")]])
+        await query.message.reply_text(msg,reply_markup=kb); return
+
+    if data=="wh_back_today":
+        wh=wh_today_block() or""
+        msg=f"🕐 ساعت کاری استوک لند\n{wh}"
+        kb=InlineKeyboardMarkup([[InlineKeyboardButton("📆 ساعت کار هفتگی مجموعه",callback_data="wh_weekly")]])
+        await safe_edit(query.message,msg,reply_markup=kb); return
+
+    if data=="cat_back":
+        cats=await get_root_cats()
+        if not cats: await safe_edit(query.message,"📫 محصولی موجود نیست."); return
+        await safe_edit(query.message,"🛍 محصولات استوک لند\nیک دسته‌بندی را انتخاب کنید:",reply_markup=cat_root_kb(cats)); return
+
+    if data=="cat_search":
+        ctx.user_data["mode"]="cat_search"
+        await query.message.reply_text("🔍 نام یا مدل محصول را بنویسید:",reply_markup=cancel_menu()); return
+
+    if data.startswith("cr_back_"):
+        sub_id=int(data[8:]); sub=await get_cat(sub_id)
+        if not sub: return
+        root=await get_cat(sub[3]); subs=await get_subcats(sub[3])
+        await safe_edit(query.message,f"📁 {root[2] if root else ''} {root[1] if root else ''}\nزیردسته را انتخاب کنید:",reply_markup=cat_sub_kb(subs,sub[3])); return
+
+    if data.startswith("cr_"):
+        root_id=int(data[3:]); root=await get_cat(root_id)
+        if not root: return
+        subs=await get_subcats(root_id)
+        if not subs:
+            await safe_edit(query.message,f"📁 {root[2]} {root[1]}\n\n📫 هنوز زیردسته‌ای ثبت نشده.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 برگشت",callback_data="cat_back")]])); return
+        await safe_edit(query.message,f"📁 {root[2]} {root[1]}\nزیردسته را انتخاب کنید:",reply_markup=cat_sub_kb(subs,root_id)); return
+
+    if data.startswith("cs_back_"):
+        sub_id=int(data[8:]); sub=await get_cat(sub_id)
+        if not sub: return
+        products=await get_products(sub_id); title=f"📦 {sub[2]} {sub[1]}"
+        if not products:
+            await safe_edit(query.message,f"{title}\n\n📫 محصولی موجود نیست.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 برگشت",callback_data=f"cr_{sub[3]}")]])); return
+        await safe_edit(query.message,f"{title}\n{to_fa(len(products))} محصول:",reply_markup=cat_products_kb(products,sub_id)); return
+
+    if data.startswith("cs_"):
+        sub_id=int(data[3:]); sub=await get_cat(sub_id)
+        if not sub: return
+        products=await get_products(sub_id); title=f"📦 {sub[2]} {sub[1]}"
+        if not products:
+            await safe_edit(query.message,f"{title}\n\n📫 محصولی موجود نیست.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 برگشت",callback_data=f"cr_{sub[3]}")]])); return
+        await safe_edit(query.message,f"{title}\n{to_fa(len(products))} محصول:",reply_markup=cat_products_kb(products,sub_id)); return
+
+    if data.startswith("prd_"):
+        pid=int(data[4:])
+        # محصول از cache می‌آید (سریع) — نیازی به انیمیشن نیست
+        p=await get_product(pid)
+        if not p: return
+        await record_stat(f"prd_{pid}")
+        is_backorder = len(p)>8 and p[8]==1
+        text=f"📱 {p[1]}\n{'─'*18}\n💰 قیمت:  {p[2]}"
+        if is_backorder:
+            text+="\n\n🔵 وضعیت: قابل سفارش (پیش‌خرید)\nاین محصول هم‌اکنون موجود نیست اما قابل سفارش است. برای پیش‌خرید با پشتیبانی هماهنگ کنید."
+        if p[3]: text+=f"\n\n📝 {p[3]}"
+        kb=product_kb(p)
+        # caption تلگرام حداکثر ۱۰۲۴ کاراکتر — اگر بلندتر بود، تا خط کامل ببر
+        cap = text
+        if len(cap) > 1024:
+            cut = text[:1000].rsplit("\n", 1)[0]  # تا آخرین خط کامل
+            cap = cut + "\n\n📖 ادامه در سایت…"
+        if p[4]:
+            photo_ref = _photo_fileids.get(p[4], p[4])
+            try:
+                sent=await query.message.reply_photo(photo=photo_ref,caption=cap,reply_markup=kb)
+                if sent.photo: _cache_photo(p[4], sent.photo[-1].file_id)
+                return
+            except Exception as e: logger.error(f"prd photo {pid}: {e}")
+        if len(text)>4000: text=text[:3990]+"..."
+        await query.message.reply_text(text,reply_markup=kb); return
+
+    if data.startswith("req_"):
+        pid=int(data[4:]); p=await get_product(pid)
+        if not p: return
+        ctx.user_data.update({"mode":"req_phone","req_pid":pid,"req_name":p[1],"req_type":"خرید"})
+        await query.message.reply_text(f"📋 درخواست خرید: {p[1]}\n\nشماره تماس خود را وارد کنید:",reply_markup=cancel_menu()); return
+
+    if data.startswith("pre_"):
+        pid=int(data[4:]); p=await get_product(pid)
+        if not p: return
+        ctx.user_data.update({"mode":"req_phone","req_pid":pid,"req_name":p[1],"req_type":"پیش‌خرید"})
+        await query.message.reply_text(f"📝 درخواست پیش‌خرید: {p[1]}\n\nاین محصول قابل سفارش است. شماره تماس خود را وارد کنید تا پشتیبانی برای پیش‌خرید با شما هماهنگ کند:",reply_markup=cancel_menu()); return
+
+# ════════════════════════════════════════════════
+#  MAIN CALLBACK DISPATCHER
+# ════════════════════════════════════════════════
+# پیشوندهایی که هم ادمین هم کاربر دسترسی دارد
+_USER_CB_PREFIXES = ("cr_","cs_","prd_","req_","pre_","cat_","wh_weekly","wh_back_today")
+
+async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
+    query=update.callback_query
+    data=query.data; uid=query.from_user.id
+
+    # ── بررسی ساعت کاری برای درخواست خرید — BEFORE query.answer() تا show_alert کار کند
+    if data.startswith(("req_","pre_")) and uid!=ADMIN_ID and not is_open():
+        await query.answer("🔴 فروشگاه در حال حاضر بسته است.\nلطفاً در ساعات کاری مراجعه کنید.",show_alert=True)
+        return
+
+    # ── محافظت اسپم — برای req_/pre_ اعمال نمی‌شود (درخواست خرید نباید بلاک شود)
+    if uid!=ADMIN_ID and not data.startswith(("req_","pre_")):
+        _s=spam_check(uid)
+        if _s=='block':
+            await query.answer(); return
+        if _s=='warn':
+            await query.answer("🐢 لطفاً کمی آرام‌تر کلیک کنید.",show_alert=True); return
+    if uid!=ADMIN_ID:
+        if await is_blocked(uid):
+            await query.answer("⛔ دسترسی شما مسدود شده است."); return
+
+    # ── مسیریابی کاربران — answer یکبار اینجا فراخوانی می‌شه
+    if data.startswith(_USER_CB_PREFIXES) or uid!=ADMIN_ID:
+        await query.answer()
+        try: await user_cb(query,ctx)
+        except Exception as e:
+            logger.error(f"user_cb uid={uid} data={data}: {e}",exc_info=True)
+            try: await query.message.reply_text("❌ خطا. دوباره امتحان کنید.")
+            except: pass
+        return
+
+    # ════ ADMIN — هر handler خودش answer می‌زنه تا show_alert درست کار کنه
+    try:
+        if data=="back_to_admin":
+            await query.answer()
+            await safe_edit(query.message,"👑 پنل مدیریت استوک لند",reply_markup=admin_menu())
+
+        elif data=="woo_status":
+            await query.answer()
+            if not woo.is_configured():
+                await safe_edit(query.message,
+                    "🛍 محصولات سایت\n" + "─"*18 +
+                    "\n\n⚠️ اتصال به سایت تنظیم نشده.\n\n"
+                    "برای فعال‌سازی، متغیرهای WOO_URL، WOO_KEY و WOO_SECRET را در تنظیمات سرور وارد کنید.",
+                    reply_markup=back_admin()); return
+            await safe_edit(query.message,"🛍 در حال اتصال به سایت...",reply_markup=None)
+            ok,msg = await woo.test_connection()
+            if not ok:
+                await safe_edit(query.message,f"🛍 محصولات سایت\n{'─'*18}\n\n❌ {msg}",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔄 تلاش مجدد",callback_data="woo_status")],
+                        [InlineKeyboardButton("🔙 پنل اصلی",callback_data="back_to_admin")]])); return
+            roots = await woo.get_root_categories()
+            cats = await woo.get_categories()
+            total_prod = sum(c["count"] for c in roots)
+            txt = (f"🛍 محصولات سایت (ووکامرس)\n{'─'*18}"
+                   f"\n✅ اتصال برقرار است"
+                   f"\n\n📂 دسته اصلی: {to_fa(len(roots))}"
+                   f"\n📁 کل دسته‌ها: {to_fa(len(cats))}"
+                   f"\n📦 مجموع محصولات: {to_fa(total_prod)}"
+                   f"\n\n💡 محصولات از سایت stland.ir خوانده می‌شوند."
+                   f"\nبرای افزودن یا ویرایش محصول، به پنل وردپرس مراجعه کنید.")
+            await safe_edit(query.message,txt,reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 بروزرسانی فوری",callback_data="woo_refresh")],
+                [InlineKeyboardButton("🔙 پنل اصلی",callback_data="back_to_admin")]]))
+
+        elif data=="woo_refresh":
+            await query.answer("کش پاک شد، در حال دریافت...",show_alert=False)
+            woo.clear_cache()
+            await safe_edit(query.message,"🔄 محصولات بروزرسانی شد.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🛍 مشاهده وضعیت",callback_data="woo_status")],
+                    [InlineKeyboardButton("🔙 پنل اصلی",callback_data="back_to_admin")]]))
+
+        elif data=="dash":
+            await query.answer()
+            t,d,w,m,nt,bl=await asyncio.gather(
+                total_users(),today_users(),week_users(),
+                month_users(),new_today(),blk_count())
+            sep="─"*22
+            dash=(f"📊 داشبورد — {shamsi_now()}\n{sep}"
+                  f"\n👥 کل کاربران: {to_fa(t)}     🚫 بلاک: {to_fa(bl)}"
+                  f"\n{sep}"
+                  f"\n🆕 عضو امروز:   {to_fa(nt)}"
+                  f"\n📅 فعال امروز:  {to_fa(d)}   {progress_bar(d,t)}"
+                  f"\n📆 فعال هفته:   {to_fa(w)}   {progress_bar(w,t)}"
+                  f"\n🗓  فعال ماه:    {to_fa(m)}   {progress_bar(m,t)}"
+                  f"\n{sep}")
+            if len(dash)>4000: dash=dash[:3990]+"..."
+            await safe_edit(query.message,dash,reply_markup=admin_menu())
+
+        elif data=="broadcast":
+            await query.answer()
+            ctx.user_data["mode"]="broadcast"
+            await query.message.reply_text("📢 پیام ارسال کنید:",reply_markup=cancel_menu())
+
+        elif data=="backup":
+            await query.answer()
+            await safe_edit(query.message,"💾 مدیریت بک‌آپ:",reply_markup=backup_kb())
+
+        elif data=="backup_get":
+            await query.answer()
+            await safe_edit(query.message,"💾 در حال تهیه...",reply_markup=None)
+            await send_backup(query.message._bot)
+            await safe_edit(query.message,"✅ بک‌آپ ارسال شد.",reply_markup=backup_kb())
+
+        elif data.startswith("backup_auto_"):
+            idx=int(data[12:])
+            registry_rev=list(reversed(_backup_registry))
+            if idx>=len(registry_rev):
+                await query.answer("❌ بکاپ یافت نشد.",show_alert=True); return
+            entry=registry_rev[idx]
+            await query.answer()
+            await safe_edit(query.message,f"⏳ در حال بازگردانی از {entry['date']}...",reply_markup=None)
+            ok,result=await restore_backup(ctx.bot,entry["file_id"])
+            if ok:
+                await safe_edit(query.message,f"✅ بازگردانی شد.\nفایل‌ها: {', '.join(result)}",reply_markup=backup_kb())
+            else:
+                await safe_edit(query.message,f"❌ خطا: {result}",reply_markup=backup_kb())
+
+        elif data=="backup_import":
+            await query.answer()
+            ctx.user_data["mode"]="backup_restore"
+            await query.message.reply_text("📥 فایل ZIP بک‌آپ را ارسال کنید:",reply_markup=cancel_menu())
+
+        # ── مدیریت بخش‌ها — یکپارچه برای تمام بخش‌ها
+        elif data=="sections":
+            await query.answer()
+            await safe_edit(query.message,"📋 مدیریت بخش‌ها:",reply_markup=sections_kb())
+
+        # ── مدیریت منوی اصلی ──
+        elif data=="menu_mgr":
+            await query.answer()
+            en=sum(1 for m in menu_cfg if m.get("enabled",True))
+            await safe_edit(query.message,
+                f"🎛 مدیریت منوی اصلی\n{'─'*18}\n"
+                f"دکمه فعال: {to_fa(en)} از {to_fa(len(menu_cfg))}\n\n"
+                f"روی هر دکمه بزنید تا تنظیمش کنید:",
+                reply_markup=menu_mgr_kb())
+
+        elif data.startswith("mi_"):
+            await query.answer()
+            key=data[3:]; m=menu_item(key)
+            if not m: return
+            st="🟢 فعال" if m.get("enabled",True) else "⚫️ غیرفعال"
+            w_txt="تمام‌صفحه" if m.get("width","half")=="full" else "نصف‌صفحه"
+            await safe_edit(query.message,
+                f"🎛 دکمه: {m['label']}\n{'─'*18}\nوضعیت: {st}\nعرض: {w_txt}",
+                reply_markup=menu_item_kb(key))
+
+        elif data.startswith("mtg_"):
+            key=data[4:]; m=menu_item(key)
+            if not m: return
+            m["enabled"]=not m.get("enabled",True); await save_menu()
+            await query.answer("🟢 روشن شد" if m["enabled"] else "⚫️ خاموش شد",show_alert=True)
+            st="🟢 فعال" if m["enabled"] else "⚫️ غیرفعال"
+            await safe_edit(query.message,f"🎛 دکمه: {m['label']}\n{'─'*18}\nوضعیت: {st}",reply_markup=menu_item_kb(key))
+
+        elif data.startswith("mw_"):
+            key=data[3:]; m=menu_item(key)
+            if not m: return
+            m["width"]="full" if m.get("width","half")=="half" else "half"; await save_menu()
+            await query.answer("📐 تمام‌صفحه شد" if m["width"]=="full" else "📐 نصف‌صفحه شد",show_alert=True)
+            w_txt="تمام‌صفحه" if m["width"]=="full" else "نصف‌صفحه"
+            st="🟢 فعال" if m.get("enabled",True) else "⚫️ غیرفعال"
+            await safe_edit(query.message,f"🎛 دکمه: {m['label']}\n{'─'*18}\nوضعیت: {st}\nعرض: {w_txt}",reply_markup=menu_item_kb(key))
+
+        elif data.startswith("mnm_"):
+            await query.answer()
+            key=data[4:]; m=menu_item(key)
+            if not m: return
+            ctx.user_data.update({"mode":"menu_rename","menu_key":key})
+            await query.message.reply_text(
+                f"✏️ نام فعلی: {m['label']}\n\nنام جدید را بفرستید (با ایموجی دلخواه):",
+                reply_markup=cancel_menu())
+
+        elif data.startswith("mup_") or data.startswith("mdn_"):
+            key=data[4:]; up=data.startswith("mup_")
+            items=menu_sorted()
+            idx=next((i for i,x in enumerate(items) if x["key"]==key),None)
+            if idx is None: return
+            swap=idx-1 if up else idx+1
+            if 0<=swap<len(items):
+                items[idx]["order"],items[swap]["order"]=items[swap]["order"],items[idx]["order"]
+                await save_menu()
+            await query.answer("⬆️ بالا رفت" if up else "⬇️ پایین رفت")
+            await safe_edit(query.message,"🎛 مدیریت منوی اصلی\nترتیب بروزرسانی شد:",reply_markup=menu_mgr_kb())
+
+        elif data.startswith("msw_"):
+            key=data[4:]; partner=menu_row_partner(key)
+            if not partner:
+                await query.answer("این دکمه جفت ندارد",show_alert=True); return
+            m=menu_item(key); p=menu_item(partner)
+            m["order"],p["order"]=p["order"],m["order"]; await save_menu()
+            await query.answer("↔️ جای دو دکمه عوض شد",show_alert=True)
+            st="🟢 فعال" if m.get("enabled",True) else "⚫️ غیرفعال"
+            w_txt="تمام‌صفحه" if m.get("width","half")=="full" else "نصف‌صفحه"
+            await safe_edit(query.message,f"🎛 دکمه: {m['label']}\n{'─'*18}\nوضعیت: {st}\nعرض: {w_txt}",reply_markup=menu_item_kb(key))
+
+        elif data=="menu_reset":
+            await query.answer()
+            await safe_edit(query.message,
+                "♻️ بازگردانی منو به حالت پیش‌فرض\n\n"
+                "نام، ترتیب و عرض همه دکمه‌ها به حالت اولیه برمی‌گردد.\nمطمئن هستید؟",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("♻️ بله، بازگردانی کن",callback_data="menu_reset_ok")],
+                    [InlineKeyboardButton("↩️ انصراف",callback_data="menu_mgr")]]))
+
+        elif data=="menu_reset_ok":
+            await reset_menu()
+            await query.answer("♻️ منو به حالت پیش‌فرض برگشت",show_alert=True)
+            en=sum(1 for m in menu_cfg if m.get("enabled",True))
+            await safe_edit(query.message,
+                f"🎛 مدیریت منوی اصلی\n{'─'*18}\nدکمه فعال: {to_fa(en)} از {to_fa(len(menu_cfg))}\n\n✅ به حالت پیش‌فرض بازگشت.",
+                reply_markup=menu_mgr_kb())
+
+        elif data.startswith("sec_") and not any(data.startswith(p) for p in["sec_text_","sec_ban_","sec_btns_"]):
+            await query.answer()
+            key=data[4:]
+            from telegram.error import BadRequest
+            txt_ok="✅" if responses.get(key,"") not in ("","تنظیم نشده") else "❌"
+            ban_ok="✅ فعال" if get_banner(key).get("active") and get_banner(key).get("file_id") else "❌"
+            btn_ok=f"{len(get_sec_btns(key).get('items',[]))} {'✅' if get_sec_btns(key).get('enabled') else '❌'}"
+            try: await safe_edit(query.message,
+                f"📋 بخش: {SECTION_NAMES.get(key,key)}\n{'─'*14}"
+                f"\n✏️ متن: {txt_ok}\n🖼 بنر: {ban_ok}\n🔘 دکمه: {btn_ok}",
+                reply_markup=section_kb(key))
+            except BadRequest: await query.message.reply_text(f"📋 {SECTION_NAMES.get(key,key)}",reply_markup=section_kb(key))
+
+        elif data.startswith("sec_text_"):
+            key=data[9:]
+            if key=="catalog":
+                await query.answer("⚠️ محصولات از ووکامرس می‌آیند و متن ثابت ندارند.",show_alert=True)
+                return
+            await query.answer()
+            ctx.user_data.update({"mode":"edit_text","edit_key":key})
+            await query.message.reply_text(f"✏️ متن فعلی:\n\n{responses.get(key,'تنظیم نشده')}\n\nمتن جدید:",reply_markup=cancel_menu())
+
+        elif data.startswith("sec_ban_"):
+            await query.answer()
+            key=data[8:]; b=get_banner(key)
+            await safe_edit(query.message,
+                f"🖼 بنر: {SECTION_NAMES.get(key,key)}\n"
+                f"{'✅ آپلود شده' if b.get('file_id') else '❌ ندارد'} | {'✅ فعال' if b.get('active') else '❌ غیرفعال'}",
+                reply_markup=banner_kb(key))
+
+        elif data.startswith("ban_up_"):
+            await query.answer()
+            key=data[7:]; ctx.user_data.update({"mode":"ban_up","ban_key":key})
+            await query.message.reply_text(f"📤 عکس بنر «{SECTION_NAMES.get(key,key)}» را ارسال کنید:",reply_markup=cancel_menu())
+
+        elif data.startswith("ban_tg_"):
+            key=data[7:]; b=get_banner(key)
+            if not b.get("file_id"): await query.answer("ابتدا عکس آپلود کنید!",show_alert=True); return
+            b["active"]=not b.get("active",False); await save_banners()
+            await query.answer("✅ فعال" if b["active"] else"❌ غیرفعال",show_alert=True)
+            await safe_edit(query.message,f"🖼 {SECTION_NAMES.get(key,key)} | {'✅ فعال' if b['active'] else '❌ غیرفعال'}",reply_markup=banner_kb(key))
+
+        elif data.startswith("ban_dl_"):
+            key=data[7:]; banners[key]={"file_id":None,"active":False}; await save_banners()
+            await query.answer("🗑 حذف شد.",show_alert=True)
+            await safe_edit(query.message,f"🖼 {SECTION_NAMES.get(key,key)} | ❌",reply_markup=banner_kb(key))
+
+        elif data.startswith("sec_btns_"):
+            key=data[9:]
+            if key=="catalog":
+                await query.answer("⚠️ دکمه‌های ثابت برای بخش محصولات قابل تنظیم نیست.",show_alert=True)
+                return
+            await query.answer()
+            sec=get_sec_btns(key)
+            await safe_edit(query.message,
+                f"🔘 دکمه‌های {SECTION_NAMES.get(key,key)}\n"
+                f"{'✅ فعال' if sec.get('enabled') else '❌ غیرفعال'} | {to_fa(len(sec.get('items',[])))} عدد",
+                reply_markup=sec_btns_kb(key))
+
+        elif data.startswith("btn_tg_"):
+            key=data[7:]
+            if key=="catalog":
+                await query.answer("⚠️ دکمه‌های ثابت برای بخش محصولات قابل تنظیم نیست.",show_alert=True); return
+            sec=get_sec_btns(key); sec["enabled"]=not sec.get("enabled",False); await save_buttons()
+            await query.answer("✅ فعال" if sec["enabled"] else"❌ غیرفعال",show_alert=True)
+            await safe_edit(query.message,f"🔘 {SECTION_NAMES.get(key,key)} | {'✅' if sec['enabled'] else '❌'}",reply_markup=sec_btns_kb(key))
+
+        elif data.startswith("btn_add_"):
+            key=data[8:]
+            if key=="catalog":
+                await query.answer("⚠️ دکمه به بخش محصولات قابل افزودن نیست.",show_alert=True)
+                return
+            await query.answer()
+            ctx.user_data.update({"mode":"btn_add_t","btn_key":key})
+            await query.message.reply_text(f"➕ دکمه جدید برای «{SECTION_NAMES.get(key,key)}»\nعنوان:",reply_markup=cancel_menu())
+
+        elif data.startswith("btn_ed_"):
+            parts=data[7:].split("_",1); key,bid=parts[0],parts[1]
+            sec=get_sec_btns(key); item=next((x for x in sec.get("items",[]) if x["id"]==bid),None)
+            if not item: await query.answer("یافت نشد!",show_alert=True); return
+            await query.answer()
+            ctx.user_data.update({"mode":"btn_ed_t","btn_key":key,"btn_id":bid})
+            await query.message.reply_text(f"✏️ «{item['title']}»\nعنوان جدید (یا . بدون تغییر):",reply_markup=cancel_menu())
+
+        elif data.startswith("btn_dl_"):
+            parts=data[7:].split("_",1); key,bid=parts[0],parts[1]
+            sec=get_sec_btns(key); sec["items"]=[x for x in sec.get("items",[]) if x["id"]!=bid]; await save_buttons()
+            await query.answer("🗑 حذف شد.",show_alert=True)
+            await safe_edit(query.message,f"🔘 {SECTION_NAMES.get(key,key)}",reply_markup=sec_btns_kb(key))
+
+        # ── درخواست‌ها
+        elif data=="admin_reqs" or data.startswith("admin_reqs_"):
+            await query.answer()
+            offset=0
+            if data.startswith("admin_reqs_"):
+                try: offset=int(data[11:])
+                except: offset=0
+            reqs=await get_requests(offset=offset,limit=25)
+            total=await count_requests()
+            if not reqs and offset==0:
+                await safe_edit(query.message,"📋 درخواستی وجود ندارد.",reply_markup=back_admin()); return
+            nc=sum(1 for r in reqs if r[6]=="new")
+            rng=f"{to_fa(offset+1)}–{to_fa(min(offset+25,total))}"
+            await safe_edit(query.message,
+                f"📋 درخواست‌ها  [{rng} از {to_fa(total)}]\n🆕 جدید: {to_fa(nc)}",
+                reply_markup=reqs_kb(reqs,offset,total))
+
+        elif data=="broadcast_cancel":
+            global _broadcast_cancel
+            _broadcast_cancel=True
+            await query.answer("🛑 در حال توقف پخش...")
+
+        elif data=="export_reqs":
+            await query.answer()
+            await safe_edit(query.message,"📊 در حال آماده‌سازی فایل CSV...",reply_markup=None)
+            async with db.execute(
+                "SELECT id,product_name,first_name,username,phone,user_id,status,created_at FROM requests ORDER BY id DESC") as c:
+                rows=await c.fetchall()
+            buf=io.StringIO()
+            w=csv.writer(buf)
+            w.writerow(["#","محصول","نام","یوزرنیم","تلفن","آیدی","وضعیت","تاریخ"])
+            for r in rows:
+                w.writerow([r[0],r[1],r[2],r[3] or"-",r[4],r[5],"پیگیری شده" if r[6]=="done" else"جدید",r[7]])
+            fname=f"requests_{shamsi_now().replace(' ','_').replace(':','-')}.csv"
+            await ctx.bot.send_document(ADMIN_ID,
+                document=buf.getvalue().encode("utf-8-sig"),  # BOM برای Excel
+                filename=fname,caption=f"📊 {to_fa(len(rows))} درخواست")
+            await safe_edit(query.message,"✅ فایل CSV ارسال شد.",reply_markup=back_admin())
+
+        elif data.startswith("rq_done_"):
+            rid=int(data[8:])
+            async with db.execute("SELECT user_id,product_name,status FROM requests WHERE id=?",(rid,)) as c:
+                req_row=await c.fetchone()
+            if not req_row:
+                await query.answer("❌ درخواست یافت نشد.",show_alert=True); return
+            if req_row[2]=="done":
+                await query.answer("⚠️ این درخواست قبلاً پیگیری شده است.",show_alert=True)
+                try: await query.message.edit_reply_markup(reply_markup=None)
+                except: pass
+                return
+            await done_request(rid)
+            await query.answer("✅ پیگیری شد",show_alert=False)
+            # تشخیص: از اعلان (notification) یا از پنل مدیریت؟
+            is_notif=query.message.reply_markup and any(
+                btn.callback_data and btn.callback_data.startswith("rq_msg_")
+                for row in query.message.reply_markup.inline_keyboard for btn in row)
+            if is_notif:
+                try: await query.message.edit_reply_markup(reply_markup=None)
+                except: pass
+            else:
+                reqs=await get_requests(limit=25); total=await count_requests()
+                nc=sum(1 for r in reqs if r[6]=="new")
+                await safe_edit(query.message,
+                    f"📋 درخواست‌ها — ✅ پیگیری شد\n🆕 جدید: {to_fa(nc)} | کل: {to_fa(total)}",
+                    reply_markup=reqs_kb(reqs,0,total))
+            try:
+                await ctx.bot.send_message(req_row[0],
+                    f"✅ درخواست خرید شما برای «{req_row[1]}» پیگیری شد.\n"
+                    f"به زودی با شما تماس خواهیم گرفت. 🙏")
+            except Exception as e: logger.warning(f"req_done notify: {e}")
+
+        elif data.startswith("rq_msg_"):
+            target_uid=int(data[7:])
+            await query.answer()
+            ctx.user_data.update({"mode":"admin_msg","admin_msg_uid":target_uid})
+            await query.message.reply_text(
+                f"💬 پیام برای کاربر 🆔{target_uid}\nمتن یا تصویر را ارسال کنید:",
+                reply_markup=cancel_menu())
+
+        elif data=="noop": await query.answer()
+
+        elif data.startswith("rq_"):
+            await query.answer()
+            rid=int(data[3:])
+            async with db.execute("SELECT id,user_id,username,first_name,phone,product_name,status,created_at FROM requests WHERE id=?",(rid,)) as c: r=await c.fetchone()
+            if not r: return
+            st2="🆕 جدید" if r[6]=="new" else"✅ پیگیری شد"
+            sep="─"*20
+            txt=(f"📋 درخواست #{to_fa(r[0])}\n{sep}"
+                 f"\n📱 {r[5]}"
+                 f"\n{sep}"
+                 f"\n👤 {r[3] or'—'}"
+                 f"\n📞 {r[4]}"
+                 f"\n🆔 {r[1]}  {'@'+r[2] if r[2] else ''}"
+                 f"\n⏱ {r[7]}"
+                 f"\n{sep}\n{st2}")
+            await safe_edit(query.message,txt,reply_markup=req_kb(rid,r[6],r[1]))
+
+        # ── ساعت کاری
+        elif data=="wh_menu":
+            await query.answer()
+            en="✅ فعال" if workhours.get("enabled") else"❌ غیرفعال"
+            await safe_edit(query.message,f"🕐 ساعت کاری — {en}\n\n{wh_full_table()}",reply_markup=wh_kb())
+
+        elif data=="wh_toggle":
+            workhours["enabled"]=not workhours.get("enabled",True); await save_workhours()
+            await query.answer("✅ فعال" if workhours["enabled"] else"❌ غیرفعال",show_alert=True)
+            await safe_edit(query.message,f"🕐 ساعت کاری\n{wh_full_table()}",reply_markup=wh_kb())
+
+        elif data.startswith("wh_day_"):
+            await query.answer()
+            dk=data[7:]; day=workhours["schedule"].get(dk,{"open":False,"shifts":[]})
+            st2="\n".join(f"  • {to_fa(s['from'])} تا {to_fa(s['to'])}" for s in day.get("shifts",[])) or"  ندارد"
+            await safe_edit(query.message,f"🕐 {DAY_FA.get(dk,dk)}\n{'✅ باز' if day.get('open') else '❌ تعطیل'}\n{st2}",reply_markup=wh_day_kb(dk))
+
+        elif data.startswith("wh_dtg_"):
+            dk=data[7:]; day=workhours["schedule"].get(dk,{"open":False,"shifts":[]})
+            day["open"]=not day.get("open",False); workhours["schedule"][dk]=day; await save_workhours()
+            await query.answer("✅ باز" if day["open"] else"❌ تعطیل",show_alert=True)
+            await safe_edit(query.message,f"🕐 {DAY_FA.get(dk,dk)} | {'✅ باز' if day['open'] else '❌ تعطیل'}",reply_markup=wh_day_kb(dk))
+
+        elif data.startswith("wh_sh_"):
+            await query.answer()
+            dk=data[6:]; ctx.user_data.update({"mode":"wh_shifts","wh_day":dk})
+            await query.message.reply_text(f"🕐 {DAY_FA.get(dk,dk)}:\nمثال: 11:00-14:00,17:00-23:00",reply_markup=cancel_menu())
+
+        elif data=="wh_mop":
+            await query.answer()
+            ctx.user_data["mode"]="wh_mop"
+            await query.message.reply_text(f"✏️ پیام باز:\n\n{workhours.get('msg_open','')}\n\nپیام جدید:",reply_markup=cancel_menu())
+
+        elif data=="wh_mcl":
+            await query.answer()
+            ctx.user_data["mode"]="wh_mcl"
+            await query.message.reply_text(f"✏️ پیام بسته:\n\n{workhours.get('msg_closed','')}\n\nپیام جدید:",reply_markup=cancel_menu())
+
+        # ── تنظیمات
+        elif data=="settings_menu":
+            await query.answer()
+            await safe_edit(query.message,
+                "⚙️ تنظیمات\n" + "─"*18 + "\nمدیریت منو، بخش‌ها و اعلان‌ها:",
+                reply_markup=settings_kb())
+
+        elif data.startswith("stg_"):
+            key=data[4:]; settings[key]=not get_setting(key); await save_settings()
+            await query.answer("✅ ذخیره شد",show_alert=True)
+            await safe_edit(query.message,
+                "⚙️ تنظیمات\n" + "─"*18 + "\nمدیریت منو، بخش‌ها و اعلان‌ها:",
+                reply_markup=settings_kb())
+
+        # ── کاربران
+        elif data=="users_menu":
+            await query.answer()
+            t=await total_users(); bl=await blk_count()
+            await safe_edit(query.message,f"👥 کاربران\nکل: {to_fa(t)} | بلاک: {to_fa(bl)}",reply_markup=users_menu_kb())
+
+        elif data=="users_search":
+            await query.answer()
+            ctx.user_data["mode"]="users_search"
+            await query.message.reply_text("🔍 نام، آیدی یا یوزرنیم:",reply_markup=cancel_menu())
+
+        elif data.startswith("ul_"):
+            await query.answer()
+            parts=data.split("_"); ft=parts[1]; off=int(parts[2])
+            flt={"today":"WHERE DATE(last_seen)=DATE('now','localtime')","week":"WHERE last_seen>=datetime('now','-7 days','localtime')","blocked":"WHERE is_blocked=1"}
+            total=await _cnt(f"SELECT COUNT(*) FROM users {flt.get(ft,'')}")
+            rows=await get_users_page(off,15,ft)
+            label={"all":"همه","today":"امروز","week":"هفته","blocked":"بلاک"}.get(ft,"")
+            await safe_edit(query.message,f"👥 {label}\n{to_fa(off+1)} تا {to_fa(min(off+15,total))} از {to_fa(total)}:",reply_markup=users_list_kb(rows,off,ft,total))
+
+        elif data.startswith("uv_"):
+            uid2=int(data[3:])
+            async with db.execute("SELECT user_id,first_name,username,joined_at,last_seen,is_blocked FROM users WHERE user_id=?",(uid2,)) as c: row=await c.fetchone()
+            if not row: await query.answer("یافت نشد!",show_alert=True); return
+            await query.answer()
+            sep="─"*20
+            utxt=(f"👤 {row[1] or'—'}"
+                  f"\n{'@'+row[2] if row[2] else'بدون یوزرنیم'}"
+                  f"\n🆔 {row[0]}"
+                  f"\n{sep}"
+                  f"\n📅 عضویت: {row[3]}"
+                  f"\n🕐 آخرین فعالیت: {row[4]}"
+                  f"\n{sep}"
+                  f"\n{'🚫 بلاک‌شده' if row[5] else '✅ فعال'}")
+            await safe_edit(query.message,utxt,reply_markup=udetail_kb(uid2,bool(row[5])))
+
+        elif data.startswith("utog_"):
+            uid2=int(data[5:])
+            async with db.execute("SELECT is_blocked FROM users WHERE user_id=?",(uid2,)) as c: row=await c.fetchone()
+            if not row: return
+            await set_block(uid2,0 if row[0] else 1)
+            await query.answer("✅ رفع بلاک" if row[0] else"🚫 بلاک شد",show_alert=True)
+            async with db.execute("SELECT user_id,first_name,username,joined_at,last_seen,is_blocked FROM users WHERE user_id=?",(uid2,)) as c: row=await c.fetchone()
+            await safe_edit(query.message,f"👤 {row[1] or'—'}\n🆔 {row[0]}\n{'🚫 بلاک' if row[5] else '✅ فعال'}",reply_markup=udetail_kb(uid2,bool(row[5])))
+
+        else:
+            await query.answer()
+
+    except Exception as e:
+        logger.error(f"admin callback error data={data}: {e}",exc_info=True)
+        try: await query.answer()
+        except: pass
+        try: await query.message.reply_text("❌ خطا در پردازش درخواست.")
+        except: pass
+
+# ════════════════════════════════════════════════
+#  TEXT HANDLER
+# ════════════════════════════════════════════════
+async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
+    user=update.effective_user; text=update.message.text.strip()
+    await save_user(user)
+    if user.id != ADMIN_ID:
+        _mode=ctx.user_data.get("mode")
+        if _mode!="req_phone":   # در حین ثبت درخواست، spam block اعمال نشود
+            _s=spam_check(user.id)
+            if _s=='block': return
+            if _s=='warn': return await update.message.reply_text("🐢 لطفاً آرام‌تر پیام دهید.")
+        if await is_blocked(user.id): return
+        asyncio.ensure_future(_trigger_warm())
+    if text=="❌ لغو عملیات":
+        ctx.user_data.clear(); return await update.message.reply_text("❌ لغو شد.",reply_markup=main_menu())
+    mode=ctx.user_data.get("mode")
+
+    # ════ ADMIN ════
+    if user.id==ADMIN_ID:
+        if mode=="edit_text":
+            key=ctx.user_data.pop("edit_key",None); ctx.user_data.pop("mode",None)
+            if key: responses[key]=text; await save_data()
+            await update.message.reply_text("✅ ذخیره شد.",reply_markup=main_menu()); return
+        if mode=="menu_rename":
+            key=ctx.user_data.pop("menu_key",None); ctx.user_data.pop("mode",None)
+            m=menu_item(key)
+            if m and text:
+                m["label"]=text; await save_menu()
+                await update.message.reply_text(f"✅ نام دکمه به «{text}» تغییر کرد.",reply_markup=main_menu())
+                await update.message.reply_text(f"🎛 دکمه: {m['label']}",reply_markup=menu_item_kb(key))
+            else:
+                await update.message.reply_text("✅ ذخیره شد.",reply_markup=main_menu())
+            return
+        if mode=="broadcast":
+            ctx.user_data.pop("mode",None); await update.message.reply_text("📤 در حال ارسال...")
+            await broadcast(ctx,text); return
+        if mode=="admin_msg":
+            target_uid=ctx.user_data.pop("admin_msg_uid",None); ctx.user_data.pop("mode",None)
+            if not target_uid: await update.message.reply_text("❌ خطا.",reply_markup=main_menu()); return
+            try:
+                await ctx.bot.send_message(target_uid,f"📩 پیام از فروشگاه:\n\n{text}")
+                await update.message.reply_text("✅ پیام ارسال شد.",reply_markup=main_menu())
+            except Exception as e:
+                await update.message.reply_text(f"❌ خطا در ارسال: {e}",reply_markup=main_menu())
+            return
+        if mode=="users_search":
+            ctx.user_data.pop("mode",None); rows=await search_users(text)
+            if not rows: await update.message.reply_text("❌ یافت نشد.",reply_markup=main_menu()); return
+            lines=[f"{'🚫 ' if r[4] else ''}{r[1] or'—'} | {r[0]} | {'@'+r[2] if r[2] else'—'}" for r in rows]
+            await update.message.reply_text("🔍 نتایج:\n\n"+"\n".join(lines),reply_markup=main_menu()); return
+        if mode=="btn_add_t":
+            ctx.user_data.update({"btn_title":text,"mode":"btn_add_u"})
+            await update.message.reply_text("🔗 لینک:",reply_markup=cancel_menu()); return
+        if mode=="btn_add_u":
+            key=ctx.user_data.pop("btn_key",None); title=ctx.user_data.pop("btn_title","دکمه"); ctx.user_data.pop("mode",None)
+            url=text if text.startswith("http") else f"https://{text}"
+            sec=get_sec_btns(key); sec["items"].append({"id":f"b{int(time.time())}","title":title,"url":url})
+            if not sec.get("enabled"): sec["enabled"]=True
+            await save_buttons()
+            await update.message.reply_text(f"✅ «{title}» اضافه شد.",reply_markup=sec_btns_kb(key)); return
+        if mode=="btn_ed_t":
+            ctx.user_data.update({"btn_new_t":None if text=="." else text,"mode":"btn_ed_u"})
+            await update.message.reply_text("🔗 لینک جدید (یا . بدون تغییر):",reply_markup=cancel_menu()); return
+        if mode=="btn_ed_u":
+            key=ctx.user_data.pop("btn_key",None); bid=ctx.user_data.pop("btn_id",None)
+            nt=ctx.user_data.pop("btn_new_t",None); ctx.user_data.pop("mode",None)
+            sec=get_sec_btns(key)
+            for it in sec.get("items",[]):
+                if it["id"]==bid:
+                    if nt: it["title"]=nt
+                    if text!=".": it["url"]=text if text.startswith("http") else f"https://{text}"
+            await save_buttons(); await update.message.reply_text("✅ ویرایش شد.",reply_markup=main_menu()); return
+        if mode=="wh_shifts":
+            dk=ctx.user_data.pop("wh_day",None); ctx.user_data.pop("mode",None)
+            try:
+                sh=[{"from":p.split("-")[0].strip(),"to":p.split("-")[1].strip()} for p in text.split(",")]
+                workhours["schedule"][dk]["shifts"]=sh; await save_workhours()
+                await update.message.reply_text("✅ ذخیره شد.",reply_markup=main_menu())
+            except: await update.message.reply_text("❌ فرمت اشتباه!\nمثال: 11:00-14:00,17:00-23:00",reply_markup=main_menu())
+            return
+        if mode=="wh_mop":
+            ctx.user_data.pop("mode",None); workhours["msg_open"]=text; await save_workhours()
+            await update.message.reply_text("✅",reply_markup=main_menu()); return
+        if mode=="wh_mcl":
+            ctx.user_data.pop("mode",None); workhours["msg_closed"]=text; await save_workhours()
+            await update.message.reply_text("✅",reply_markup=main_menu()); return
+    # ════ catalog search ════
+    if mode=="cat_search":
+        ctx.user_data.pop("mode",None)
+        results=await search_products(text)
+        if not results: await update.message.reply_text(f"🔍 نتیجه‌ای برای «{text}» یافت نشد.",reply_markup=main_menu()); return
+        btns=[[InlineKeyboardButton(f"📱 {p[1]} — {p[2]}",callback_data=f"prd_{p[0]}")] for p in results]
+        btns.append([InlineKeyboardButton("🔙 کاتالوگ",callback_data="cat_back")])
+        await update.message.reply_text(f"🔍 {to_fa(len(results))} نتیجه برای «{text}»:",reply_markup=InlineKeyboardMarkup(btns)); return
+
+    # ════ purchase request phone ════
+    if mode=="req_phone":
+        pid=ctx.user_data.pop("req_pid",None); pname=ctx.user_data.pop("req_name","نامشخص")
+        rtype=ctx.user_data.pop("req_type","خرید"); ctx.user_data.pop("mode",None)
+        digits=text.replace("-","").replace(" ","").replace("+","")
+        if not digits.isdigit() or len(digits)<10:
+            ctx.user_data.update({"mode":"req_phone","req_pid":pid,"req_name":pname,"req_type":rtype})
+            await update.message.reply_text("❌ شماره معتبر نیست. دوباره:",reply_markup=cancel_menu()); return
+        rid=await save_request(user.id,user.username,user.first_name,text,pid,pname)
+        if rid is None:
+            await update.message.reply_text(
+                f"⚠️ شما قبلاً برای «{pname}» درخواست ثبت کرده‌اید.\nپشتیبانی در حال بررسی است.",
+                reply_markup=main_menu()); return
+        icon="📝" if rtype=="پیش‌خرید" else "📋"
+        try:
+            req_kb=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ پیگیری شد",callback_data=f"rq_done_{rid}"),
+                 InlineKeyboardButton("💬 پیام به کاربر",callback_data=f"rq_msg_{user.id}")]
+            ])
+            await ctx.bot.send_message(ADMIN_ID,
+                f"{icon} درخواست {rtype}!\n📱 {pname}\n👤 {user.first_name or'—'} | {'@'+user.username if user.username else'—'}\n📞 {text}\n🆔 {user.id}",
+                reply_markup=req_kb)
+        except Exception as e: logger.error(f"req notify: {e}")
+        await update.message.reply_text(f"✅ درخواست {rtype} «{pname}» ثبت شد!\nپشتیبانی به زودی تماس می‌گیرد.",reply_markup=main_menu()); return
+
+    # ════ user menu ════
+    # تشخیص دکمه از روی label (که ممکن است ادمین تغییرش داده باشد)
+    pressed = next((m for m in menu_cfg if m["label"]==text and m.get("enabled",True)), None)
+    mkey = pressed["key"] if pressed else None
+
+    if mkey=="workhours":
+        await record_stat("wh_page")
+        if not workhours.get("enabled",True): await update.message.reply_text("🕐 ساعت کاری تنظیم نشده.",reply_markup=main_menu()); return
+        wh=wh_today_block() or""
+        msg=f"🕐 ساعت کاری استوک لند\n{wh}"
+        if len(msg)>4000: msg=msg[:3990]+"..."
+        kb=InlineKeyboardMarkup([[InlineKeyboardButton("📆 ساعت کار هفتگی مجموعه",callback_data="wh_weekly")]])
+        await send_banner(update.message,msg,"workhours",kb=kb); return
+
+    if mkey=="catalog":
+        await record_stat("catalog")
+        anim = None
+        if not woo.is_cats_cached():
+            anim = await loading_animation(update.message.chat, ctx)
+        cats=await get_root_cats()
+        if anim:
+            msg_a, task_a = anim
+            task_a.cancel()
+            try: await msg_a.delete()
+            except Exception: pass
+        if not cats: await update.message.reply_text("📫 در حال حاضر محصولی موجود نیست.",reply_markup=main_menu()); return
+        msg="🛍 محصولات استوک لند\nیک دسته‌بندی را انتخاب کنید:"
+        await send_banner(update.message,msg,"catalog",kb=cat_root_kb(cats)); return
+
+    # بخش‌های متنی (۱ تا ۵)
+    if mkey and mkey in MENU_ITEMS:
+        await record_stat(mkey); content=responses.get(mkey,"تنظیم نشده")
+        full=build_msg(text,content,mkey)
+        kb=user_sec_kb(mkey)
+        await send_banner(update.message,full,mkey,kb=kb); return
+
+    await update.message.reply_text("⚠️ گزینه نامعتبر است.",reply_markup=main_menu())
+
+# ════════════════════════════════════════════════
+#  PHOTO HANDLER
+# ════════════════════════════════════════════════
+async def photo_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
+    user=update.effective_user
+    if user.id!=ADMIN_ID: return
+    mode=ctx.user_data.get("mode"); photo=update.message.photo[-1]
+    if mode=="ban_up":
+        key=ctx.user_data.pop("ban_key",None); ctx.user_data.pop("mode",None)
+        if not key: await update.message.reply_text("❌ خطا.",reply_markup=main_menu()); return
+        get_banner(key); banners[key]["file_id"]=photo.file_id; banners[key]["active"]=True; await save_banners()
+        await update.message.reply_text(f"✅ بنر «{SECTION_NAMES.get(key,key)}» آپلود شد!",reply_markup=main_menu()); return
+    if mode=="broadcast":
+        ctx.user_data.pop("mode",None); caption=update.message.caption or""
+        await update.message.reply_text("📤 در حال ارسال...")
+        await broadcast(ctx,caption,photo=photo.file_id); return
+    if mode=="admin_msg":
+        target_uid=ctx.user_data.pop("admin_msg_uid",None); ctx.user_data.pop("mode",None)
+        caption=update.message.caption or""
+        if not target_uid: await update.message.reply_text("❌ خطا.",reply_markup=main_menu()); return
+        try:
+            await ctx.bot.send_photo(target_uid,photo=photo.file_id,
+                caption=f"📩 پیام از فروشگاه:\n\n{caption}" if caption else "📩 پیام از فروشگاه")
+            await update.message.reply_text("✅ تصویر ارسال شد.",reply_markup=main_menu())
+        except Exception as e:
+            await update.message.reply_text(f"❌ خطا در ارسال: {e}",reply_markup=main_menu())
+        return
+
+# ════════════════════════════════════════════════
+#  DOCUMENT HANDLER (backup import)
+# ════════════════════════════════════════════════
+async def document_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
+    user=update.effective_user
+    if user.id!=ADMIN_ID: return
+    mode=ctx.user_data.get("mode")
+    if mode!="backup_restore": return
+    ctx.user_data.pop("mode",None)
+    doc=update.message.document
+    if not doc.file_name.endswith(".zip"):
+        await update.message.reply_text("❌ فقط فایل ZIP قابل قبول است.",reply_markup=main_menu()); return
+    await update.message.reply_text("⏳ در حال بازگردانی...")
+    ok,result=await restore_backup(ctx.bot,doc.file_id)
+    if ok: await update.message.reply_text(f"✅ بک‌آپ بازگردانی شد.\nفایل‌ها: {', '.join(result)}",reply_markup=main_menu())
+    else: await update.message.reply_text(f"❌ خطا: {result}",reply_markup=main_menu())
+
+# ════════════════════════════════════════════════
+#  MAIN
+# ════════════════════════════════════════════════
+async def post_init(app):
+    await init_db(); await load_data(); await load_banners()
+    await load_workhours(); await load_buttons(); await load_settings()
+    await load_stats(); await load_menu(); await load_photomap()
+    asyncio.ensure_future(_trigger_warm())
+    asyncio.ensure_future(_spam_cleanup_loop())
+    asyncio.ensure_future(_stats_flush_loop())
+    asyncio.ensure_future(_auto_backup_loop(app.bot))
+    logger.info("✅ ربات راه‌اندازی شد")
+
+async def post_shutdown(app):
+    """قبل از خاموش‌شدن — داده‌های in-memory را flush کن تا چیزی گم نشود."""
+    if _stats_dirty:   await save_stats();   logger.info("shutdown: stats saved")
+    if _photomap_dirty: await save_photomap(); logger.info("shutdown: photomap saved")
+    woo_session = getattr(woo, "_http_session", None)
+    if woo_session and not woo_session.closed:
+        await woo_session.close()
+    logger.info("✅ shutdown clean")
+
+def main():
+    app=ApplicationBuilder().token(TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
+    app.add_handler(CommandHandler("start",cmd_start))
+    app.add_handler(CommandHandler("admin",cmd_admin))
+    app.add_handler(CallbackQueryHandler(callbacks))
+    app.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND,photo_handler))
+    app.add_handler(MessageHandler(filters.Document.ZIP & ~filters.COMMAND,document_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,text_handler))
+    print("🚀 ربات در حال اجراست...")
+    app.run_polling(drop_pending_updates=True, poll_interval=0.0, timeout=30)
+
+if __name__=="__main__":
+    main()
