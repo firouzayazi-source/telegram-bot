@@ -1,5 +1,5 @@
 [Unit]
-Description=StockLand Telegram Bot + Web Panel
+Description=StockLand Telegram Bot
 After=network.target
 
 [Service]
@@ -7,9 +7,7 @@ Type=simple
 User=www-data
 WorkingDirectory=/opt/telegram-bot
 EnvironmentFile=/opt/telegram-bot/.env
-Environment=WEB_PORT=8471
-# رمز پنل و بقیه متغیرها در همان EnvironmentFile بالا قرار می‌گیرند
-ExecStart=/opt/telegram-bot/venv/bin/python app.py
+ExecStart=/opt/telegram-bot/venv/bin/python bot.py
 Restart=on-failure
 RestartSec=5
 
