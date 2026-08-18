@@ -11,7 +11,7 @@
 
 - زبان: **Python 3.13**
 - کتابخانه اصلی: **python-telegram-bot 22.7**
-- استقرار: **Railway**
+- استقرار: **وی‌پی‌اس اختصاصی** (systemd) — بدون Railway
 - فروشگاه: **WooCommerce** روی `stland.ir`
 - معماری: Bot polling + Flask web panel در یک پروسه (`app.py`)
 
@@ -40,7 +40,7 @@
 
 -----
 
-## ۳. متغیرهای محیطی (Railway Environment Variables)
+## ۳. متغیرهای محیطی
 
 |متغیر          |اجباری |توضیح                                               |
 |---------------|-------|----------------------------------------------------|
@@ -54,6 +54,40 @@
 |`WOO_HIDE_OOS` |اختیاری|مخفی‌کردن محصولات ناموجود — پیش‌فرض: `1`              |
 |`WEB_PORT`     |اختیاری|پورت پنل وب — پیش‌فرض: `8080`. روی وی‌پی‌اس مشترک حتماً ست شود|
 |`WEB_HOST`     |اختیاری|اینترفیس bind — پیش‌فرض: `0.0.0.0`                    |
+
+-----
+
+## ۳.۱. استقرار روی وی‌پی‌اس (systemd)
+
+این پروژه با گیت‌هاب و اجرای مستقیم روی وی‌پی‌اس (بدون Railway/Heroku) کار می‌کند و **کاملاً مستقل از سایر پروژه‌های همان سرور** است — فقط منابع سرور مشترک است، نه فایل‌ها، دیتابیس، یا پورت.
+
+```bash
+# ۱) کلون در مسیر اختصاصی خودِ همین پروژه
+git clone <repo-url> /opt/telegram-bot
+cd /opt/telegram-bot
+
+# ۲) محیط پایتون مجزا
+python3 -m venv venv
+venv/bin/pip install -r requirements.txt
+
+# ۳) فایل .env با متغیرهای بالا (BOT_TOKEN, ADMIN_ID, WOO_*, WEB_PASSWORD, WEB_PORT, ...)
+cp .env.example .env   # سپس مقداردهی کنید
+```
+
+نمونه سرویس systemd در `deploy/telegram-bot.service` آماده است — قبل از فعال‌سازی مسیرها، `User` و `WEB_PORT` را مطابق سرور خودتان تنظیم کنید (پورت باید با سایر سرویس‌های همان وی‌پی‌اس تداخل نداشته باشد):
+
+```bash
+sudo cp deploy/telegram-bot.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now telegram-bot
+sudo journalctl -u telegram-bot -f
+```
+
+برای آپدیت بعدی:
+
+```bash
+cd /opt/telegram-bot && git pull && sudo systemctl restart telegram-bot
+```
 
 -----
 
@@ -426,7 +460,7 @@ _broadcast_cancel = False  # توقف اضطراری
 
 1. `STOCKLAND_PORT`
 1. `WEB_PORT`
-1. `PORT` — فقط برای سازگاری با Railway/Heroku
+1. `PORT` — نگه‌داشته‌شده فقط برای سازگاری احتمالی؛ روی این پروژه استفاده نمی‌شود
 1. پیش‌فرض `8080`
 
 ⚠️ **وی‌پی‌اس مشترک:** متغیر عمومی `PORT` ممکن است توسط پروژه دیگری هم ست شده باشد و پورت `8080` هم پرکاربرد است. برای همین این پروژه را همیشه با پورت اختصاصی اجرا کنید:

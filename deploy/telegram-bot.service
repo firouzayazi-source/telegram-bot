@@ -1,0 +1,16 @@
+[Unit]
+Description=StockLand Telegram Bot + Web Panel
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+WorkingDirectory=/opt/telegram-bot
+EnvironmentFile=/opt/telegram-bot/.env
+Environment=WEB_PORT=8471
+ExecStart=/opt/telegram-bot/venv/bin/python app.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
