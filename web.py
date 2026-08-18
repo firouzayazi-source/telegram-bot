@@ -2,7 +2,7 @@
 پنل وب مدیریت استوک لند
 به همان دیتابیس و فایل‌های بات وصل است.
 """
-import os, json, sqlite3, time, secrets, functools, io, hmac, hashlib
+import os, json, sqlite3, time, secrets, functools, io, hmac, hashlib, logging
 from datetime import datetime
 from flask import (Flask, request, session, redirect, url_for, jsonify,
                    render_template_string, send_from_directory, abort)
@@ -22,6 +22,8 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 PANEL_USER         = os.environ.get("PANEL_USER", "admin")
 WOO_WEBHOOK_SECRET = os.environ.get("WOO_WEBHOOK_SECRET", "")
 PANEL_PASS         = os.environ.get("PANEL_PASS", "stockland")
+
+logger = logging.getLogger("web")
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("PANEL_SECRET", secrets.token_hex(16))
@@ -426,9 +428,65 @@ def webhook_woo_sync_cats():
     return jsonify({"ok": True})
 
 
-def run_web(host="0.0.0.0", port=None):
-    port = port or int(os.environ.get("PORT", 8080))
+# ── تنظیمات شبکه پنل وب ──────────────────────────
+# روی وی‌پی‌اس مشترک، متغیر عمومی PORT ممکن است متعلق به پروژه دیگری باشد.
+# به همین دلیل ابتدا متغیر اختصاصی این پروژه خوانده می‌شود و PORT فقط
+# به‌عنوان آخرین گزینه (سازگاری با Railway/Heroku) استفاده می‌گردد.
+PORT_ENV_VARS = ("STOCKLAND_PORT", "WEB_PORT", "PORT")
+DEFAULT_PORT  = 8080
+DEFAULT_HOST  = "0.0.0.0"
+
+
+def resolve_port():
+    """پورت پنل را از متغیرهای محیطی (به ترتیب اولویت) برمی‌گرداند.
+
+    خروجی: (port, source) که source نام متغیر استفاده‌شده است.
+    """
+    for var in PORT_ENV_VARS:
+        raw = (os.environ.get(var) or "").strip()
+        if not raw:
+            continue
+        try:
+            port = int(raw)
+        except ValueError:
+            raise SystemExit(
+                f"❌ مقدار متغیر {var} یک عدد معتبر نیست: {raw!r}"
+            )
+        if not (1 <= port <= 65535):
+            raise SystemExit(
+                f"❌ مقدار متغیر {var} باید بین ۱ تا ۶۵۵۳۵ باشد: {port}"
+            )
+        return port, var
+    return DEFAULT_PORT, "پیش‌فرض"
+
+
+def check_port_free(host, port):
+    """اگر پورت اشغال باشد با پیام واضح خارج می‌شود (به‌جای تریس‌بک خام Flask)."""
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        try:
+            sock.bind((host, port))
+        except OSError as e:
+            raise SystemExit(
+                f"❌ پورت {port} روی {host} در دسترس نیست ({e.strerror}).\n"
+                f"   احتمالاً سرویس دیگری روی همین وی‌پی‌اس از این پورت استفاده می‌کند.\n"
+                f"   یک پورت آزاد و اختصاصی برای این پروژه ست کنید، مثلاً:\n"
+                f"       export WEB_PORT=8471\n"
+                f"   (در systemd: Environment=WEB_PORT=8471)"
+            )
+
+
+def run_web(host=None, port=None):
+    host = host or os.environ.get("WEB_HOST", DEFAULT_HOST)
+    if port is None:
+        port, source = resolve_port()
+    else:
+        source = "پارامتر ورودی"
+    check_port_free(host, port)
+    logger.info("🌐 پنل وب روی %s:%s اجرا می‌شود (منبع پورت: %s)", host, port, source)
     app.run(host=host, port=port, debug=False, use_reloader=False)
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s %(levelname)s %(message)s")
     run_web()
