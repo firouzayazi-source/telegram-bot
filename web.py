@@ -2,11 +2,9 @@
 پنل وب مدیریت استوک لند
 به همان دیتابیس و فایل‌های بات وصل است.
 """
-import os, json, sqlite3, time, secrets, functools, io, hmac, hashlib, logging
-from datetime import datetime
+import os, json, sqlite3, time, secrets, functools, logging
 from flask import (Flask, request, session, redirect, url_for, jsonify,
                    render_template_string, send_from_directory, abort)
-import asyncio
 
 # ── مسیرها (هماهنگ با bot.py) ───────────────────
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -20,7 +18,6 @@ UPLOAD_DIR    = os.path.join(BASE, "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 PANEL_USER         = os.environ.get("PANEL_USER", "admin")
-WOO_WEBHOOK_SECRET = os.environ.get("WOO_WEBHOOK_SECRET", "")
 PANEL_PASS         = os.environ.get("PANEL_PASS", "stockland")
 
 logger = logging.getLogger("web")
@@ -36,36 +33,10 @@ def set_tg_uploader(fn):
 SECTION_NAMES = {"welcome":"🏠 خوش‌آمدگویی","1":"🌐 شبکه‌های اجتماعی",
                  "2":"🌐 سایت استوک لند","3":"💰 شرایط اقساط",
                  "4":"📞 پشتیبانی","5":"📍 آدرس فروشگاه",
-                 "catalog":"🛍 محصولات","workhours":"🕐 ساعت کاری"}
-SECTION_ORDER = ["welcome","1","2","3","4","5","catalog","workhours"]
+                 "workhours":"🕐 ساعت کاری"}
+SECTION_ORDER = ["welcome","1","2","3","4","5","workhours"]
 DAY_FA = {"0":"شنبه","1":"یکشنبه","2":"دوشنبه","3":"سه‌شنبه","4":"چهارشنبه","5":"پنجشنبه","6":"جمعه"}
 
-
-def _verify_sig(req):
-    if not WOO_WEBHOOK_SECRET:
-        return True
-    sig = req.headers.get("X-Webhook-Signature", "")
-    body = req.get_data()
-    expected = "sha256=" + hmac.new(WOO_WEBHOOK_SECRET.encode(), body, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(sig, expected)
-
-def _upsert_product(p):
-    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-    cat_id = p.get('category_ids', [None])[0] if p.get('category_ids') else None
-    price = p.get('price') or p.get('regular_price') or ''
-    if price and str(price).replace('.','').isdigit():
-        price = f"{int(float(price)):,} تومان"
-    dbq("""INSERT OR REPLACE INTO products(id, category_id, name, price, description, photo_id, site_url, is_active, created_at)
-           VALUES(?,?,?,?,?,?,?,?,?)""",
-        (p['id'], cat_id, p['name'], price, p.get('description',''),
-         p.get('image_url'), p.get('permalink'),
-         1 if p.get('stock_status')=='instock' and p.get('status')=='publish' else 0,
-         now), commit=True)
-
-def _upsert_category(c):
-    icon = '📂' if not c.get('parent_id') else '📦'
-    dbq("""INSERT OR REPLACE INTO categories(id, name, icon, parent_id, is_active) VALUES(?,?,?,?,1)""",
-        (c['id'], c['name'], icon, c.get('parent_id') or None), commit=True)
 
 # ── دیتابیس ───────────────────────────────────
 def dbq(sql, args=(), one=False, commit=False):
@@ -94,47 +65,6 @@ def login_required(f):
             return redirect(url_for("login"))
         return f(*a, **k)
     return wrap
-
-# ════════════════════════════════════════════════
-#  API — محصولات (از SQLite)
-# ════════════════════════════════════════════════
-@app.get("/api/tree")
-@login_required
-def api_tree():
-    try:
-        roots = dbq("SELECT id,name,icon FROM categories WHERE parent_id IS NULL AND is_active=1 ORDER BY id")
-        out = []
-        for r in roots:
-            subs = dbq("SELECT id,name,icon,is_active FROM categories WHERE parent_id=? AND is_active=1 ORDER BY id", (r["id"],))
-            sub_list = [{"id":s["id"],"name":s["name"],"icon":s["icon"],"active":bool(s["is_active"]),
-                         "product_count": dbq("SELECT COUNT(*) c FROM products WHERE category_id=? AND is_active=1",(s["id"],),one=True)["c"]} for s in subs]
-            out.append({"id":r["id"],"name":r["name"],"icon":r["icon"],"active":True,"subs":sub_list})
-        return jsonify(out)
-    except Exception as e:
-        return jsonify([])
-
-@app.get("/api/products/<int:sub_id>")
-@login_required
-def api_products(sub_id):
-    try:
-        prods = dbq("SELECT id,name,price,description,site_url,is_active,photo_id FROM products WHERE category_id=? ORDER BY id", (sub_id,))
-        out = []
-        for p in prods:
-            out.append({"id":p["id"],"name":p["name"],"price":p["price"],"description":p["description"],
-                        "site_url":p["site_url"],"active":bool(p["is_active"]),"photo_url":p["photo_id"]})
-        return jsonify(out)
-    except Exception:
-        return jsonify([])
-
-@app.get("/api/woo-status")
-@login_required
-def api_woo_status():
-    return jsonify({"status": "push-based", "ok": True})
-
-@app.post("/api/woo-refresh")
-@login_required
-def api_woo_refresh():
-    return jsonify({"ok": True, "message": "push-based, no refresh needed"})
 
 def _handle_photo(req):
     """عکس آپلودی را ذخیره می‌کند؛ اگر uploader تلگرام تنظیم شده، file_id می‌گیرد."""
@@ -297,11 +227,8 @@ def api_dashboard():
     blocked = c("SELECT COUNT(*) c FROM users WHERE is_blocked=1")
     reqs_new = c("SELECT COUNT(*) c FROM requests WHERE status='new'")
     reqs_total = c("SELECT COUNT(*) c FROM requests")
-    prods = c("SELECT COUNT(*) c FROM products")
-    cats = c("SELECT COUNT(*) c FROM categories WHERE parent_id IS NULL")
     return jsonify({"total":total,"today":today,"week":week,"month":month,"new_today":new_t,
-                    "blocked":blocked,"reqs_new":reqs_new,"reqs_total":reqs_total,
-                    "products":prods,"categories":cats})
+                    "blocked":blocked,"reqs_new":reqs_new,"reqs_total":reqs_total})
 
 # ════════════════════════════════════════════════
 #  API — ساعت کاری
@@ -357,76 +284,6 @@ def index():
 
 # HTML در فایل جدا import می‌شود
 from templates import LOGIN_HTML, PANEL_HTML
-
-# ════════════════════════════════════════════════
-#  Telegram-visible categories — JSON file storage
-# ════════════════════════════════════════════════
-TG_CATS_FILE = os.path.join(BASE, "tg_cats.json")
-
-def _read_tg_cats():
-    """Return list of allowed category IDs (ints)."""
-    return rj(TG_CATS_FILE, [])
-
-def _write_tg_cats(cat_ids):
-    """Persist allowed category IDs."""
-    wj(TG_CATS_FILE, [int(c) for c in cat_ids])
-
-@app.get("/api/tg-categories")
-@login_required
-def api_tg_cats_get():
-    """Return the list of Telegram-visible WooCommerce category IDs."""
-    return jsonify({"cat_ids": _read_tg_cats()})
-
-@app.put("/api/tg-categories")
-@login_required
-def api_tg_cats_put():
-    """Replace the list of Telegram-visible category IDs.
-
-    Body: {"cat_ids": [1, 2, 3]}
-    """
-    data = request.get_json(silent=True) or {}
-    cat_ids = data.get("cat_ids", [])
-    if not isinstance(cat_ids, list):
-        return jsonify({"error": "cat_ids must be an array"}), 400
-    _write_tg_cats(cat_ids)
-    return jsonify({"ok": True, "cat_ids": _read_tg_cats()})
-
-# ════════════════════════════════════════════════
-#  WooCommerce webhooks — public but HMAC-signed
-# ════════════════════════════════════════════════
-
-@app.post("/webhook/woo")
-def webhook_woo():
-    if not _verify_sig(request):
-        return jsonify({"error": "invalid signature"}), 403
-    data = request.get_json(force=True, silent=True) or {}
-    event = data.get('event', '')
-    if event == 'product.updated':
-        _upsert_product(data['product'])
-    elif event == 'product.deleted':
-        pid = data.get('product', {}).get('id')
-        if pid:
-            dbq("DELETE FROM products WHERE id=?", (pid,), commit=True)
-    elif event == 'categories.sync':
-        for c in data.get('categories', []):
-            _upsert_category(c)
-    return jsonify({"ok": True})
-
-@app.post("/webhook/woo/clear-all")
-def webhook_woo_clear_all():
-    if not _verify_sig(request):
-        return jsonify({"error": "invalid signature"}), 403
-    return jsonify({"ok": True})
-
-@app.post("/webhook/woo/sync-cats")
-def webhook_woo_sync_cats():
-    if not _verify_sig(request):
-        return jsonify({"error": "invalid signature"}), 403
-    data = request.get_json(force=True, silent=True) or {}
-    for c in data.get('categories', []):
-        _upsert_category(c)
-    return jsonify({"ok": True})
-
 
 # ── تنظیمات شبکه پنل وب ──────────────────────────
 # روی وی‌پی‌اس مشترک، متغیر عمومی PORT ممکن است متعلق به پروژه دیگری باشد.

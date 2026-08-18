@@ -12,7 +12,7 @@ TOKEN = os.environ["BOT_TOKEN"].strip()
 ADMIN_ID = int(os.environ["ADMIN_ID"].strip())
 DATA_FILE = "data.json"; DB_FILE = "users.db"; BANNER_FILE = "banner.json"
 WORKHOURS_FILE = "workhours.json"; BUTTONS_FILE = "buttons.json"
-MENU_FILE = "menu.json"; PHOTOMAP_FILE = "photomap.json"
+MENU_FILE = "menu.json"
 SETTINGS_FILE = "settings.json"; STATS_FILE = "stats.json"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -45,7 +45,6 @@ DEFAULT_MENU = [
     {"key":"2","label":"🌐 سایت استوک لند","order":2,"enabled":True,"width":"half"},
     {"key":"3","label":"💰 شرایط اقساط","order":3,"enabled":True,"width":"half"},
     {"key":"5","label":"📍 آدرس فروشگاه","order":4,"enabled":True,"width":"half"},
-    {"key":"catalog","label":"🛍 محصولات","order":5,"enabled":True,"width":"full"},
     {"key":"workhours","label":"🕐 ساعت کاری","order":6,"enabled":True,"width":"half"},
     {"key":"4","label":"📞 پشتیبانی","order":7,"enabled":True,"width":"half"},
     {"key":"6","label":"🔖 دکمه ذخیره ۱","order":8,"enabled":False,"width":"half"},
@@ -54,7 +53,7 @@ DEFAULT_MENU = [
 menu_cfg = []
 
 SECTION_NAMES = {"welcome":"🏠 خوش‌آمدگویی",
-                 "catalog":"🛍 محصولات","workhours":"🕐 ساعت کاری",
+                 "workhours":"🕐 ساعت کاری",
                  "1":"🌐 شبکه‌های اجتماعی","2":"🌐 سایت استوک لند",
                  "3":"💰 شرایط اقساط","4":"📞 پشتیبانی","5":"📍 آدرس فروشگاه",
                  "6":"🔖 دکمه ذخیره ۱","7":"🔖 دکمه ذخیره ۲"}
@@ -76,29 +75,6 @@ DEFAULT_SEC_WH = {k:True for k in SECTION_NAMES}
 
 # ── helpers
 def get_banner(k): banners.setdefault(k,{"file_id":None,"active":False}); return banners[k]
-
-# cache نگاشت URL عکس → file_id تلگرام (ارسال آنی در دفعات بعد)
-_photo_fileids = {}
-_PHOTO_CACHE_MAX = 500
-_photomap_dirty  = False
-
-def _cache_photo(url: str, file_id: str):
-    global _photomap_dirty
-    if len(_photo_fileids) >= _PHOTO_CACHE_MAX:
-        _photo_fileids.pop(next(iter(_photo_fileids)), None)
-    _photo_fileids[url] = file_id
-    _photomap_dirty = True
-
-async def load_photomap():
-    global _photo_fileids
-    data = await _rj(PHOTOMAP_FILE, dict)
-    if isinstance(data, dict): _photo_fileids.update(data)
-    logger.info(f"photomap: {len(_photo_fileids)} آدرس عکس بارگذاری شد")
-
-async def save_photomap():
-    global _photomap_dirty
-    await _wj(PHOTOMAP_FILE, dict(list(_photo_fileids.items())[-_PHOTO_CACHE_MAX:]))
-    _photomap_dirty = False
 def get_sec_btns(k): buttons.setdefault(k,{"enabled":True,"items":[]}); return buttons[k]
 def get_setting(k): return settings.get(k,DEFAULT_SETTINGS.get(k,True))
 
@@ -154,12 +130,11 @@ async def record_stat(k):
     _stats_dirty=True   # فقط flag — بدون disk write
 
 async def _stats_flush_loop():
-    """هر ۳۰ ثانیه اگر آمار یا photomap تغییر کرده باشد، ذخیره می‌کند."""
+    """هر ۳۰ ثانیه اگر آمار تغییر کرده باشد، ذخیره می‌کند."""
     global _stats_dirty
     while True:
         await asyncio.sleep(30)
         if _stats_dirty: await save_stats(); _stats_dirty=False
-        if _photomap_dirty: await save_photomap()
 
 # ── load/save
 async def _rj(path,default):
@@ -300,13 +275,6 @@ async def init_db():
             username TEXT,first_name TEXT,phone TEXT,
             product_id INTEGER,product_name TEXT,
             status TEXT DEFAULT 'new',created_at TEXT);
-        CREATE TABLE IF NOT EXISTS categories(
-            id INTEGER PRIMARY KEY,name TEXT,icon TEXT,
-            parent_id INTEGER,is_active INTEGER DEFAULT 1);
-        CREATE TABLE IF NOT EXISTS products(
-            id INTEGER PRIMARY KEY,category_id INTEGER,name TEXT,
-            price TEXT,description TEXT,photo_id TEXT,site_url TEXT,
-            is_active INTEGER DEFAULT 1,created_at TEXT);
         CREATE INDEX IF NOT EXISTS idx_ls ON users(last_seen);
         CREATE INDEX IF NOT EXISTS idx_req_uid ON requests(user_id,product_id,created_at);
         CREATE INDEX IF NOT EXISTS idx_req_st ON requests(status);
@@ -378,59 +346,7 @@ async def month_users(): return await _cnt("SELECT COUNT(*) FROM users WHERE las
 async def new_today():   return await _cnt("SELECT COUNT(*) FROM users WHERE DATE(joined_at)=DATE('now','localtime')")
 async def blk_count():   return await _cnt("SELECT COUNT(*) FROM users WHERE is_blocked=1")
 
-# ── catalog — از ووکامرس خوانده می‌شود (woo.py)
-# خروجی به فرمت tuple سازگار با کد موجود تبدیل می‌شود:
-#   دسته:   id(0),name(1),icon(2),parent_id(3),is_active(4)
-#   محصول:  id(0),name(1),price(2),description(3),photo_url(4),site_url(5),is_active(6),category_id(7)
-import woo
-
-def _cat_tuple(c):
-    # ووکامرس آیکون ندارد → از 📁/📦 استفاده می‌کنیم
-    icon = "📂" if c["parent"]==0 else "📦"
-    return (c["id"], c["name"], icon, c["parent"], 1)
-
-def _prod_tuple(p, cat_id=None):
-    return (p["id"], p["name"], p["price"], p["description"],
-            p["image"], p["permalink"], 1 if p["in_stock"] else 0,
-            cat_id if cat_id is not None else (p["category_ids"][0] if p["category_ids"] else 0),
-            1 if p.get("is_backorder") else 0)  # عضو ۸: پیش‌خرید
-
-async def get_root_cats(active_only=True):
-    cats = await woo.get_root_categories()
-    return [_cat_tuple(c) for c in cats]
-
-async def get_subcats(parent_id,active_only=True):
-    cats = await woo.get_subcategories(parent_id)
-    return [_cat_tuple(c) for c in cats]
-
-async def get_cat(cat_id):
-    c = await woo.get_category(cat_id)
-    return _cat_tuple(c) if c else None
-
-async def get_products(cat_id,active_only=True):
-    prods = await woo.get_products_by_category(cat_id)
-    return [_prod_tuple(p, cat_id) for p in prods]
-
-async def get_product(pid):
-    p = await woo.get_product(pid)
-    return _prod_tuple(p) if p else None
-
-async def search_products(q):
-    prods = await woo.search_products(q)
-    return [_prod_tuple(p) for p in prods]
-
 # ── requests db
-async def save_request(uid,username,first_name,phone,pid,pname):
-    # بررسی درخواست تکراری در ۲۴ ساعت اخیر
-    async with db.execute(
-        "SELECT id FROM requests WHERE user_id=? AND product_id=? AND created_at>=datetime('now','-1 day')",
-        (uid,pid)) as c:
-        if await c.fetchone(): return None   # تکراری
-    cur=await db.execute("INSERT INTO requests(user_id,username,first_name,phone,product_id,product_name,status,created_at) VALUES(?,?,?,?,?,?,?,?)",
-        (uid,username or"",first_name or"",phone,pid,pname,"new",gregorian_now()))
-    await db.commit()
-    return cur.lastrowid
-
 async def get_requests(offset=0,limit=25):
     async with db.execute(
         "SELECT id,user_id,username,first_name,phone,product_name,status,created_at FROM requests ORDER BY id DESC LIMIT ? OFFSET ?",
@@ -490,11 +406,6 @@ def spam_check(uid: int) -> str:
     _warned.pop(uid, None)        # کاربر آرام گرفت → هشدار ریست شود
     return 'ok'
 
-async def _trigger_warm():
-    """فراخوانی پس‌زمینه‌ای maybe_warm_cache — کاربر هیچ تاخیری احساس نمی‌کند."""
-    try: await woo.maybe_warm_cache()
-    except Exception as e: logger.debug(f"trigger_warm: {e}")
-
 # ════════════════════════════════════════════════
 #  KEYBOARDS
 # ════════════════════════════════════════════════
@@ -532,35 +443,6 @@ def user_sec_kb(key):
         if len(row)==2 or i==len(items)-1: btns.append(row); row=[]
     return InlineKeyboardMarkup(btns) if btns else None
 
-# ── catalog keyboards (user)
-def cat_root_kb(cats):
-    btns=[[InlineKeyboardButton(f"{c[2]} {c[1]}",callback_data=f"cr_{c[0]}")] for c in cats]
-    btns.append([InlineKeyboardButton("🔍 جستجوی محصول",callback_data="cat_search")])
-    return InlineKeyboardMarkup(btns)
-
-def cat_sub_kb(subs,root_id):
-    btns=[[InlineKeyboardButton(f"{s[2]} {s[1]}",callback_data=f"cs_{s[0]}")] for s in subs]
-    btns.append([InlineKeyboardButton("🔙 برگشت",callback_data="cat_back")])
-    return InlineKeyboardMarkup(btns)
-
-def cat_products_kb(products,sub_id):
-    btns=[[InlineKeyboardButton(f"📱 {p[1]}",callback_data=f"prd_{p[0]}")] for p in products]
-    btns.append([InlineKeyboardButton("🔙 برگشت",callback_data=f"cr_back_{sub_id}")])
-    return InlineKeyboardMarkup(btns)
-
-def product_kb(p):
-    btns=[]
-    is_backorder = len(p)>8 and p[8]==1
-    if is_backorder:
-        # محصول پیش‌خرید: لینک سایت نده، فقط درخواست پیش‌خرید
-        btns.append([InlineKeyboardButton("📝 درخواست پیش‌خرید",callback_data=f"pre_{p[0]}")])
-    else:
-        # محصول موجود: لینک سایت + درخواست خرید
-        if p[5]: btns.append([InlineKeyboardButton("🌐 مشاهده / خرید از سایت",url=p[5])])
-        btns.append([InlineKeyboardButton("📋 درخواست خرید",callback_data=f"req_{p[0]}")])
-    btns.append([InlineKeyboardButton("🔙 برگشت",callback_data=f"cs_back_{p[7]}")])
-    return InlineKeyboardMarkup(btns)
-
 # ── admin keyboards
 def back_admin(): return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به پنل",callback_data="back_to_admin")]])
 
@@ -580,15 +462,15 @@ def admin_menu():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 داشبورد",callback_data="dash"),
          InlineKeyboardButton("👥 کاربران",callback_data="users_menu")],
-        [InlineKeyboardButton("🛍 محصولات سایت",callback_data="woo_status"),
-         InlineKeyboardButton("📬 درخواست‌ها",callback_data="admin_reqs")],
+        [InlineKeyboardButton("📬 درخواست‌ها",callback_data="admin_reqs")],
+
         [InlineKeyboardButton("🕐 ساعت کاری",callback_data="wh_menu"),
          InlineKeyboardButton("📣 پخش همگانی",callback_data="broadcast")],
         [InlineKeyboardButton("⚙️ تنظیمات",callback_data="settings_menu")],
     ])
 
 # ترتیب نمایش بخش‌ها — دقیقاً مطابق منوی کاربر
-SECTION_ORDER = ["welcome","1","2","3","4","5","catalog","workhours","6","7"]
+SECTION_ORDER = ["welcome","1","2","3","4","5","workhours","6","7"]
 
 def sections_kb():
     btns=[]; row=[]
@@ -611,14 +493,11 @@ def sections_kb():
 def section_kb(key):
     b=get_banner(key)
     ban_lbl="🖼 بنر  🟢 فعال" if(b.get("active") and b.get("file_id")) else("🖼 بنر  ⏸ آپلود‌شده" if b.get("file_id") else"🖼 بنر  ➕ ندارد")
-    rows=[]
-    if key != "catalog":  # catalog محتوا از ووکامرس می‌گیرد — متن و دکمه‌های ثابت ندارد
-        sec=get_sec_btns(key); n=len(sec.get("items",[])); en=sec.get("enabled")
-        btn_lbl=f"🔗 دکمه‌ها  {'🟢' if en else '🔴'}  ({to_fa(n)} عدد)"
-        rows.append([InlineKeyboardButton("✏️ ویرایش متن",callback_data=f"sec_text_{key}")])
+    sec=get_sec_btns(key); n=len(sec.get("items",[])); en=sec.get("enabled")
+    btn_lbl=f"🔗 دکمه‌ها  {'🟢' if en else '🔴'}  ({to_fa(n)} عدد)"
+    rows=[[InlineKeyboardButton("✏️ ویرایش متن",callback_data=f"sec_text_{key}")]]
     rows.append([InlineKeyboardButton(ban_lbl,callback_data=f"sec_ban_{key}")])
-    if key != "catalog":
-        rows.append([InlineKeyboardButton(btn_lbl,callback_data=f"sec_btns_{key}")])
+    rows.append([InlineKeyboardButton(btn_lbl,callback_data=f"sec_btns_{key}")])
     rows.append([InlineKeyboardButton("🔙 بازگشت",callback_data="sections")])
     return InlineKeyboardMarkup(rows)
 
@@ -860,8 +739,6 @@ async def restore_backup(bot,file_id):
         await load_buttons(); await load_settings(); await load_stats(); await load_menu()
         # نرمال‌سازی فرمت فایل‌ها روی دیسک (جلوگیری از مشکل فرمت قدیمی بعد از restart)
         await save_banners(); await save_buttons()
-        # پاک کردن کش ووکامرس تا محصولات تازه از سایت خوانده شوند
-        woo.clear_cache()
         return True,restored
     except Exception as e:
         logger.error(f"restore: {e}"); return False,str(e)
@@ -869,29 +746,7 @@ async def restore_backup(bot,file_id):
 # ════════════════════════════════════════════════
 #  HANDLERS — cmd_start / cmd_admin
 # ════════════════════════════════════════════════
-async def loading_animation(chat, ctx):
-    """انیمیشن حرفه‌ای صبر: اکشن تایپ + پیام متحرک."""
-    try: await ctx.bot.send_chat_action(chat_id=chat.id, action="typing")
-    except Exception: pass
-    msg = await chat.send_message("🛍 در حال دریافت محصولات از سایت…")
-    async def animate():
-        frames = ["🛍 در حال دریافت محصولات از سایت ⏳",
-                  "🛍 در حال دریافت محصولات از سایت ⌛️",
-                  "🛍 لحظه‌ای صبر کنید، تقریباً آماده است…"]
-        i = 0
-        try:
-            while True:
-                await asyncio.sleep(0.8)
-                try:
-                    await ctx.bot.send_chat_action(chat_id=chat.id, action="typing")
-                    await msg.edit_text(frames[i % len(frames)])
-                except Exception: pass
-                i += 1
-        except asyncio.CancelledError: pass
-    return msg, asyncio.ensure_future(animate())
-
 async def cmd_start(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
-    asyncio.ensure_future(_trigger_warm())  # warm در پس‌زمینه — اگر ۱۰ دقیقه گذشته باشد
     user=update.effective_user; is_new=False
     async with db.execute("SELECT user_id FROM users WHERE user_id=?",(user.id,)) as c: is_new=(await c.fetchone()) is None
     await save_user(user)
@@ -925,104 +780,18 @@ async def user_cb(query,ctx):
         kb=InlineKeyboardMarkup([[InlineKeyboardButton("📆 ساعت کار هفتگی مجموعه",callback_data="wh_weekly")]])
         await safe_edit(query.message,msg,reply_markup=kb); return
 
-    if data=="cat_back":
-        cats=await get_root_cats()
-        if not cats: await safe_edit(query.message,"📫 محصولی موجود نیست."); return
-        await safe_edit(query.message,"🛍 محصولات استوک لند\nیک دسته‌بندی را انتخاب کنید:",reply_markup=cat_root_kb(cats)); return
-
-    if data=="cat_search":
-        ctx.user_data["mode"]="cat_search"
-        await query.message.reply_text("🔍 نام یا مدل محصول را بنویسید:",reply_markup=cancel_menu()); return
-
-    if data.startswith("cr_back_"):
-        sub_id=int(data[8:]); sub=await get_cat(sub_id)
-        if not sub: return
-        root=await get_cat(sub[3]); subs=await get_subcats(sub[3])
-        await safe_edit(query.message,f"📁 {root[2] if root else ''} {root[1] if root else ''}\nزیردسته را انتخاب کنید:",reply_markup=cat_sub_kb(subs,sub[3])); return
-
-    if data.startswith("cr_"):
-        root_id=int(data[3:]); root=await get_cat(root_id)
-        if not root: return
-        subs=await get_subcats(root_id)
-        if not subs:
-            await safe_edit(query.message,f"📁 {root[2]} {root[1]}\n\n📫 هنوز زیردسته‌ای ثبت نشده.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 برگشت",callback_data="cat_back")]])); return
-        await safe_edit(query.message,f"📁 {root[2]} {root[1]}\nزیردسته را انتخاب کنید:",reply_markup=cat_sub_kb(subs,root_id)); return
-
-    if data.startswith("cs_back_"):
-        sub_id=int(data[8:]); sub=await get_cat(sub_id)
-        if not sub: return
-        products=await get_products(sub_id); title=f"📦 {sub[2]} {sub[1]}"
-        if not products:
-            await safe_edit(query.message,f"{title}\n\n📫 محصولی موجود نیست.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 برگشت",callback_data=f"cr_{sub[3]}")]])); return
-        await safe_edit(query.message,f"{title}\n{to_fa(len(products))} محصول:",reply_markup=cat_products_kb(products,sub_id)); return
-
-    if data.startswith("cs_"):
-        sub_id=int(data[3:]); sub=await get_cat(sub_id)
-        if not sub: return
-        products=await get_products(sub_id); title=f"📦 {sub[2]} {sub[1]}"
-        if not products:
-            await safe_edit(query.message,f"{title}\n\n📫 محصولی موجود نیست.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 برگشت",callback_data=f"cr_{sub[3]}")]])); return
-        await safe_edit(query.message,f"{title}\n{to_fa(len(products))} محصول:",reply_markup=cat_products_kb(products,sub_id)); return
-
-    if data.startswith("prd_"):
-        pid=int(data[4:])
-        # محصول از cache می‌آید (سریع) — نیازی به انیمیشن نیست
-        p=await get_product(pid)
-        if not p: return
-        await record_stat(f"prd_{pid}")
-        is_backorder = len(p)>8 and p[8]==1
-        text=f"📱 {p[1]}\n{'─'*18}\n💰 قیمت:  {p[2]}"
-        if is_backorder:
-            text+="\n\n🔵 وضعیت: قابل سفارش (پیش‌خرید)\nاین محصول هم‌اکنون موجود نیست اما قابل سفارش است. برای پیش‌خرید با پشتیبانی هماهنگ کنید."
-        if p[3]: text+=f"\n\n📝 {p[3]}"
-        kb=product_kb(p)
-        # caption تلگرام حداکثر ۱۰۲۴ کاراکتر — اگر بلندتر بود، تا خط کامل ببر
-        cap = text
-        if len(cap) > 1024:
-            cut = text[:1000].rsplit("\n", 1)[0]  # تا آخرین خط کامل
-            cap = cut + "\n\n📖 ادامه در سایت…"
-        if p[4]:
-            photo_ref = _photo_fileids.get(p[4], p[4])
-            try:
-                sent=await query.message.reply_photo(photo=photo_ref,caption=cap,reply_markup=kb)
-                if sent.photo: _cache_photo(p[4], sent.photo[-1].file_id)
-                return
-            except Exception as e: logger.error(f"prd photo {pid}: {e}")
-        if len(text)>4000: text=text[:3990]+"..."
-        await query.message.reply_text(text,reply_markup=kb); return
-
-    if data.startswith("req_"):
-        pid=int(data[4:]); p=await get_product(pid)
-        if not p: return
-        ctx.user_data.update({"mode":"req_phone","req_pid":pid,"req_name":p[1],"req_type":"خرید"})
-        await query.message.reply_text(f"📋 درخواست خرید: {p[1]}\n\nشماره تماس خود را وارد کنید:",reply_markup=cancel_menu()); return
-
-    if data.startswith("pre_"):
-        pid=int(data[4:]); p=await get_product(pid)
-        if not p: return
-        ctx.user_data.update({"mode":"req_phone","req_pid":pid,"req_name":p[1],"req_type":"پیش‌خرید"})
-        await query.message.reply_text(f"📝 درخواست پیش‌خرید: {p[1]}\n\nاین محصول قابل سفارش است. شماره تماس خود را وارد کنید تا پشتیبانی برای پیش‌خرید با شما هماهنگ کند:",reply_markup=cancel_menu()); return
-
 # ════════════════════════════════════════════════
 #  MAIN CALLBACK DISPATCHER
 # ════════════════════════════════════════════════
 # پیشوندهایی که هم ادمین هم کاربر دسترسی دارد
-_USER_CB_PREFIXES = ("cr_","cs_","prd_","req_","pre_","cat_","wh_weekly","wh_back_today")
+_USER_CB_PREFIXES = ("wh_weekly","wh_back_today")
 
 async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     query=update.callback_query
     data=query.data; uid=query.from_user.id
 
-    # ── بررسی ساعت کاری برای درخواست خرید — BEFORE query.answer() تا show_alert کار کند
-    if data.startswith(("req_","pre_")) and uid!=ADMIN_ID and not is_open():
-        await query.answer("🔴 فروشگاه در حال حاضر بسته است.\nلطفاً در ساعات کاری مراجعه کنید.",show_alert=True)
-        return
-
-    # ── محافظت اسپم — برای req_/pre_ اعمال نمی‌شود (درخواست خرید نباید بلاک شود)
-    if uid!=ADMIN_ID and not data.startswith(("req_","pre_")):
+    # ── محافظت اسپم
+    if uid!=ADMIN_ID:
         _s=spam_check(uid)
         if _s=='block':
             await query.answer(); return
@@ -1047,43 +816,6 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         if data=="back_to_admin":
             await query.answer()
             await safe_edit(query.message,"👑 پنل مدیریت استوک لند",reply_markup=admin_menu())
-
-        elif data=="woo_status":
-            await query.answer()
-            if not woo.is_configured():
-                await safe_edit(query.message,
-                    "🛍 محصولات سایت\n" + "─"*18 +
-                    "\n\n⚠️ اتصال به سایت تنظیم نشده.\n\n"
-                    "برای فعال‌سازی، متغیرهای WOO_URL، WOO_KEY و WOO_SECRET را در تنظیمات سرور وارد کنید.",
-                    reply_markup=back_admin()); return
-            await safe_edit(query.message,"🛍 در حال اتصال به سایت...",reply_markup=None)
-            ok,msg = await woo.test_connection()
-            if not ok:
-                await safe_edit(query.message,f"🛍 محصولات سایت\n{'─'*18}\n\n❌ {msg}",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("🔄 تلاش مجدد",callback_data="woo_status")],
-                        [InlineKeyboardButton("🔙 پنل اصلی",callback_data="back_to_admin")]])); return
-            roots = await woo.get_root_categories()
-            cats = await woo.get_categories()
-            total_prod = sum(c["count"] for c in roots)
-            txt = (f"🛍 محصولات سایت (ووکامرس)\n{'─'*18}"
-                   f"\n✅ اتصال برقرار است"
-                   f"\n\n📂 دسته اصلی: {to_fa(len(roots))}"
-                   f"\n📁 کل دسته‌ها: {to_fa(len(cats))}"
-                   f"\n📦 مجموع محصولات: {to_fa(total_prod)}"
-                   f"\n\n💡 محصولات از سایت stland.ir خوانده می‌شوند."
-                   f"\nبرای افزودن یا ویرایش محصول، به پنل وردپرس مراجعه کنید.")
-            await safe_edit(query.message,txt,reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔄 بروزرسانی فوری",callback_data="woo_refresh")],
-                [InlineKeyboardButton("🔙 پنل اصلی",callback_data="back_to_admin")]]))
-
-        elif data=="woo_refresh":
-            await query.answer("کش پاک شد، در حال دریافت...",show_alert=False)
-            woo.clear_cache()
-            await safe_edit(query.message,"🔄 محصولات بروزرسانی شد.",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🛍 مشاهده وضعیت",callback_data="woo_status")],
-                    [InlineKeyboardButton("🔙 پنل اصلی",callback_data="back_to_admin")]]))
 
         elif data=="dash":
             await query.answer()
@@ -1242,9 +974,6 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
 
         elif data.startswith("sec_text_"):
             key=data[9:]
-            if key=="catalog":
-                await query.answer("⚠️ محصولات از ووکامرس می‌آیند و متن ثابت ندارند.",show_alert=True)
-                return
             await query.answer()
             ctx.user_data.update({"mode":"edit_text","edit_key":key})
             await query.message.reply_text(f"✏️ متن فعلی:\n\n{responses.get(key,'تنظیم نشده')}\n\nمتن جدید:",reply_markup=cancel_menu())
@@ -1276,9 +1005,6 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
 
         elif data.startswith("sec_btns_"):
             key=data[9:]
-            if key=="catalog":
-                await query.answer("⚠️ دکمه‌های ثابت برای بخش محصولات قابل تنظیم نیست.",show_alert=True)
-                return
             await query.answer()
             sec=get_sec_btns(key)
             await safe_edit(query.message,
@@ -1288,17 +1014,12 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
 
         elif data.startswith("btn_tg_"):
             key=data[7:]
-            if key=="catalog":
-                await query.answer("⚠️ دکمه‌های ثابت برای بخش محصولات قابل تنظیم نیست.",show_alert=True); return
             sec=get_sec_btns(key); sec["enabled"]=not sec.get("enabled",False); await save_buttons()
             await query.answer("✅ فعال" if sec["enabled"] else"❌ غیرفعال",show_alert=True)
             await safe_edit(query.message,f"🔘 {SECTION_NAMES.get(key,key)} | {'✅' if sec['enabled'] else '❌'}",reply_markup=sec_btns_kb(key))
 
         elif data.startswith("btn_add_"):
             key=data[8:]
-            if key=="catalog":
-                await query.answer("⚠️ دکمه به بخش محصولات قابل افزودن نیست.",show_alert=True)
-                return
             await query.answer()
             ctx.user_data.update({"mode":"btn_add_t","btn_key":key})
             await query.message.reply_text(f"➕ دکمه جدید برای «{SECTION_NAMES.get(key,key)}»\nعنوان:",reply_markup=cancel_menu())
@@ -1529,13 +1250,10 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     user=update.effective_user; text=update.message.text.strip()
     await save_user(user)
     if user.id != ADMIN_ID:
-        _mode=ctx.user_data.get("mode")
-        if _mode!="req_phone":   # در حین ثبت درخواست، spam block اعمال نشود
-            _s=spam_check(user.id)
-            if _s=='block': return
-            if _s=='warn': return await update.message.reply_text("🐢 لطفاً آرام‌تر پیام دهید.")
+        _s=spam_check(user.id)
+        if _s=='block': return
+        if _s=='warn': return await update.message.reply_text("🐢 لطفاً آرام‌تر پیام دهید.")
         if await is_blocked(user.id): return
-        asyncio.ensure_future(_trigger_warm())
     if text=="❌ لغو عملیات":
         ctx.user_data.clear(); return await update.message.reply_text("❌ لغو شد.",reply_markup=main_menu())
     mode=ctx.user_data.get("mode")
@@ -1609,39 +1327,6 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         if mode=="wh_mcl":
             ctx.user_data.pop("mode",None); workhours["msg_closed"]=text; await save_workhours()
             await update.message.reply_text("✅",reply_markup=main_menu()); return
-    # ════ catalog search ════
-    if mode=="cat_search":
-        ctx.user_data.pop("mode",None)
-        results=await search_products(text)
-        if not results: await update.message.reply_text(f"🔍 نتیجه‌ای برای «{text}» یافت نشد.",reply_markup=main_menu()); return
-        btns=[[InlineKeyboardButton(f"📱 {p[1]} — {p[2]}",callback_data=f"prd_{p[0]}")] for p in results]
-        btns.append([InlineKeyboardButton("🔙 کاتالوگ",callback_data="cat_back")])
-        await update.message.reply_text(f"🔍 {to_fa(len(results))} نتیجه برای «{text}»:",reply_markup=InlineKeyboardMarkup(btns)); return
-
-    # ════ purchase request phone ════
-    if mode=="req_phone":
-        pid=ctx.user_data.pop("req_pid",None); pname=ctx.user_data.pop("req_name","نامشخص")
-        rtype=ctx.user_data.pop("req_type","خرید"); ctx.user_data.pop("mode",None)
-        digits=text.replace("-","").replace(" ","").replace("+","")
-        if not digits.isdigit() or len(digits)<10:
-            ctx.user_data.update({"mode":"req_phone","req_pid":pid,"req_name":pname,"req_type":rtype})
-            await update.message.reply_text("❌ شماره معتبر نیست. دوباره:",reply_markup=cancel_menu()); return
-        rid=await save_request(user.id,user.username,user.first_name,text,pid,pname)
-        if rid is None:
-            await update.message.reply_text(
-                f"⚠️ شما قبلاً برای «{pname}» درخواست ثبت کرده‌اید.\nپشتیبانی در حال بررسی است.",
-                reply_markup=main_menu()); return
-        icon="📝" if rtype=="پیش‌خرید" else "📋"
-        try:
-            req_kb=InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ پیگیری شد",callback_data=f"rq_done_{rid}"),
-                 InlineKeyboardButton("💬 پیام به کاربر",callback_data=f"rq_msg_{user.id}")]
-            ])
-            await ctx.bot.send_message(ADMIN_ID,
-                f"{icon} درخواست {rtype}!\n📱 {pname}\n👤 {user.first_name or'—'} | {'@'+user.username if user.username else'—'}\n📞 {text}\n🆔 {user.id}",
-                reply_markup=req_kb)
-        except Exception as e: logger.error(f"req notify: {e}")
-        await update.message.reply_text(f"✅ درخواست {rtype} «{pname}» ثبت شد!\nپشتیبانی به زودی تماس می‌گیرد.",reply_markup=main_menu()); return
 
     # ════ user menu ════
     # تشخیص دکمه از روی label (که ممکن است ادمین تغییرش داده باشد)
@@ -1656,21 +1341,6 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         if len(msg)>4000: msg=msg[:3990]+"..."
         kb=InlineKeyboardMarkup([[InlineKeyboardButton("📆 ساعت کار هفتگی مجموعه",callback_data="wh_weekly")]])
         await send_banner(update.message,msg,"workhours",kb=kb); return
-
-    if mkey=="catalog":
-        await record_stat("catalog")
-        anim = None
-        if not woo.is_cats_cached():
-            anim = await loading_animation(update.message.chat, ctx)
-        cats=await get_root_cats()
-        if anim:
-            msg_a, task_a = anim
-            task_a.cancel()
-            try: await msg_a.delete()
-            except Exception: pass
-        if not cats: await update.message.reply_text("📫 در حال حاضر محصولی موجود نیست.",reply_markup=main_menu()); return
-        msg="🛍 محصولات استوک لند\nیک دسته‌بندی را انتخاب کنید:"
-        await send_banner(update.message,msg,"catalog",kb=cat_root_kb(cats)); return
 
     # بخش‌های متنی (۱ تا ۵)
     if mkey and mkey in MENU_ITEMS:
@@ -1732,8 +1402,7 @@ async def document_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
 async def post_init(app):
     await init_db(); await load_data(); await load_banners()
     await load_workhours(); await load_buttons(); await load_settings()
-    await load_stats(); await load_menu(); await load_photomap()
-    asyncio.ensure_future(_trigger_warm())
+    await load_stats(); await load_menu()
     asyncio.ensure_future(_spam_cleanup_loop())
     asyncio.ensure_future(_stats_flush_loop())
     asyncio.ensure_future(_auto_backup_loop(app.bot))
@@ -1742,10 +1411,6 @@ async def post_init(app):
 async def post_shutdown(app):
     """قبل از خاموش‌شدن — داده‌های in-memory را flush کن تا چیزی گم نشود."""
     if _stats_dirty:   await save_stats();   logger.info("shutdown: stats saved")
-    if _photomap_dirty: await save_photomap(); logger.info("shutdown: photomap saved")
-    woo_session = getattr(woo, "_http_session", None)
-    if woo_session and not woo_session.closed:
-        await woo_session.close()
     logger.info("✅ shutdown clean")
 
 def main():

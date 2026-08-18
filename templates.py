@@ -108,23 +108,6 @@ body{font-family:'Vazirmatn',sans-serif;background:var(--bg);color:var(--text);m
 .card h3{font-size:16px;font-weight:700;margin-bottom:16px;display:flex;align-items:center;gap:8px}
 .card h3 .count{font-size:12px;color:var(--muted2);font-weight:500;margin-inline-start:auto}
 
-/* ── Tree (catalog) ── */
-.tree-root{border:1px solid var(--line);border-radius:14px;margin-bottom:12px;overflow:hidden}
-.tree-head{display:flex;align-items:center;gap:10px;padding:14px 16px;background:var(--panel2);cursor:pointer;transition:.15s}
-.tree-head:hover{background:rgba(31,198,107,.08)}
-.tree-head .ico{font-size:20px}
-.tree-head .nm{font-weight:600;font-size:15px}
-.tree-head .meta{margin-inline-start:auto;font-size:12px;color:var(--muted2);display:flex;gap:8px;align-items:center}
-.chip{background:rgba(31,198,107,.12);color:var(--green);padding:3px 9px;border-radius:8px;font-size:11px}
-.chip.off{background:rgba(231,76,60,.12);color:#ff8a7a}
-.tree-body{padding:8px 12px 12px;display:none}
-.tree-body.open{display:block}
-.sub-row{display:flex;align-items:center;gap:10px;padding:11px 12px;border-radius:10px;margin-top:6px;
-  background:var(--bg);cursor:pointer;transition:.15s}
-.sub-row:hover{background:rgba(31,198,107,.06)}
-.sub-row .nm{font-size:14px}
-.sub-row .meta{margin-inline-start:auto;font-size:12px;color:var(--muted2)}
-
 /* ── Buttons ── */
 .btn{display:inline-flex;align-items:center;gap:7px;padding:10px 16px;border-radius:11px;border:0;
   font-family:inherit;font-size:13.5px;font-weight:600;cursor:pointer;transition:.15s;white-space:nowrap}
@@ -136,21 +119,6 @@ body{font-family:'Vazirmatn',sans-serif;background:var(--bg);color:var(--text);m
 .btn-danger:hover{background:rgba(231,76,60,.22)}
 .btn-sm{padding:7px 12px;font-size:12.5px}
 .row-actions{display:flex;gap:8px;flex-wrap:wrap}
-
-/* ── Product cards ── */
-.prod-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:14px}
-.prod{background:var(--bg);border:1px solid var(--line);border-radius:14px;overflow:hidden;transition:.15s}
-.prod:hover{border-color:rgba(31,198,107,.35);transform:translateY(-2px)}
-.prod .ph{height:140px;background:var(--panel2);display:flex;align-items:center;justify-content:center;
-  font-size:40px;color:var(--muted2);position:relative;overflow:hidden}
-.prod .ph img{width:100%;height:100%;object-fit:cover}
-.prod .tag{position:absolute;top:8px;right:8px;font-size:11px;padding:3px 9px;border-radius:8px;font-weight:600}
-.prod .tag.on{background:rgba(31,198,107,.9);color:#04130a}
-.prod .tag.off{background:rgba(231,76,60,.9);color:#fff}
-.prod .body{padding:14px}
-.prod .nm{font-weight:600;font-size:14.5px;margin-bottom:6px}
-.prod .pr{color:var(--green);font-size:13px;margin-bottom:12px}
-.prod .acts{display:flex;gap:6px}
 
 /* ── Tables ── */
 table{width:100%;border-collapse:collapse}
@@ -229,7 +197,6 @@ tr:hover td{background:rgba(31,198,107,.03)}
     </div>
     <nav class="nav" id="nav">
       <a data-page="dashboard" class="active"><span class="em">📊</span> داشبورد</a>
-      <a data-page="catalog"><span class="em">🛍</span> محصولات</a>
       <a data-page="requests"><span class="em">📬</span> درخواست‌ها <span class="badge" id="reqBadge" style="display:none">0</span></a>
       <a data-page="users"><span class="em">👥</span> کاربران</a>
       <a data-page="sections"><span class="em">✏️</span> مدیریت بخش‌ها</a>
@@ -248,12 +215,6 @@ tr:hover td{background:rgba(31,198,107,.03)}
     <!-- داشبورد -->
     <section class="page active" id="page-dashboard">
       <div class="grid stat-grid" id="statGrid"></div>
-    </section>
-
-    <!-- محصولات -->
-    <section class="page" id="page-catalog">
-      <div id="wooBar"></div>
-      <div id="treeWrap"></div>
     </section>
 
     <!-- درخواست‌ها -->
@@ -314,7 +275,7 @@ const toast = (m,err=false)=>{const t=$('#toast');t.textContent=m;t.className='t
 const fa = n => String(n).replace(/\d/g,d=>'۰۱۲۳۴۵۶۷۸۹'[d]);
 
 // ── Navigation ──
-const titles={dashboard:['داشبورد','نمای کلی فروشگاه'],catalog:['محصولات','مدیریت دسته‌ها و محصولات'],
+const titles={dashboard:['داشبورد','نمای کلی فروشگاه'],
   requests:['درخواست‌ها','درخواست‌های خرید کاربران'],users:['کاربران','مدیریت کاربران ربات'],
   sections:['مدیریت بخش‌ها','محتوای منوی ربات'],workhours:['ساعت کاری','تنظیم ساعات کاری فروشگاه'],
   settings:['تنظیمات','تنظیمات نمایش ربات']};
@@ -335,76 +296,10 @@ document.querySelectorAll('#nav a[data-page]').forEach(a=>{
 async function loadDash(){
   const d=await api('/api/dashboard');
   const cards=[['کل کاربران',d.total,'👥'],['عضو امروز',d.new_today,'🆕'],['فعال امروز',d.today,'📅'],
-    ['فعال هفته',d.week,'📆'],['محصولات',d.products,'🛍'],['دسته‌ها',d.categories,'📁'],
-    ['درخواست جدید',d.reqs_new,'📬'],['بلاک‌شده',d.blocked,'🚫']];
+    ['فعال هفته',d.week,'📆'],['درخواست جدید',d.reqs_new,'📬'],['بلاک‌شده',d.blocked,'🚫']];
   $('#statGrid').innerHTML=cards.map(c=>`<div class="stat"><span class="em">${c[2]}</span><div class="lbl">${c[0]}</div><div class="num">${fa(c[1])}</div></div>`).join('');
   if(d.reqs_new>0){$('#reqBadge').style.display='flex';$('#reqBadge').textContent=fa(d.reqs_new)}
   else $('#reqBadge').style.display='none';
-}
-
-// ── Catalog (read-only از ووکامرس) ──
-async function loadTree(){
-  const status=await api('/api/woo-status');
-  const bar=$('#wooBar'); const w=$('#treeWrap');
-  if(!status.configured){
-    bar.innerHTML='';
-    w.innerHTML=`<div class="empty"><div class="em">🔌</div>
-      اتصال به سایت تنظیم نشده.<br><span style="font-size:13px;color:var(--muted2)">متغیرهای WOO_URL، WOO_KEY و WOO_SECRET را در تنظیمات سرور وارد کنید.</span></div>`;
-    return;
-  }
-  if(!status.connected){
-    bar.innerHTML='';
-    w.innerHTML=`<div class="empty"><div class="em">⚠️</div>اتصال به سایت برقرار نشد<br><span style="font-size:13px;color:var(--muted2)">${status.message||''}</span><br><br><button class="btn btn-ghost btn-sm" onclick="loadTree()">🔄 تلاش مجدد</button></div>`;
-    return;
-  }
-  bar.innerHTML=`<div class="card" style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:18px">
-    <div style="display:flex;align-items:center;gap:10px"><span style="font-size:22px">🛍</span>
-      <div><b style="font-size:15px">محصولات از سایت</b><div style="font-size:12px;color:var(--muted2)">${status.url||'ووکامرس'}</div></div></div>
-    <div style="margin-inline-start:auto;display:flex;gap:18px;align-items:center;flex-wrap:wrap">
-      <div style="text-align:center"><div style="font-size:20px;font-weight:800;color:var(--green)">${fa(status.products)}</div><div style="font-size:11px;color:var(--muted2)">محصول</div></div>
-      <div style="text-align:center"><div style="font-size:20px;font-weight:800;color:var(--green)">${fa(status.roots)}</div><div style="font-size:11px;color:var(--muted2)">دسته اصلی</div></div>
-      <button class="btn btn-ghost btn-sm" onclick="refreshWoo()">🔄 بروزرسانی</button>
-    </div>
-  </div>
-  <div style="font-size:12.5px;color:var(--muted2);margin:0 4px 14px">💡 برای افزودن یا ویرایش محصول، به پنل وردپرس سایت مراجعه کنید. این‌جا فقط نمایش است.</div>`;
-  const tree=await api('/api/tree');
-  if(!tree.length){w.innerHTML=`<div class="empty"><div class="em">📦</div>دسته‌ای در سایت یافت نشد</div>`;return}
-  w.innerHTML=tree.map(r=>`
-    <div class="tree-root">
-      <div class="tree-head" onclick="this.nextElementSibling.classList.toggle('open')">
-        <span class="ico">${r.icon}</span><span class="nm">${r.name}</span>
-        <span class="meta"><span>${fa(r.subs.length)} زیردسته</span></span>
-      </div>
-      <div class="tree-body">
-        ${r.subs.map(s=>`
-          <div class="sub-row" onclick="openProducts(${s.id},'${s.icon} ${s.name.replace(/'/g,"\\'")}',${r.id})">
-            <span>${s.icon}</span><span class="nm">${s.name}</span>
-            <span class="meta">${fa(s.product_count)} محصول ›</span>
-          </div>`).join('')||'<div style="color:var(--muted2);font-size:13px;padding:8px 4px">زیردسته‌ای نیست</div>'}
-      </div>
-    </div>`).join('');
-}
-
-async function refreshWoo(){
-  await api('/api/woo-refresh',{method:'POST'});
-  toast('در حال دریافت محصولات تازه...');loadTree();
-}
-
-// نمایش محصولات یک زیردسته (فقط‌خواندنی)
-async function openProducts(subId,title,rootId){
-  const prods=await api('/api/products/'+subId);
-  showModal(`
-    <h3>📦 ${title}</h3>
-    <div class="prod-grid">
-      ${prods.length?prods.map(p=>`
-        <div class="prod">
-          <div class="ph">${p.photo_url?`<img src="${p.photo_url}">`:'📱'}<span class="tag ${p.active?'on':'off'}">${p.active?'موجود':'ناموجود'}</span></div>
-          <div class="body">
-            <div class="nm">${p.name}</div><div class="pr">💰 ${p.price}</div>
-            ${p.site_url?`<a class="btn btn-ghost btn-sm" style="width:100%;justify-content:center;text-decoration:none" href="${p.site_url}" target="_blank">🌐 مشاهده در سایت</a>`:''}
-          </div>
-        </div>`).join(''):'<div class="empty" style="grid-column:1/-1"><div class="em">📱</div>محصولی در این زیردسته نیست</div>'}
-    </div>`);
 }
 
 // ── Requests ──
@@ -524,7 +419,7 @@ async function saveWH(){
 }
 
 // ── Settings ──
-const SETTING_LABELS={show_workhours_menu:'نمایش ساعت کاری در منو',show_catalog_menu:'نمایش محصولات در منو',
+const SETTING_LABELS={show_workhours_menu:'نمایش ساعت کاری در منو',
   notify_new_user:'اعلان عضو جدید',store_open:'فروشگاه باز است'};
 async function loadSettings(){
   const s=await api('/api/settings');
@@ -544,7 +439,7 @@ function showModal(html){$('#modalBox').innerHTML=html;$('#modalBg').classList.a
 function closeModal(){$('#modalBg').classList.remove('show')}
 $('#modalBg').onclick=e=>{if(e.target.id==='modalBg')closeModal()};
 
-const loaders={dashboard:loadDash,catalog:loadTree,requests:loadReqs,users:loadUsers,
+const loaders={dashboard:loadDash,requests:loadReqs,users:loadUsers,
   sections:loadSections,workhours:loadWH,settings:loadSettings};
 loadDash();
 setInterval(loadDash,30000);
