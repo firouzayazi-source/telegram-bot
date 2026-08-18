@@ -8,6 +8,7 @@ User=www-data
 WorkingDirectory=/opt/telegram-bot
 EnvironmentFile=/opt/telegram-bot/.env
 Environment=WEB_PORT=8471
+# رمز پنل و بقیه متغیرها در همان EnvironmentFile بالا قرار می‌گیرند
 ExecStart=/opt/telegram-bot/venv/bin/python app.py
 Restart=on-failure
 RestartSec=5

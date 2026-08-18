@@ -215,6 +215,10 @@ tr:hover td{background:rgba(31,198,107,.03)}
     <!-- داشبورد -->
     <section class="page active" id="page-dashboard">
       <div class="grid stat-grid" id="statGrid"></div>
+      <div class="card" id="statsCard" style="margin-top:18px">
+        <h3>📈 بازدید بخش‌های ربات <span class="count" id="statsTotal"></span></h3>
+        <div id="statsBars"></div>
+      </div>
     </section>
 
     <!-- درخواست‌ها -->
@@ -300,6 +304,25 @@ async function loadDash(){
   $('#statGrid').innerHTML=cards.map(c=>`<div class="stat"><span class="em">${c[2]}</span><div class="lbl">${c[0]}</div><div class="num">${fa(c[1])}</div></div>`).join('');
   if(d.reqs_new>0){$('#reqBadge').style.display='flex';$('#reqBadge').textContent=fa(d.reqs_new)}
   else $('#reqBadge').style.display='none';
+  loadStats();
+}
+
+async function loadStats(){
+  const st=await api('/api/stats');
+  $('#statsTotal').textContent=st.total?`مجموع ${fa(st.total)} بازدید`:'';
+  if(!st.rows.length){
+    $('#statsBars').innerHTML='<div style="color:var(--muted2);font-size:13px;padding:10px 2px">هنوز بازدیدی ثبت نشده است.</div>';
+    return;
+  }
+  const top=st.rows[0].count;
+  $('#statsBars').innerHTML=st.rows.map(r=>`
+    <div style="display:flex;align-items:center;gap:12px;padding:9px 2px">
+      <span style="font-size:13.5px;min-width:150px">${r.name}</span>
+      <span style="flex:1;height:8px;background:var(--panel2);border-radius:6px;overflow:hidden">
+        <span style="display:block;height:100%;width:${Math.round(r.count/top*100)}%;background:linear-gradient(90deg,var(--green),var(--green-d))"></span>
+      </span>
+      <span style="font-size:13px;font-weight:700;min-width:44px;text-align:left;font-variant-numeric:tabular-nums">${fa(r.count)}</span>
+    </div>`).join('');
 }
 
 // ── Requests ──
@@ -351,6 +374,7 @@ async function loadSections(){
       <div class="row-actions">
         <button class="btn btn-pri btn-sm" onclick="saveSecText('${s.key}')">💾 ذخیره متن</button>
         <button class="btn btn-ghost btn-sm" onclick="openBtnModal('${s.key}','${s.name}')">🔗 دکمه‌ها (${fa(s.buttons.length)})</button>
+        <button class="btn btn-ghost btn-sm" onclick="openBanModal('${s.key}','${s.name}')">🖼 بنر</button>
       </div>
     </div>`).join('');
 }
@@ -384,6 +408,42 @@ async function addBtn(key,name){
 async function delBtn(key,bid,name){
   await api('/api/section/'+key+'/button/'+bid,{method:'DELETE'});
   toast('دکمه حذف شد');openBtnModal(key,name);loadSections();
+}
+
+// ── بنر بخش‌ها ──
+async function openBanModal(key,name){
+  const secs=await api('/api/sections');
+  const s=secs.find(x=>x.key===key);
+  showModal(`<h3>🖼 بنر ${name}</h3>
+    <div class="filepick" onclick="$('#banFile').click()">
+      ${s.banner_url
+        ? `<img src="${s.banner_url}" alt="بنر فعلی"><div style="margin-top:10px;font-size:12px">برای جایگزینی کلیک کنید</div>`
+        : '📤 برای انتخاب تصویر کلیک کنید<div style="margin-top:6px;font-size:12px">JPG / PNG / WebP</div>'}
+    </div>
+    <input type="file" id="banFile" accept="image/*" style="display:none" onchange="upBanner('${key}','${name}')">
+    ${s.has_banner?`
+    <div style="display:flex;align-items:center;padding:14px 4px;border-top:1px solid var(--line);margin-top:16px">
+      <span style="font-size:14px">نمایش بنر در ربات</span>
+      <label class="switch" style="margin-inline-start:auto"><input type="checkbox" ${s.banner_active?'checked':''} onchange="togBanner('${key}','${name}')"><span class="sl"></span></label>
+    </div>
+    <div class="modal-acts"><button class="btn btn-danger btn-sm" onclick="delBanner('${key}','${name}')">🗑 حذف بنر</button></div>`:''}`);
+}
+async function upBanner(key,name){
+  const f=$('#banFile').files[0]; if(!f) return;
+  const fd=new FormData(); fd.append('photo',f);
+  toast('در حال آپلود…');
+  const r=await api('/api/section/'+key+'/banner',{method:'POST',body:fd});
+  if(r&&r.error){toast(r.error,true);return}
+  toast('بنر آپلود شد');openBanModal(key,name);loadSections();
+}
+async function togBanner(key,name){
+  const r=await api('/api/section/'+key+'/banner-toggle',{method:'PUT'});
+  if(r&&r.error){toast(r.error,true);return}
+  toast(r.active?'بنر فعال شد':'بنر غیرفعال شد');loadSections();
+}
+async function delBanner(key,name){
+  await api('/api/section/'+key+'/banner',{method:'DELETE'});
+  toast('بنر حذف شد');openBanModal(key,name);loadSections();
 }
 
 // ── Workhours ──

@@ -2,7 +2,7 @@
 پنل وب مدیریت استوک لند
 به همان دیتابیس و فایل‌های بات وصل است.
 """
-import os, json, sqlite3, time, secrets, functools, logging
+import os, json, sqlite3, time, secrets, functools, hmac, logging
 from flask import (Flask, request, session, redirect, url_for, jsonify,
                    render_template_string, send_from_directory, abort)
 
@@ -13,17 +13,37 @@ DATA_FILE     = os.path.join(BASE, "data.json")
 WORKHOURS_FILE= os.path.join(BASE, "workhours.json")
 BUTTONS_FILE  = os.path.join(BASE, "buttons.json")
 SETTINGS_FILE = os.path.join(BASE, "settings.json")
+STATS_FILE    = os.path.join(BASE, "stats.json")
 BANNER_FILE   = os.path.join(BASE, "banner.json")
+BANNERMAP_FILE= os.path.join(BASE, "banner_files.json")  # file_id تلگرام → فایل محلی (پیش‌نمایش پنل)
 UPLOAD_DIR    = os.path.join(BASE, "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-PANEL_USER         = os.environ.get("PANEL_USER", "admin")
-PANEL_PASS         = os.environ.get("PANEL_PASS", "stockland")
-
 logger = logging.getLogger("web")
 
+# ── احراز هویت پنل ───────────────────────────────
+# WEB_PASSWORD نام اصلی است؛ PANEL_PASS فقط برای سازگاری با نصب‌های قدیمی
+# خوانده می‌شود. رمز پیش‌فرض عمداً وجود ندارد — پنل روی اینترنت باز است.
+PANEL_USER = (os.environ.get("PANEL_USER") or "admin").strip()
+PANEL_PASS = (os.environ.get("WEB_PASSWORD") or os.environ.get("PANEL_PASS") or "").strip()
+
+if not PANEL_PASS:
+    raise SystemExit(
+        "❌ رمز پنل وب تنظیم نشده است.\n"
+        "   پنل روی اینترنت در دسترس است و بدون رمز بالا نمی‌آید.\n"
+        "   یک رمز قوی ست کنید:\n"
+        "       export WEB_PASSWORD='یک-رمز-قوی'\n"
+        "   (در systemd: Environment=WEB_PASSWORD=...)"
+    )
+
 app = Flask(__name__)
-app.secret_key = os.environ.get("PANEL_SECRET", secrets.token_hex(16))
+# اگر PANEL_SECRET ست نشود، هر ری‌استارت کلید جدید می‌سازد و همه لاگ‌اوت می‌شوند.
+_panel_secret = (os.environ.get("PANEL_SECRET") or "").strip()
+if not _panel_secret:
+    _panel_secret = secrets.token_hex(16)
+    logger.warning("PANEL_SECRET ست نشده — با هر ری‌استارت از پنل خارج می‌شوید. "
+                   "برای رفع: export PANEL_SECRET=$(openssl rand -hex 32)")
+app.secret_key = _panel_secret
 
 # تابعی که bot.py برای آپلود عکس به تلگرام تنظیمش می‌کند (file_id می‌گیرد)
 TG_UPLOADER = None
@@ -33,8 +53,8 @@ def set_tg_uploader(fn):
 SECTION_NAMES = {"welcome":"🏠 خوش‌آمدگویی","1":"🌐 شبکه‌های اجتماعی",
                  "2":"🌐 سایت استوک لند","3":"💰 شرایط اقساط",
                  "4":"📞 پشتیبانی","5":"📍 آدرس فروشگاه",
-                 "workhours":"🕐 ساعت کاری"}
-SECTION_ORDER = ["welcome","1","2","3","4","5","workhours"]
+                 "contact":"📝 درخواست تماس","workhours":"🕐 ساعت کاری"}
+SECTION_ORDER = ["welcome","1","2","3","4","5","contact","workhours"]
 DAY_FA = {"0":"شنبه","1":"یکشنبه","2":"دوشنبه","3":"سه‌شنبه","4":"چهارشنبه","5":"پنجشنبه","6":"جمعه"}
 
 
@@ -67,37 +87,40 @@ def login_required(f):
     return wrap
 
 def _handle_photo(req):
-    """عکس آپلودی را ذخیره می‌کند؛ اگر uploader تلگرام تنظیم شده، file_id می‌گیرد."""
+    """عکس آپلودی را ذخیره و به تلگرام می‌فرستد تا بات هم بتواند نشانش دهد.
+
+    خروجی: file_id تلگرام (یا None اگر آپلود ناموفق بود).
+    """
     if "photo" not in req.files: return None
     f = req.files["photo"]
     if not f or not f.filename: return None
-    ext = os.path.splitext(f.filename)[1].lower() or ".jpg"
+    ext = os.path.splitext(f.filename)[1].lower()
     if ext not in (".jpg",".jpeg",".png",".webp"): ext = ".jpg"
     fname = f"web_{int(time.time())}_{secrets.token_hex(4)}{ext}"
     fpath = os.path.join(UPLOAD_DIR, fname)
     f.save(fpath)
-    # اگر uploader تلگرام موجود است، file_id بگیر تا بات هم بتواند نشان دهد
-    if TG_UPLOADER:
-        try:
-            fid = TG_UPLOADER(fpath)
-            if fid:
-                # نگاشت file_id ↔ فایل محلی برای نمایش وب
-                _save_photo_map(fid, fname)
-                return fid
-        except Exception as e:
-            print(f"[web] tg upload failed: {e}")
-    return fname  # fallback: فقط فایل محلی
-
-def _save_photo_map(fid, fname):
-    mp = rj(os.path.join(BASE,"photomap.json"), {})
-    mp[fid] = fname; wj(os.path.join(BASE,"photomap.json"), mp)
+    if not TG_UPLOADER:
+        os.remove(fpath)
+        return None
+    try:
+        fid = TG_UPLOADER(fpath)
+    except Exception as e:
+        logger.error(f"tg upload failed: {e}"); fid = None
+    if not fid:
+        os.remove(fpath)
+        return None
+    # نگاشت file_id ↔ فایل محلی، فقط برای پیش‌نمایش داخل پنل
+    mp = rj(BANNERMAP_FILE, {}); mp[fid] = fname; wj(BANNERMAP_FILE, mp)
+    return fid
 
 @app.get("/uploads/<path:fname>")
 @login_required
 def serve_upload(fname):
-    # اگر file_id تلگرام بود، از نگاشت فایل محلی پیدا کن
-    mp = rj(os.path.join(BASE,"photomap.json"), {})
-    if fname in mp: fname = mp[fname]
+    # ورودی می‌تواند file_id تلگرام باشد → از نگاشت، فایل محلی را پیدا کن
+    mp = rj(BANNERMAP_FILE, {})
+    fname = mp.get(fname, fname)
+    # جلوگیری از path traversal — فقط نام فایل ساده مجاز است
+    if fname != os.path.basename(fname): abort(404)
     if not os.path.exists(os.path.join(UPLOAD_DIR, fname)): abort(404)
     return send_from_directory(UPLOAD_DIR, fname)
 
@@ -114,6 +137,7 @@ def api_sections():
         out.append({"key":k,"name":SECTION_NAMES[k],
                     "text":responses.get(k,""),
                     "has_banner":bool(b.get("file_id")),"banner_active":bool(b.get("active")),
+                    "banner_url":(f"/uploads/{b['file_id']}" if b.get("file_id") else None),
                     "buttons_enabled":bool(sec.get("enabled")),
                     "buttons":sec.get("items",[])})
     return jsonify(out)
@@ -167,6 +191,27 @@ def api_section_banner_toggle(key):
     b["active"] = not b.get("active", False)
     wj(BANNER_FILE, banners)
     return jsonify({"ok":True,"active":b["active"]})
+
+@app.post("/api/section/<key>/banner")
+@login_required
+def api_section_banner_upload(key):
+    if key not in SECTION_NAMES: return jsonify({"error":"بخش نامعتبر"}), 404
+    if not TG_UPLOADER:
+        return jsonify({"error":"آپلود به تلگرام در دسترس نیست — بات در حال اجرا نیست"}), 503
+    fid = _handle_photo(request)
+    if not fid: return jsonify({"error":"آپلود تصویر ناموفق بود"}), 400
+    banners = rj(BANNER_FILE, {})
+    banners[key] = {"file_id": fid, "active": True}
+    wj(BANNER_FILE, banners)
+    return jsonify({"ok":True,"file_id":fid,"active":True})
+
+@app.delete("/api/section/<key>/banner")
+@login_required
+def api_section_banner_delete(key):
+    banners = rj(BANNER_FILE, {})
+    banners[key] = {"file_id":None,"active":False}
+    wj(BANNER_FILE, banners)
+    return jsonify({"ok":True})
 
 # ════════════════════════════════════════════════
 #  API — درخواست‌ها
@@ -230,6 +275,17 @@ def api_dashboard():
     return jsonify({"total":total,"today":today,"week":week,"month":month,"new_today":new_t,
                     "blocked":blocked,"reqs_new":reqs_new,"reqs_total":reqs_total})
 
+@app.get("/api/stats")
+@login_required
+def api_stats():
+    """بازدید هر بخش — از stats.json که بات می‌نویسد."""
+    labels = dict(SECTION_NAMES); labels["wh_page"] = "🕐 ساعت کاری"
+    raw = rj(STATS_FILE, {})
+    rows = [{"key":k,"name":labels.get(k,k),"count":v}
+            for k,v in raw.items() if isinstance(v,int) and v]
+    rows.sort(key=lambda r: -r["count"])
+    return jsonify({"rows":rows,"total":sum(r["count"] for r in rows)})
+
 # ════════════════════════════════════════════════
 #  API — ساعت کاری
 # ════════════════════════════════════════════════
@@ -268,7 +324,10 @@ def login():
 
 @app.post("/login")
 def do_login():
-    if request.form.get("u")==PANEL_USER and request.form.get("p")==PANEL_PASS:
+    # compare_digest تا زمان پاسخ، رمز را لو ندهد
+    ok_u = hmac.compare_digest(request.form.get("u") or "", PANEL_USER)
+    ok_p = hmac.compare_digest(request.form.get("p") or "", PANEL_PASS)
+    if ok_u and ok_p:
         session["auth"]=True; session.permanent=True
         return redirect(url_for("index"))
     return redirect(url_for("login", e="1"))

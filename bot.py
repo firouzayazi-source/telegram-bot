@@ -21,6 +21,10 @@ IRAN_TZ = pytz.timezone("Asia/Tehran")
 
 # ── زمان
 _FA = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
+# ارقام فارسی/عربی → انگلیسی (کاربر ممکن است شماره را با کیبورد فارسی بنویسد)
+FA_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
+CONTACT_DEFAULT_TEXT = ("📝 درخواست تماس\n"
+                        "شماره خود را بگذارید تا همکاران ما در اولین فرصت با شما تماس بگیرند.")
 MONTH_FA = {1:"فروردین",2:"اردیبهشت",3:"خرداد",4:"تیر",5:"مرداد",6:"شهریور",
             7:"مهر",8:"آبان",9:"آذر",10:"دی",11:"بهمن",12:"اسفند"}
 DAY_FA   = {"0":"شنبه","1":"یکشنبه","2":"دوشنبه","3":"سه‌شنبه",
@@ -45,6 +49,7 @@ DEFAULT_MENU = [
     {"key":"2","label":"🌐 سایت استوک لند","order":2,"enabled":True,"width":"half"},
     {"key":"3","label":"💰 شرایط اقساط","order":3,"enabled":True,"width":"half"},
     {"key":"5","label":"📍 آدرس فروشگاه","order":4,"enabled":True,"width":"half"},
+    {"key":"contact","label":"📝 درخواست تماس","order":5,"enabled":True,"width":"full"},
     {"key":"workhours","label":"🕐 ساعت کاری","order":6,"enabled":True,"width":"half"},
     {"key":"4","label":"📞 پشتیبانی","order":7,"enabled":True,"width":"half"},
     {"key":"6","label":"🔖 دکمه ذخیره ۱","order":8,"enabled":False,"width":"half"},
@@ -53,7 +58,7 @@ DEFAULT_MENU = [
 menu_cfg = []
 
 SECTION_NAMES = {"welcome":"🏠 خوش‌آمدگویی",
-                 "workhours":"🕐 ساعت کاری",
+                 "contact":"📝 درخواست تماس","workhours":"🕐 ساعت کاری",
                  "1":"🌐 شبکه‌های اجتماعی","2":"🌐 سایت استوک لند",
                  "3":"💰 شرایط اقساط","4":"📞 پشتیبانی","5":"📍 آدرس فروشگاه",
                  "6":"🔖 دکمه ذخیره ۱","7":"🔖 دکمه ذخیره ۲"}
@@ -347,6 +352,19 @@ async def new_today():   return await _cnt("SELECT COUNT(*) FROM users WHERE DAT
 async def blk_count():   return await _cnt("SELECT COUNT(*) FROM users WHERE is_blocked=1")
 
 # ── requests db
+async def save_request(uid,username,first_name,phone,topic):
+    """درخواست تماس را ثبت می‌کند. اگر کاربر در ۲۴ ساعت اخیر درخواست داده باشد None."""
+    async with db.execute(
+        "SELECT id FROM requests WHERE user_id=? AND created_at>=datetime('now','-1 day')",
+        (uid,)) as c:
+        if await c.fetchone(): return None   # تکراری
+    cur=await db.execute(
+        "INSERT INTO requests(user_id,username,first_name,phone,product_id,product_name,status,created_at)"
+        " VALUES(?,?,?,?,?,?,?,?)",
+        (uid,username or"",first_name or"",phone,0,topic,"new",gregorian_now()))
+    await db.commit()
+    return cur.lastrowid
+
 async def get_requests(offset=0,limit=25):
     async with db.execute(
         "SELECT id,user_id,username,first_name,phone,product_name,status,created_at FROM requests ORDER BY id DESC LIMIT ? OFFSET ?",
@@ -463,14 +481,13 @@ def admin_menu():
         [InlineKeyboardButton("📊 داشبورد",callback_data="dash"),
          InlineKeyboardButton("👥 کاربران",callback_data="users_menu")],
         [InlineKeyboardButton("📬 درخواست‌ها",callback_data="admin_reqs")],
-
         [InlineKeyboardButton("🕐 ساعت کاری",callback_data="wh_menu"),
          InlineKeyboardButton("📣 پخش همگانی",callback_data="broadcast")],
         [InlineKeyboardButton("⚙️ تنظیمات",callback_data="settings_menu")],
     ])
 
 # ترتیب نمایش بخش‌ها — دقیقاً مطابق منوی کاربر
-SECTION_ORDER = ["welcome","1","2","3","4","5","workhours","6","7"]
+SECTION_ORDER = ["welcome","1","2","3","4","5","contact","workhours","6","7"]
 
 def sections_kb():
     btns=[]; row=[]
@@ -832,7 +849,36 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
                   f"\n🗓  فعال ماه:    {to_fa(m)}   {progress_bar(m,t)}"
                   f"\n{sep}")
             if len(dash)>4000: dash=dash[:3990]+"..."
-            await safe_edit(query.message,dash,reply_markup=admin_menu())
+            await safe_edit(query.message,dash,reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📈 آمار بخش‌ها",callback_data="stats_page")],
+                [InlineKeyboardButton("🔙 پنل اصلی",callback_data="back_to_admin")]]))
+
+        elif data=="stats_page":
+            await query.answer()
+            # نام قابل‌فهم برای هر کلید آماری
+            labels=dict(SECTION_NAMES); labels["wh_page"]="🕐 ساعت کاری"
+            rows=[(labels.get(k,k),v) for k,v in stats.items() if v]
+            rows.sort(key=lambda r:-r[1])
+            sep="─"*22
+            if not rows:
+                txt=f"📈 آمار بخش‌ها\n{sep}\n\nهنوز بازدیدی ثبت نشده است."
+            else:
+                top=rows[0][1]
+                lines=[f"{progress_bar(v,top)}  {to_fa(v)}  {name}" for name,v in rows]
+                txt=(f"📈 آمار بخش‌ها — {shamsi_now()}\n{sep}\n"
+                     + "\n".join(lines)
+                     + f"\n{sep}\n📊 مجموع بازدید: {to_fa(sum(v for _,v in rows))}")
+            if len(txt)>4000: txt=txt[:3990]+"..."
+            await safe_edit(query.message,txt,reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🗑 صفر کردن آمار",callback_data="stats_reset")],
+                [InlineKeyboardButton("🔙 داشبورد",callback_data="dash")]]))
+
+        elif data=="stats_reset":
+            stats.clear(); await save_stats()
+            await query.answer("✅ آمار صفر شد",show_alert=True)
+            await safe_edit(query.message,"📈 آمار بخش‌ها\n\nآمار صفر شد.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔙 داشبورد",callback_data="dash")]]))
 
         elif data=="broadcast":
             await query.answer()
@@ -1250,9 +1296,11 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     user=update.effective_user; text=update.message.text.strip()
     await save_user(user)
     if user.id != ADMIN_ID:
-        _s=spam_check(user.id)
-        if _s=='block': return
-        if _s=='warn': return await update.message.reply_text("🐢 لطفاً آرام‌تر پیام دهید.")
+        # حین ثبت شماره تماس، spam block اعمال نشود تا درخواست گم نشود
+        if ctx.user_data.get("mode")!="req_phone":
+            _s=spam_check(user.id)
+            if _s=='block': return
+            if _s=='warn': return await update.message.reply_text("🐢 لطفاً آرام‌تر پیام دهید.")
         if await is_blocked(user.id): return
     if text=="❌ لغو عملیات":
         ctx.user_data.clear(); return await update.message.reply_text("❌ لغو شد.",reply_markup=main_menu())
@@ -1328,6 +1376,33 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             ctx.user_data.pop("mode",None); workhours["msg_closed"]=text; await save_workhours()
             await update.message.reply_text("✅",reply_markup=main_menu()); return
 
+    # ════ درخواست تماس — دریافت شماره ════
+    if mode=="req_phone":
+        digits=text.replace("-","").replace(" ","").replace("+","")
+        digits=digits.translate(FA_DIGITS)
+        if not digits.isdigit() or not 10<=len(digits)<=13:
+            await update.message.reply_text(
+                "❌ شماره معتبر نیست. مثال: ۰۹۱۲۳۴۵۶۷۸۹\nدوباره وارد کنید:",
+                reply_markup=cancel_menu()); return
+        ctx.user_data.pop("mode",None)
+        rid=await save_request(user.id,user.username,user.first_name,digits,"درخواست تماس")
+        if rid is None:
+            await update.message.reply_text(
+                "⚠️ شما در ۲۴ ساعت گذشته درخواست ثبت کرده‌اید.\nپشتیبانی در حال بررسی است. 🙏",
+                reply_markup=main_menu()); return
+        try:
+            req_kb=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ پیگیری شد",callback_data=f"rq_done_{rid}"),
+                 InlineKeyboardButton("💬 پیام به کاربر",callback_data=f"rq_msg_{user.id}")]])
+            await ctx.bot.send_message(ADMIN_ID,
+                f"📝 درخواست تماس جدید!\n📞 {digits}\n"
+                f"👤 {user.first_name or'—'} | {'@'+user.username if user.username else'—'}\n🆔 {user.id}",
+                reply_markup=req_kb)
+        except Exception as e: logger.error(f"req notify: {e}")
+        await update.message.reply_text(
+            "✅ درخواست شما ثبت شد!\nپشتیبانی به زودی با شما تماس می‌گیرد. 🙏",
+            reply_markup=main_menu()); return
+
     # ════ user menu ════
     # تشخیص دکمه از روی label (که ممکن است ادمین تغییرش داده باشد)
     pressed = next((m for m in menu_cfg if m["label"]==text and m.get("enabled",True)), None)
@@ -1341,6 +1416,18 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         if len(msg)>4000: msg=msg[:3990]+"..."
         kb=InlineKeyboardMarkup([[InlineKeyboardButton("📆 ساعت کار هفتگی مجموعه",callback_data="wh_weekly")]])
         await send_banner(update.message,msg,"workhours",kb=kb); return
+
+    if mkey=="contact":
+        await record_stat("contact")
+        if not is_open():
+            await update.message.reply_text(
+                "🔴 فروشگاه در حال حاضر بسته است.\n"
+                "لطفاً در ساعات کاری دوباره تلاش کنید تا سریع‌تر پاسخ بگیرید.",
+                reply_markup=main_menu()); return
+        intro=responses.get("contact") or CONTACT_DEFAULT_TEXT
+        ctx.user_data["mode"]="req_phone"
+        await send_banner(update.message,f"{intro}\n\n📞 شماره تماس خود را وارد کنید:",
+                          "contact",kb=cancel_menu()); return
 
     # بخش‌های متنی (۱ تا ۵)
     if mkey and mkey in MENU_ITEMS:
