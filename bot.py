@@ -130,19 +130,19 @@ def is_open():
 
 def wh_today_block():
     if not workhours.get("enabled",True): return None
-    now=datetime.now(IRAN_TZ); j=jdatetime.datetime.fromgregorian(datetime=now)
+    j=jdatetime.datetime.fromgregorian(datetime=datetime.now(IRAN_TZ))
     wd=str(j.weekday()); day=workhours.get("schedule",{}).get(wd,{})
-    opened=is_open()
-    status=workhours.get("msg_open","✅ باز") if opened else workhours.get("msg_closed","🔴 بسته")
-    oi=["☀️","🌙","🌃","🕯"]; ci=["⚫️"]*4
-    sl=["شیفت اول","شیفت دوم","شیفت سوم","شیفت چهارم"]
-    lines=["━"*15,"🏪 وضعیت فروشگاه",f"📅 امروز {DAY_FA.get(wd,'')}",""]
-    if not day.get("open"): lines.append("❌ امروز تعطیل است")
+    lines=[status_line() or "",""]
+    lines.append(f"📅 امروز {DAY_FA.get(wd,'')}")
+    if not day.get("open"):
+        lines.append("امروز تعطیل هستیم.")
     else:
-        icons=oi if opened else ci
-        for i,s in enumerate(day.get("shifts",[])):
-            lines.append(f"{icons[i] if i<len(icons) else '🕐'} {sl[i] if i<len(sl) else ''}   {to_fa(s['from'])} — {to_fa(s['to'])}")
-    lines+=["",status,"━"*15]; return "\n".join(lines)
+        icons=["🌅","🌇","🌃","🕯"]
+        for i,sh in enumerate(day.get("shifts",[])):
+            if not valid_shift(sh): continue
+            mark="🟢" if in_shift(datetime.now(IRAN_TZ).strftime("%H:%M"),sh) else (icons[i] if i<len(icons) else "🕐")
+            lines.append(f"{mark} {to_fa(sh['from'])} تا {to_fa(sh['to'])}")
+    return "\n".join(x for x in lines if x is not None).strip()
 
 def wh_full_table():
     rows=[]
@@ -180,10 +180,42 @@ def normalize_url(text):
     if not t.lower().startswith(("http://","https://")): t="https://"+t
     return t if _URL_RE.match(t) and len(t)<=2048 else None
 
-def build_msg(title,content,sec_key):
-    lines=[f"✦ {title}","",content]
-    msg="\n".join(lines)
-    return msg[:4000]+"..." if len(msg)>4000 else msg
+# ════════════════════════════════════════════════
+#  زبان بصری ربات — یک قالب واحد برای همه‌ی پیام‌ها
+# ════════════════════════════════════════════════
+HR   = "━━━━━━━━━━━━━━━"
+CAP_LIMIT  = 1024      # سقف caption عکس در تلگرام
+TEXT_LIMIT = 4096      # سقف متن پیام
+
+def esc(t): return html.escape(str(t or ""))
+
+def _fit(t,limit):
+    if len(t)<=limit: return t
+    cut=t[:limit-2].rsplit("\n",1)[0]
+    return (cut or t[:limit-2])+"…"
+
+def build_msg(title,content,sec_key=None,limit=TEXT_LIMIT):
+    """قالب استاندارد: عنوان پررنگ، خط جداکننده، متن.
+
+    خروجی HTML است؛ محتوای ادمین escape می‌شود تا کاراکترهایی مثل < پیام را
+    نشکنند.
+    """
+    body=esc(content).strip()
+    return _fit(f"<b>{esc(title)}</b>\n{HR}\n{body}" if body else f"<b>{esc(title)}</b>",limit)
+
+def status_line():
+    """نوار وضعیت زنده — «الان بازیم یا نه» مهم‌ترین چیزی است که مشتری می‌پرسد."""
+    if not get_setting("store_open"): return "🔴 فروشگاه موقتاً بسته است"
+    if not workhours.get("enabled",True): return None
+    j=jdatetime.datetime.fromgregorian(datetime=datetime.now(IRAN_TZ))
+    day=workhours.get("schedule",{}).get(str(j.weekday()),{})
+    if is_open():
+        now=datetime.now(IRAN_TZ).strftime("%H:%M")
+        end=next((sh["to"] for sh in day.get("shifts",[]) if in_shift(now,sh)),None)
+        return f"🟢 هم‌اکنون باز هستیم" + (f" · تا {to_fa(end)}" if end else "")
+    if not day.get("open"): return "🔴 امروز تعطیل هستیم"
+    nxt=next((sh["from"] for sh in day.get("shifts",[]) if sh.get("from","")>datetime.now(IRAN_TZ).strftime("%H:%M")),None)
+    return "🔴 هم‌اکنون بسته است" + (f" · بازگشایی {to_fa(nxt)}" if nxt else "")
 
 def progress_bar(v,t,n=8):
     if t==0: return "░"*n
@@ -549,15 +581,33 @@ def _build_main_menu():
 def cancel_menu(): return ReplyKeyboardMarkup([["❌ لغو عملیات"]],resize_keyboard=True)
 
 # یکپارچه برای تمام بخش‌ها — support_kb حذف شد (تکراری بود)
-def user_sec_kb(key):
+def section_links(key):
+    """لینک‌های نهایی یک بخش: دکمه‌های دستیِ ادمین + لینک‌های خودِ متن.
+
+    لینک داخل متن خودکار دکمه می‌شود — نه لینک آبیِ خام در پیام. ادمین
+    لازم نیست کاری بکند؛ فقط لینک را در متن بنویسد.
+    """
+    out=[]; seen=set()
     sec=get_sec_btns(key)
-    if not sec.get("enabled",False): return None
-    items=[x for x in sec.get("items",[]) if x.get("url")]
-    if not items: return None
+    if sec.get("enabled",True):
+        for it in sec.get("items",[]):
+            u=(it.get("url") or "").strip()
+            if not u or u.rstrip("/").lower() in seen: continue
+            seen.add(u.rstrip("/").lower()); out.append((it.get("title") or "🔗 لینک",u))
+    for title,u in extract_links(responses.get(key,"") if responses else ""):
+        if u.rstrip("/").lower() in seen: continue
+        seen.add(u.rstrip("/").lower()); out.append((title,u))
+    return out
+
+def user_sec_kb(key,home=False):
+    links=section_links(key)
     btns=[]; row=[]
-    for i,it in enumerate(items):
-        row.append(InlineKeyboardButton(it["title"],url=it["url"]))
-        if len(row)==2 or i==len(items)-1: btns.append(row); row=[]
+    for i,(title,url) in enumerate(links):
+        row.append(InlineKeyboardButton(title,url=url))
+        # لینک‌های کوتاه دوتایی، بلندها تک‌ردیفه — چیدمان تمیزتر
+        if len(row)==2 or len(title)>18 or i==len(links)-1:
+            btns.append(row); row=[]
+    if row: btns.append(row)
     return InlineKeyboardMarkup(btns) if btns else None
 
 # ── admin keyboards
@@ -905,21 +955,28 @@ def _rstrip_arrows(t):
     return t.rstrip()
 
 def _strip_urls(text,url_re):
-    """لینک‌های منطبق و خط‌هایی که فقط به آن‌ها اشاره می‌کردند را برمی‌دارد."""
+    """لینک‌های منطبق و هر چیزی که فقط به آن‌ها اشاره می‌کرد را برمی‌دارد."""
     if not text or not url_re.search(text): return text
+
+    def _is_label(t):
+        """برچسب کوتاهی که فقط نام لینک بوده — نه یک جمله‌ی واقعی."""
+        return len(t)<=22 and not t.rstrip().endswith((".","،","!","؟",":"))
+
     out=[]
     for line in text.splitlines():
         had_url=bool(url_re.search(line))
         cleaned=url_re.sub("",line).strip()
-        if not cleaned:
-            continue                                    # خطی که فقط لینک بود
+        # خطی که جز لینک چیزی نداشت (یا فقط «🔗» از آن مانده)
+        if had_url and (not cleaned or not any(ch.isalnum() for ch in cleaned)):
+            # برچسبِ بالای آن («📸 Instagram») هم مرجعی ندارد — نام روی
+            # خودِ دکمه نوشته شده است.
+            if out and _is_label(out[-1]): out.pop()
+            continue
+        if not cleaned: continue
         low=cleaned.lower()
         if any(a in cleaned for a in _ARROWS) and any(w in low for w in _MAP_WORDS):
             continue                                    # اشاره‌گرِ بی‌مرجع
         if had_url:
-            # خطی که بعد از حذف لینک هیچ حرف/عددی ندارد (مثل «🔗» تنها)
-            if not any(ch.isalnum() for ch in cleaned):
-                continue
             bare=cleaned.rstrip(" :：-–—»>|،,").strip()
             if not bare or (len(cleaned)<=25 and cleaned[-1] in ":：-–—»>|"):
                 continue                                # برچسب معلق
@@ -969,11 +1026,11 @@ def extract_links(text):
     return out
 
 def strip_button_links(text,key):
-    """لینک‌هایی که برای این بخش دکمه شده‌اند از متن پنهان می‌شوند —
-    دکمه جای لینک آبی را گرفته، نگه داشتن هر دو فقط شلوغی است."""
-    sec=buttons.get(key) or {}
-    if not sec.get("enabled"): return text
-    urls=[x.get("url","") for x in sec.get("items",[]) if x.get("url")]
+    """هر لینکی که دکمه شده از متن پنهان می‌شود — دکمه جای لینک آبی را
+    گرفته و نگه داشتن هر دو فقط شلوغی است. غیرمخرب: متن اصلی می‌ماند."""
+    urls=[u for _,u in section_links(key)]
+    # لینک‌هایی که در خود متن بودند هم باید بروند حتی اگر شکل کوتاه نوشته شده‌اند
+    urls+= [m.group(0) for m in _ANY_URL_RE.finditer(text or "")]
     if not urls: return text
     parts=[]
     for u in urls:
@@ -1018,12 +1075,22 @@ async def send_place_preview(msg,key):
                           title=pl.get("title") or SHOP_NAME,
                           address=pl.get("address") or "")
 
+async def typing(msg,photo=False):
+    """نشانگر «در حال نوشتن» — پاسخ زنده‌تر حس می‌شود."""
+    try: await msg.chat.send_action("upload_photo" if photo else "typing")
+    except Exception: pass
+
 async def send_banner(msg,text,key,kb=None):
     b=get_banner(key)
+    await typing(msg,photo=bool(b.get("active") and b.get("file_id")))
     if b.get("active") and b.get("file_id"):
-        try: await msg.reply_photo(photo=b["file_id"],caption=text,reply_markup=kb); return
+        try:
+            await msg.reply_photo(photo=b["file_id"],caption=_fit(text,CAP_LIMIT),
+                                  parse_mode="HTML",reply_markup=kb)
+            return
         except Exception as e: logger.error(f"banner[{key}]: {e}")
-    await msg.reply_text(text,reply_markup=kb)
+    await msg.reply_text(_fit(text,TEXT_LIMIT),parse_mode="HTML",
+                         reply_markup=kb,disable_web_page_preview=True)
 
 # ── broadcast
 _broadcast_active = False
@@ -1228,14 +1295,21 @@ async def cmd_start(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     if get_setting("notify_new_user") and is_new:
         try: await ctx.bot.send_message(ADMIN_ID,f"🆕 کاربر جدید!\n👤 {user.first_name or'—'}\n{'@'+user.username if user.username else'—'}\n🆔 {user.id}")
         except: pass
-    wt=strip_button_links(responses.get("welcome","✨ خوش آمدید"),"welcome")
-    full=build_msg("خوش‌آمدگویی",wt,"welcome")
+    name=(user.first_name or "").strip()
+    wt=strip_button_links(responses.get("welcome","") or "","welcome")
+    head=f"سلام {esc(name)} 👋" if name else "سلام 👋"
+    parts=[f"<b>{head}</b>",f"به <b>{esc(SHOP_NAME)}</b> خوش آمدید",HR]
+    st=status_line()
+    if st: parts.append(st)
+    if wt: parts += ["",esc(wt)]
+    parts += ["","از منوی پایین انتخاب کنید 👇"]
+    full=_fit("\n".join(parts),TEXT_LIMIT)
     # منوی پایین همیشه باید ست شود — تلگرام هر پیام را فقط با یک نوع کیبورد
-    # می‌پذیرد، پس اگر بخش خوش‌آمد دکمه لینک داشته باشد، لینک‌ها جدا می‌روند.
+    # می‌پذیرد، پس اگر بخش خوش‌آمد لینک داشته باشد، لینک‌ها جدا می‌روند.
     await send_banner(update.message,full,"welcome",kb=main_menu())
     links=user_sec_kb("welcome")
     if links:
-        await update.message.reply_text("🔗 لینک‌های مفید:",reply_markup=links)
+        await update.message.reply_text("🔗 دسترسی سریع:",reply_markup=links)
 
 async def cmd_help(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     txt=("ℹ️ راهنمای ربات استوک لند\n"+"─"*18+
@@ -1793,7 +1867,9 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             target_uid=ctx.user_data.pop("admin_msg_uid",None); ctx.user_data.pop("mode",None)
             if not target_uid: await update.message.reply_text("❌ خطا.",reply_markup=main_menu()); return
             try:
-                await ctx.bot.send_message(target_uid,f"📩 پیام از فروشگاه:\n\n{text}")
+                await ctx.bot.send_message(target_uid,
+                    f"<b>📩 پیام از {esc(SHOP_NAME)}</b>\n{HR}\n{esc(text)}",
+                    parse_mode="HTML")
                 await update.message.reply_text("✅ پیام ارسال شد.",reply_markup=main_menu())
             except Forbidden:
                 await mark_left(target_uid)
@@ -1882,10 +1958,9 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     if mkey=="workhours":
         await record_stat("wh_page")
         if not workhours.get("enabled",True): await update.message.reply_text("🕐 ساعت کاری تنظیم نشده.",reply_markup=main_menu()); return
-        wh=wh_today_block() or""
-        msg=f"🕐 ساعت کاری استوک لند\n{wh}"
-        if len(msg)>4000: msg=msg[:3990]+"..."
-        kb=InlineKeyboardMarkup([[InlineKeyboardButton("📆 ساعت کار هفتگی مجموعه",callback_data="wh_weekly")]])
+        wh=wh_today_block() or ""
+        msg=build_msg(text,wh,"workhours")
+        kb=InlineKeyboardMarkup([[InlineKeyboardButton("📆 برنامه‌ی هفتگی",callback_data="wh_weekly")]])
         await send_banner(update.message,msg,"workhours",kb=kb); return
 
     # بخش‌های متنی (۱ تا ۵)
@@ -1897,7 +1972,9 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         #  جای متن و بنر را می‌گیرد.)
         if place_active(mkey) and await send_place(update.message,mkey,kb=kb):
             return
-        content=strip_button_links(responses.get(mkey,"تنظیم نشده"),mkey)
+        content=strip_button_links(responses.get(mkey,"") or "",mkey)
+        if not content.strip() and section_links(mkey):
+            content="از دکمه‌های زیر استفاده کنید 👇"
         full=build_msg(text,content,mkey)
         await send_banner(update.message,full,mkey,kb=kb); return
 
@@ -1918,16 +1995,16 @@ async def forward_to_admin(update:Update,ctx:ContextTypes.DEFAULT_TYPE,kind=""):
     if msg is None: return False
     try:
         fwd=await ctx.bot.forward_message(ADMIN_ID,msg.chat_id,msg.message_id)
-        head=f"💬 {kind or 'پیام'} از کاربر"
+        uname=f"@{user.username}" if user.username else "—"
         await ctx.bot.send_message(ADMIN_ID,
-            f"{head}\n👤 {user.first_name or'—'} | "
-            f"{'@'+user.username if user.username else'—'}\n🆔 {user.id}",
-            reply_to_message_id=fwd.message_id,
+            f"<b>💬 {esc(kind or 'پیام')} از مشتری</b>\n{HR}\n"
+            f"👤 {esc(user.first_name or '—')}  ·  {esc(uname)}\n🆔 <code>{user.id}</code>",
+            parse_mode="HTML",reply_to_message_id=fwd.message_id,
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("💬 پاسخ",callback_data=f"rq_msg_{user.id}")]]))
         await msg.reply_text(
-            "✅ پیام شما برای پشتیبانی ارسال شد.\nبه‌زودی پاسخ می‌دهیم. 🙏",
-            reply_markup=main_menu())
+            "<b>✅ پیام شما دریافت شد</b>\n"+HR+"\nهمکاران ما به‌زودی پاسخ می‌دهند. 🙏",
+            parse_mode="HTML",reply_markup=main_menu())
         return True
     except Exception as e:
         logger.error(f"forward user msg: {e}")
