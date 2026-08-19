@@ -721,10 +721,12 @@ def place_text(key):
                 f"🏷 {pl.get('title') or SHOP_NAME}"]
         if pl.get("address"): out.append(f"🗺 {pl['address']}")
         out.append(f"🧭 {pl['lat']:.6f}, {pl['lon']:.6f}")
-        if pl.get("active") and _MAP_URL_RE.search(responses.get(key,"") or ""):
-            out += ["","🧹 لینک نقشه از متن این بخش پنهان می‌شود چون کارت نقشه"
-                       " جایش را گرفته. (متن اصلی دست‌نخورده است؛ با غیرفعال‌کردن"
-                       " لوکیشن، لینک برمی‌گردد.)"]
+        if pl.get("active"):
+            out += ["","📌 تا وقتی این لوکیشن فعال است، کاربر **فقط همین کارت**"
+                       " را می‌بیند: نقشه + نام + آدرس + دکمه‌های بخش.",
+                    "متن و بنر این بخش نمایش داده نمی‌شوند (تلگرام اجازه نمی‌دهد"
+                    " نقشه با عکس یا متن در یک پیام باشد).",
+                    "با غیرفعال‌کردن لوکیشن، متن و بنر برمی‌گردند."]
     return "\n".join(out)
 
 def place_kb(key):
@@ -930,23 +932,34 @@ def strip_map_links(text):
         res.append(line)
     return "\n".join(res).strip()
 
-async def send_place(msg,key):
-    """اگر برای این بخش لوکیشن ثبت شده، نقشه‌ی بومی تلگرام را می‌فرستد.
-
-    sendVenue یک کارت نقشه داخل خود تلگرام می‌سازد؛ کاربر بدون خروج از تلگرام
-    پین را می‌بیند و با یک لمس مسیریابی برایش باز می‌شود.
-    """
+def place_active(key):
     pl=places.get(key) or {}
-    if not (pl.get("active") and pl.get("lat") is not None and pl.get("lon") is not None):
-        return
+    return bool(pl.get("active") and pl.get("lat") is not None and pl.get("lon") is not None)
+
+async def send_place(msg,key,kb=None):
+    """کارت نقشه‌ی بومی تلگرام برای این بخش.
+
+    sendVenue نه caption می‌پذیرد نه photo (محدودیت Bot API)، ولی reply_markup
+    می‌پذیرد — پس دکمه‌های خود بخش زیر همین کارت می‌نشینند و همه‌چیز در یک
+    پیام واحد جمع می‌شود: نقشه + نام + آدرس + دکمه‌ها.
+    """
+    if not place_active(key): return False
+    pl=places[key]
     try:
         await msg.reply_venue(latitude=float(pl["lat"]),longitude=float(pl["lon"]),
                               title=pl.get("title") or SHOP_NAME,
-                              address=pl.get("address") or "")
+                              address=pl.get("address") or "",
+                              reply_markup=kb)
+        return True
     except Exception as e:
         logger.error(f"venue[{key}]: {e}")
-        try: await msg.reply_location(latitude=float(pl["lat"]),longitude=float(pl["lon"]))
-        except Exception as e2: logger.error(f"location[{key}]: {e2}")
+        try:
+            await msg.reply_location(latitude=float(pl["lat"]),longitude=float(pl["lon"]),
+                                     reply_markup=kb)
+            return True
+        except Exception as e2:
+            logger.error(f"location[{key}]: {e2}")
+            return False
 
 async def send_place_preview(msg,key):
     pl=places.get(key) or {}
@@ -1806,14 +1819,16 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
 
     # بخش‌های متنی (۱ تا ۵)
     if mkey and mkey in MENU_ITEMS:
-        await record_stat(mkey); content=responses.get(mkey,"تنظیم نشده")
-        pl=places.get(mkey) or {}
-        if pl.get("active") and pl.get("lat") is not None:
-            content=strip_map_links(content)   # کارت نقشه جای لینک را می‌گیرد
-        full=build_msg(text,content,mkey)
+        await record_stat(mkey)
         kb=user_sec_kb(mkey)
-        await send_banner(update.message,full,mkey,kb=kb)
-        await send_place(update.message,mkey); return
+        # لوکیشن فعال → یک کارت واحد: نقشه + نام + آدرس + دکمه‌های بخش.
+        # (تلگرام اجازه نمی‌دهد venue همراه عکس یا caption باشد، پس همین کارت
+        #  جای متن و بنر را می‌گیرد.)
+        if place_active(mkey) and await send_place(update.message,mkey,kb=kb):
+            return
+        content=responses.get(mkey,"تنظیم نشده")
+        full=build_msg(text,content,mkey)
+        await send_banner(update.message,full,mkey,kb=kb); return
 
     # پیام آزاد کاربر — به‌جای «گزینه نامعتبر»، برای ادمین فوروارد می‌شود
     if user.id!=ADMIN_ID and get_setting("forward_user_msgs"):
@@ -1920,9 +1935,10 @@ async def location_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         pl.setdefault("title",SHOP_NAME) or None
         if not pl.get("title"): pl["title"]=SHOP_NAME
         if not pl.get("address"):
-            # اولین خط متن همان بخش به‌عنوان آدرس پیش‌فرض
-            first=(responses.get(key,"") or "").strip().splitlines()
-            pl["address"]=(first[0][:200] if first else "")
+            # متن همان بخش (بدون لینک نقشه) به‌عنوان آدرس پیش‌فرض — چون از این
+            # پس متن جداگانه‌ای ارسال نمی‌شود و همه‌چیز داخل کارت است
+            body=strip_map_links(responses.get(key,"") or "").strip()
+            pl["address"]=" ".join(body.split())[:255]
     ok=await save_places()
     await update.message.reply_text(
         ("✅ لوکیشن ثبت و فعال شد." if ok else "⚠️ ثبت شد ولی روی دیسک ذخیره نشد!")
