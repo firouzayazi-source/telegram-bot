@@ -406,7 +406,8 @@ async def init_db():
         CREATE INDEX IF NOT EXISTS idx_ls ON users(last_seen);
     """)
     for sql in ["ALTER TABLE users ADD COLUMN is_blocked INTEGER DEFAULT 0",
-                "ALTER TABLE users ADD COLUMN has_left INTEGER DEFAULT 0"]:
+                "ALTER TABLE users ADD COLUMN has_left INTEGER DEFAULT 0",
+                "ALTER TABLE users ADD COLUMN source TEXT DEFAULT ''"]:
         try: await db.execute(sql)
         except Exception as e:
             # «ستون تکراری» یعنی مهاجرت قبلاً انجام شده — بقیه خطاها واقعی‌اند
@@ -455,6 +456,26 @@ async def mark_left(uid, left=1):
     await db.execute("UPDATE users SET has_left=? WHERE user_id=?",(left,uid)); await db.commit()
 
 async def left_count(): return await _cnt("SELECT COUNT(*) FROM users WHERE has_left=1")
+
+# برچسب‌های خوانا برای منبع ورود (پارامتر deep-link)
+SOURCE_LABELS = {"insta":"📸 اینستاگرام","instagram":"📸 اینستاگرام","tg":"✈️ تلگرام",
+                 "telegram":"✈️ تلگرام","bale":"💬 بله","ble":"💬 بله","site":"🌐 سایت",
+                 "web":"🌐 سایت","card":"🪧 کارت ویزیت","qr":"🔳 کد QR","shop":"🏪 حضوری"}
+_SRC_RE = __import__("re").compile(r"^[A-Za-z0-9_-]{1,32}$")
+
+async def set_source(uid,src):
+    """منبع ورود فقط یک‌بار ثبت می‌شود — اولین راهی که کاربر از آن آمده."""
+    if not src or not _SRC_RE.match(src): return
+    await db.execute(
+        "UPDATE users SET source=? WHERE user_id=? AND (source IS NULL OR source='')",
+        (src.lower(),uid))
+    await db.commit()
+
+async def source_stats():
+    async with db.execute(
+        "SELECT COALESCE(NULLIF(source,''),'—') s,COUNT(*) c FROM users "
+        "GROUP BY s ORDER BY c DESC") as c:
+        return await c.fetchall()
 
 _block_cache: dict = {}   # uid → (is_blocked: bool, expires: float)
 _BLOCK_CACHE_TTL = 60     # ثانیه — بعد از این مدت مجدداً از DB خوانده می‌شود
@@ -701,6 +722,10 @@ async def stats_text():
          f"📅 فعال امروز: {to_fa(d)}  {progress_bar(d,t)}",
          f"📆 فعال هفته:  {to_fa(w)}  {progress_bar(w,t)}",
          f"🗓 فعال ماه:   {to_fa(m)}  {progress_bar(m,t)}"]
+    srcs=[r for r in await source_stats() if r[0]!="—"]
+    if srcs:
+        out += [sep,"🎯 مشتری‌ها از کجا آمده‌اند"]
+        out += [f"• {SOURCE_LABELS.get(r[0],r[0])}: {to_fa(r[1])}" for r in srcs[:8]]
     labels=dict(SECTION_NAMES); labels["wh_page"]="🕐 ساعت کاری"
     rows=sorted(((labels.get(k,k),v) for k,v in stats.items() if v),key=lambda r:-r[1])
     out += [sep,"📈 بازدید بخش‌ها"]
@@ -1292,6 +1317,8 @@ async def cmd_start(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     async with db.execute("SELECT user_id FROM users WHERE user_id=?",(user.id,)) as c: is_new=(await c.fetchone()) is None
     await save_user(user)
     await mark_left(user.id,0)   # اگر قبلاً ربات را بلاک کرده بود و برگشته، دوباره فعالش کن
+    # t.me/<bot>?start=insta → می‌فهمیم مشتری از کجا آمده (برای خودِ کاربر نامرئی)
+    if getattr(ctx,"args",None): await set_source(user.id,ctx.args[0])
     if get_setting("notify_new_user") and is_new:
         try: await ctx.bot.send_message(ADMIN_ID,f"🆕 کاربر جدید!\n👤 {user.first_name or'—'}\n{'@'+user.username if user.username else'—'}\n🆔 {user.id}")
         except: pass
@@ -1312,12 +1339,17 @@ async def cmd_start(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🔗 دسترسی سریع:",reply_markup=links)
 
 async def cmd_help(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
-    txt=("ℹ️ راهنمای ربات استوک لند\n"+"─"*18+
-         "\n\n• از دکمه‌های منوی پایین استفاده کنید."
-         "\n• برای درخواست تماس، «📝 درخواست تماس» را بزنید و شماره‌تان را بگذارید."
-         "\n• هر سؤالی داشتید همین‌جا بنویسید — پیامتان مستقیم به پشتیبانی می‌رسد."
-         "\n\n/start — شروع دوباره و نمایش منو")
-    await update.message.reply_text(txt,reply_markup=main_menu())
+    st=status_line()
+    body=[]
+    if st: body += [st,""]
+    body += ["از منوی پایین صفحه، بخش موردنظرتان را انتخاب کنید.","",
+             "💬 <b>سؤالی دارید؟</b>",
+             "همین‌جا بنویسید — متن، عکس یا ویس. پیام شما مستقیم به همکاران ما "
+             "می‌رسد و پاسخ را در همین گفتگو می‌گیرید.","",
+             "🔄 /start — نمایش دوباره‌ی منو"]
+    await update.message.reply_text(
+        _fit(f"<b>ℹ️ راهنمای {esc(SHOP_NAME)}</b>\n{HR}\n"+"\n".join(body),TEXT_LIMIT),
+        parse_mode="HTML",reply_markup=main_menu(),disable_web_page_preview=True)
 
 async def cmd_admin(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id!=ADMIN_ID: return await update.message.reply_text("⛔ دسترسی ندارید")
@@ -2163,7 +2195,19 @@ async def post_init(app):
     try:
         await app.bot.set_my_commands([BotCommand("start","شروع و نمایش منو"),
                                        BotCommand("help","راهنما")])
-    except Exception as e: logger.warning(f"set_my_commands: {e}")
+        # چیزی که کاربر پیش از زدن Start می‌بیند
+        await app.bot.set_my_short_description(
+            f"پشتیبانی {SHOP_NAME} — آدرس، ساعت کاری، شبکه‌های اجتماعی و پاسخ به سؤالات شما")
+        await app.bot.set_my_description(
+            f"به پشتیبانی {SHOP_NAME} خوش آمدید 👋\n\n"
+            "اینجا می‌توانید:\n"
+            "• آدرس فروشگاه و موقعیت روی نقشه را ببینید\n"
+            "• از ساعت کاری امروز باخبر شوید\n"
+            "• به سایت و شبکه‌های اجتماعی ما دسترسی داشته باشید\n"
+            "• شرایط خرید اقساطی را بخوانید\n"
+            "• سؤالتان را بپرسید و از همکاران ما پاسخ بگیرید\n\n"
+            "برای شروع دکمه‌ی «Start» را بزنید.")
+    except Exception as e: logger.warning(f"معرفی ربات: {e}")
     logger.info("✅ ربات راه‌اندازی شد")
 
 async def on_error(update:object,ctx:ContextTypes.DEFAULT_TYPE):
