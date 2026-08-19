@@ -2,15 +2,29 @@ import os, json, time, asyncio, logging, aiosqlite, jdatetime, pytz, zipfile, io
 from datetime import datetime, timedelta
 import aiofiles
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
-from telegram.error import Forbidden, BadRequest
+from telegram.error import Forbidden, BadRequest, Conflict
 from telegram.ext import (ApplicationBuilder, CommandHandler, MessageHandler,
                            CallbackQueryHandler, ContextTypes, filters)
 
 os.environ.pop("HTTP_PROXY", None); os.environ.pop("HTTPS_PROXY", None)
 os.environ.pop("ALL_PROXY", None); os.environ["NO_PROXY"] = "*"
 
-TOKEN = os.environ["BOT_TOKEN"].strip()
-ADMIN_ID = int(os.environ["ADMIN_ID"].strip())
+def _env(name):
+    v = (os.environ.get(name) or "").strip()
+    if not v:
+        raise SystemExit(
+            f"❌ متغیر محیطی {name} تنظیم نشده است.\n"
+            f"   فایل .env کنار bot.py را بسازید و مقداردهی کنید:\n"
+            f"       BOT_TOKEN=...\n"
+            f"       ADMIN_ID=...\n"
+            f"   (در systemd باید EnvironmentFile=/opt/telegram-bot/.env باشد)")
+    return v
+
+TOKEN = _env("BOT_TOKEN")
+try:
+    ADMIN_ID = int(_env("ADMIN_ID"))
+except ValueError:
+    raise SystemExit("❌ ADMIN_ID باید عدد باشد (آیدی عددی تلگرام، نه یوزرنیم).")
 DATA_FILE = "data.json"; DB_FILE = "users.db"; BANNER_FILE = "banner.json"
 WORKHOURS_FILE = "workhours.json"; BUTTONS_FILE = "buttons.json"
 MENU_FILE = "menu.json"; BACKUPS_FILE = "backups.json"
@@ -1573,6 +1587,11 @@ async def post_init(app):
 
 async def on_error(update:object,ctx:ContextTypes.DEFAULT_TYPE):
     """هر خطای گرفته‌نشده — به ادمین گزارش می‌شود و کاربر بی‌پاسخ نمی‌ماند."""
+    if isinstance(ctx.error,Conflict):
+        logger.error("⛔ Conflict — یک نسخه دیگر از همین ربات هم‌زمان در حال اجراست. "
+                     "با `systemctl status telegram-bot` و `pgrep -af bot.py` بررسی کنید "
+                     "و نسخه اضافی را ببندید.")
+        return
     logger.error("خطای گرفته‌نشده:",exc_info=ctx.error)
     # ۱) کاربر بی‌پاسخ نماند
     try:
