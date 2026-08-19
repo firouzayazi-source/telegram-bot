@@ -38,8 +38,6 @@ IRAN_TZ = pytz.timezone("Asia/Tehran")
 _FA = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
 # ارقام فارسی/عربی → انگلیسی (کاربر ممکن است شماره را با کیبورد فارسی بنویسد)
 FA_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
-CONTACT_DEFAULT_TEXT = ("📝 درخواست تماس\n"
-                        "شماره خود را بگذارید تا همکاران ما در اولین فرصت با شما تماس بگیرند.")
 MONTH_FA = {1:"فروردین",2:"اردیبهشت",3:"خرداد",4:"تیر",5:"مرداد",6:"شهریور",
             7:"مهر",8:"آبان",9:"آذر",10:"دی",11:"بهمن",12:"اسفند"}
 DAY_FA   = {"0":"شنبه","1":"یکشنبه","2":"دوشنبه","3":"سه‌شنبه",
@@ -64,7 +62,6 @@ DEFAULT_MENU = [
     {"key":"2","label":"🌐 سایت استوک لند","order":2,"enabled":True,"width":"half"},
     {"key":"3","label":"💰 شرایط اقساط","order":3,"enabled":True,"width":"half"},
     {"key":"5","label":"📍 آدرس فروشگاه","order":4,"enabled":True,"width":"half"},
-    {"key":"contact","label":"📝 درخواست تماس","order":5,"enabled":True,"width":"full"},
     {"key":"workhours","label":"🕐 ساعت کاری","order":6,"enabled":True,"width":"half"},
     {"key":"4","label":"📞 پشتیبانی","order":7,"enabled":True,"width":"half"},
     {"key":"6","label":"🔖 دکمه ذخیره ۱","order":8,"enabled":False,"width":"half"},
@@ -73,7 +70,7 @@ DEFAULT_MENU = [
 menu_cfg = []
 
 SECTION_NAMES = {"welcome":"🏠 خوش‌آمدگویی",
-                 "contact":"📝 درخواست تماس","workhours":"🕐 ساعت کاری",
+                 "workhours":"🕐 ساعت کاری",
                  "1":"🌐 شبکه‌های اجتماعی","2":"🌐 سایت استوک لند",
                  "3":"💰 شرایط اقساط","4":"📞 پشتیبانی","5":"📍 آدرس فروشگاه",
                  "6":"🔖 دکمه ذخیره ۱","7":"🔖 دکمه ذخیره ۲"}
@@ -271,6 +268,7 @@ async def save_buttons(): await _wj(BUTTONS_FILE,buttons)
 
 async def load_menu():
     global menu_cfg
+    invalidate_menu_cache()
     menu_cfg = await _rj(MENU_FILE, list)
     if not menu_cfg:
         menu_cfg = [dict(m) for m in DEFAULT_MENU]; await save_menu()
@@ -290,7 +288,9 @@ async def load_menu():
             m.setdefault("width","half")
         if dropped: await save_menu()
 
-async def save_menu(): await _wj(MENU_FILE, menu_cfg)
+async def save_menu():
+    invalidate_menu_cache()
+    return await _wj(MENU_FILE, menu_cfg)
 
 async def reset_menu():
     global menu_cfg
@@ -363,14 +363,7 @@ async def init_db():
         CREATE TABLE IF NOT EXISTS users(
             user_id INTEGER PRIMARY KEY,username TEXT,first_name TEXT,
             joined_at TEXT,last_seen TEXT,is_blocked INTEGER DEFAULT 0);
-        CREATE TABLE IF NOT EXISTS requests(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER,
-            username TEXT,first_name TEXT,phone TEXT,
-            product_id INTEGER,product_name TEXT,
-            status TEXT DEFAULT 'new',created_at TEXT);
         CREATE INDEX IF NOT EXISTS idx_ls ON users(last_seen);
-        CREATE INDEX IF NOT EXISTS idx_req_uid ON requests(user_id,product_id,created_at);
-        CREATE INDEX IF NOT EXISTS idx_req_st ON requests(status);
     """)
     for sql in ["ALTER TABLE users ADD COLUMN is_blocked INTEGER DEFAULT 0",
                 "ALTER TABLE users ADD COLUMN has_left INTEGER DEFAULT 0"]:
@@ -401,13 +394,16 @@ async def save_user(u):
     now_ts=time.time()
     if u.id in _seen_uids and now_ts-_seen_uids[u.id]<_SEEN_TTL: return
     now=gregorian_now()
-    # نام ستون‌ها صریح نوشته می‌شود تا افزودن ستون جدید این کوئری را نشکند
+    # یک UPSERT به‌جای INSERT+UPDATE — نصف کردن نوشتن روی مسیر داغ هر پیام.
+    # نام ستون‌ها صریح است تا افزودن ستون جدید این کوئری را نشکند.
     await db.execute(
-        "INSERT OR IGNORE INTO users(user_id,username,first_name,joined_at,last_seen)"
-        " VALUES(?,?,?,?,?)",
+        "INSERT INTO users(user_id,username,first_name,joined_at,last_seen)"
+        " VALUES(?,?,?,?,?)"
+        " ON CONFLICT(user_id) DO UPDATE SET"
+        "   username=excluded.username,"
+        "   first_name=excluded.first_name,"
+        "   last_seen=excluded.last_seen",
         (u.id,u.username or"",u.first_name or"",now,now))
-    await db.execute("UPDATE users SET username=?,first_name=?,last_seen=? WHERE user_id=?",
-        (u.username or"",u.first_name or"",now,u.id))
     await db.commit()
     _seen_uids[u.id]=now_ts
 
@@ -441,15 +437,7 @@ async def search_users(q):
     q_like=f"%{q}%"
     async with db.execute(
         "SELECT user_id,first_name,username,last_seen,is_blocked FROM users WHERE first_name LIKE ? OR username LIKE ? OR CAST(user_id AS TEXT) LIKE ? ORDER BY last_seen DESC LIMIT 15",
-        (q_like,q_like,q_like)) as c: rows=list(await c.fetchall())
-    # جستجو با شماره تلفن در جدول درخواست‌ها
-    if q.replace("-","").replace(" ","").replace("+","").isdigit():
-        async with db.execute(
-            "SELECT DISTINCT r.user_id,u.first_name,u.username,u.last_seen,u.is_blocked FROM requests r JOIN users u ON r.user_id=u.user_id WHERE r.phone LIKE ? LIMIT 5",
-            (q_like,)) as c: phone_rows=await c.fetchall()
-        seen={r[0] for r in rows}
-        rows+=[r for r in phone_rows if r[0] not in seen]
-    return rows[:15]
+        (q_like,q_like,q_like)) as c: return await c.fetchall()
 
 async def get_users_page(offset,limit=15,ft="all"):
     flt={"today":"WHERE DATE(last_seen)=DATE('now','localtime')","week":"WHERE last_seen>=datetime('now','-7 days','localtime')","blocked":"WHERE is_blocked=1"}
@@ -464,32 +452,6 @@ async def week_users():  return await _cnt("SELECT COUNT(*) FROM users WHERE las
 async def month_users(): return await _cnt("SELECT COUNT(*) FROM users WHERE last_seen>=datetime('now','-30 days','localtime')")
 async def new_today():   return await _cnt("SELECT COUNT(*) FROM users WHERE DATE(joined_at)=DATE('now','localtime')")
 async def blk_count():   return await _cnt("SELECT COUNT(*) FROM users WHERE is_blocked=1")
-
-# ── requests db
-async def save_request(uid,username,first_name,phone,topic):
-    """درخواست تماس را ثبت می‌کند. اگر کاربر در ۲۴ ساعت اخیر درخواست داده باشد None."""
-    async with db.execute(
-        "SELECT id FROM requests WHERE user_id=? AND created_at>=datetime('now','-1 day')",
-        (uid,)) as c:
-        if await c.fetchone(): return None   # تکراری
-    cur=await db.execute(
-        "INSERT INTO requests(user_id,username,first_name,phone,product_id,product_name,status,created_at)"
-        " VALUES(?,?,?,?,?,?,?,?)",
-        (uid,username or"",first_name or"",phone,0,topic,"new",gregorian_now()))
-    await db.commit()
-    return cur.lastrowid
-
-async def get_requests(offset=0,limit=25,only_new=False):
-    where = "WHERE status='new' " if only_new else ""
-    async with db.execute(
-        "SELECT id,user_id,username,first_name,phone,product_name,status,created_at FROM requests "
-        f"{where}ORDER BY id DESC LIMIT ? OFFSET ?",
-        (limit,offset)) as c: return await c.fetchall()
-
-async def count_requests(only_new=False):
-    return await _cnt("SELECT COUNT(*) FROM requests" + (" WHERE status='new'" if only_new else ""))
-
-async def done_request(rid): await db.execute("UPDATE requests SET status='done' WHERE id=?",(rid,)); await db.commit()
 
 # ── anti-spam (سیستم سبک — sliding window، بدون DB query، بدون lock)
 _rate:       dict = {}   # uid → [timestamps]
@@ -544,7 +506,19 @@ def spam_check(uid: int) -> str:
 # ════════════════════════════════════════════════
 #  KEYBOARDS
 # ════════════════════════════════════════════════
+_menu_kb_cache = None      # کیبورد منو در هر پیام از نو ساخته می‌شد
+
+def invalidate_menu_cache():
+    global _menu_kb_cache
+    _menu_kb_cache = None
+
 def main_menu():
+    global _menu_kb_cache
+    if _menu_kb_cache is not None: return _menu_kb_cache
+    _menu_kb_cache = _build_main_menu()
+    return _menu_kb_cache
+
+def _build_main_menu():
     # به ترتیب order، با احترام به عرض هر دکمه:
     #   full → یک ردیف کامل | half → کنار دکمه half بعدی
     # نکته RTL: تلگرام لیست را چپ‌به‌راست می‌چیند، پس برای اینکه
@@ -609,8 +583,7 @@ def _nav(*extra, home=True, back=None):
 
 async def admin_home_text():
     """وضعیت لحظه‌ای فروشگاه — مهم‌ترین اعداد بدون نیاز به باز کردن چیزی."""
-    t,d,nt,pend = await asyncio.gather(
-        total_users(), today_users(), new_today(), count_requests(only_new=True))
+    t,d,nt = await asyncio.gather(total_users(), today_users(), new_today())
     opened=is_open()
     sep="─"*20
     lines=[f"👑 پنل مدیریت — {shamsi_now()}", sep]
@@ -627,28 +600,22 @@ async def admin_home_text():
         lines.append("🕐 امروز تعطیل است")
     lines += [sep,
               f"👥 {to_fa(t)} کاربر  ·  🆕 {to_fa(nt)} امروز  ·  📅 {to_fa(d)} فعال امروز"]
-    lines.append(f"📬 {to_fa(pend)} درخواست در انتظار پیگیری" if pend
-                 else "📬 درخواستی در انتظار نیست")
-    return "\n".join(lines), pend
+    return "\n".join(lines)
 
-async def admin_home_kb():
-    pend=await count_requests(only_new=True)
-    reqs=f"📬 درخواست‌ها ({to_fa(pend)})" if pend else "📬 درخواست‌ها"
+def admin_home_kb():
     shop=("🔴 بستن فروشگاه" if get_setting("store_open") else "🟢 باز کردن فروشگاه")
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(reqs,callback_data="admin_reqs"),
-         InlineKeyboardButton("👥 کاربران",callback_data="users_menu")],
+        [InlineKeyboardButton("👥 کاربران",callback_data="users_menu"),
+         InlineKeyboardButton("📊 آمار",callback_data="adm_stats")],
         [InlineKeyboardButton("✏️ محتوای ربات",callback_data="adm_content"),
          InlineKeyboardButton("🕐 ساعت کاری",callback_data="wh_menu")],
         [InlineKeyboardButton("📣 پیام همگانی",callback_data="broadcast"),
-         InlineKeyboardButton("📊 آمار",callback_data="adm_stats")],
+         InlineKeyboardButton("⚙️ تنظیمات",callback_data="settings_menu")],
         [InlineKeyboardButton(shop,callback_data="stg_store_open")],
-        [InlineKeyboardButton("⚙️ تنظیمات",callback_data="settings_menu"),
-         InlineKeyboardButton("🔄 بروزرسانی",callback_data=HOME_CB)],
     ])
 
 async def show_home(msg, edit=True):
-    txt,_=await admin_home_text(); kb=await admin_home_kb()
+    txt=await admin_home_text(); kb=admin_home_kb()
     if edit: await safe_edit(msg,txt,reply_markup=kb)
     else:    await msg.reply_text(txt,reply_markup=kb)
 
@@ -664,9 +631,9 @@ def stats_kb():
 
 async def stats_text():
     """داشبورد و آمار بخش‌ها در یک صفحه — قبلاً دو صفحه جدا بود."""
-    t,d,w,m,nt,bl,lf,rq,rn = await asyncio.gather(
+    t,d,w,m,nt,bl,lf = await asyncio.gather(
         total_users(),today_users(),week_users(),month_users(),new_today(),
-        blk_count(),left_count(),count_requests(),count_requests(only_new=True))
+        blk_count(),left_count())
     sep="─"*20
     out=[f"📊 آمار — {shamsi_now()}",sep,
          f"👥 کل کاربران: {to_fa(t)}",
@@ -675,9 +642,7 @@ async def stats_text():
          f"🆕 عضو امروز:  {to_fa(nt)}",
          f"📅 فعال امروز: {to_fa(d)}  {progress_bar(d,t)}",
          f"📆 فعال هفته:  {to_fa(w)}  {progress_bar(w,t)}",
-         f"🗓 فعال ماه:   {to_fa(m)}  {progress_bar(m,t)}",
-         sep,
-         f"📬 درخواست‌ها: {to_fa(rq)}  ·  در انتظار: {to_fa(rn)}"]
+         f"🗓 فعال ماه:   {to_fa(m)}  {progress_bar(m,t)}"]
     labels=dict(SECTION_NAMES); labels["wh_page"]="🕐 ساعت کاری"
     rows=sorted(((labels.get(k,k),v) for k,v in stats.items() if v),key=lambda r:-r[1])
     out += [sep,"📈 بازدید بخش‌ها"]
@@ -697,7 +662,7 @@ def content_kb():
     ))
 
 # ترتیب نمایش بخش‌ها — دقیقاً مطابق منوی کاربر
-SECTION_ORDER = ["welcome","1","2","3","4","5","contact","workhours","6","7"]
+SECTION_ORDER = ["welcome","1","2","3","4","5","workhours","6","7"]
 
 def sections_kb():
     btns=[]; row=[]
@@ -847,28 +812,6 @@ def udetail_kb(uid,is_bl): return InlineKeyboardMarkup([
     [InlineKeyboardButton("✅ رفع بلاک" if is_bl else "🚫 بلاک",callback_data=f"utog_{uid}")],
     [InlineKeyboardButton("🔙",callback_data="users_menu")]])
 
-def reqs_kb(reqs,offset=0,total=0,only_new=False):
-    f="new" if only_new else "all"
-    # نام و شماره مفیدند — product_name برای همه یکسان است و چیزی اضافه نمی‌کند
-    btns=[[InlineKeyboardButton(f"{'🆕' if r[6]=='new' else '✅'} {r[3] or'—'} — {r[4]}",
-                                callback_data=f"rq_{r[0]}")] for r in reqs]
-    nav=[]
-    if offset>0: nav.append(InlineKeyboardButton("▶️ جدیدتر",callback_data=f"arq_{f}_{offset-25}"))
-    if offset+25<total: nav.append(InlineKeyboardButton("◀️ قدیمی‌تر",callback_data=f"arq_{f}_{offset+25}"))
-    if nav: btns.append(nav)
-    btns.append([InlineKeyboardButton("📋 همه" if only_new else "🆕 فقط جدیدها",
-                                      callback_data=f"arq_{'all' if only_new else 'new'}_0")])
-    btns.append([InlineKeyboardButton("📊 Export CSV",callback_data="export_reqs")])
-    btns.extend(_nav()); return InlineKeyboardMarkup(btns)
-
-def req_kb(rid,status,uid=0):
-    btns=[]
-    if status=="new":
-        btns.append([InlineKeyboardButton("✅ پیگیری شد",callback_data=f"rq_done_{rid}")])
-        if uid: btns.append([InlineKeyboardButton("💬 پیام به کاربر",callback_data=f"rq_msg_{uid}")])
-    else:
-        btns.append([InlineKeyboardButton("☑️ پیگیری شده — بسته شد",callback_data="noop")])
-    btns.append([InlineKeyboardButton("🔙",callback_data="admin_reqs")]); return InlineKeyboardMarkup(btns)
 
 # ── send with banner
 # ── عکس‌ها ───────────────────────────────────────
@@ -1425,95 +1368,10 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             await safe_edit(query.message,f"🔘 {SECTION_NAMES.get(key,key)}",reply_markup=sec_btns_kb(key))
 
         # ── درخواست‌ها
-        elif data=="admin_reqs" or data.startswith("arq_"):
-            await query.answer()
-            only_new=False; offset=0
-            if data.startswith("arq_"):
-                try:
-                    _,f,off=data.split("_",2); only_new=(f=="new"); offset=max(0,int(off))
-                except Exception: only_new=False; offset=0
-            reqs=await get_requests(offset=offset,limit=25,only_new=only_new)
-            total=await count_requests(only_new=only_new)
-            new_total=await count_requests(only_new=True)
-            if not reqs and offset==0:
-                await safe_edit(query.message,
-                    "📋 درخواست جدیدی نیست." if only_new else "📋 درخواستی وجود ندارد.",
-                    reply_markup=reqs_kb([],0,0,only_new)); return
-            rng=f"{to_fa(offset+1)}–{to_fa(min(offset+25,total))}"
-            title="🆕 درخواست‌های جدید" if only_new else "📋 همه درخواست‌ها"
-            await safe_edit(query.message,
-                f"{title}  [{rng} از {to_fa(total)}]\n🆕 در انتظار پیگیری: {to_fa(new_total)}",
-                reply_markup=reqs_kb(reqs,offset,total,only_new))
-
-        elif data=="bc_go":
-            txt=ctx.user_data.pop("bc_text",None); ph=ctx.user_data.pop("bc_photo",None)
-            if txt is None and ph is None:
-                await query.answer("❌ پیامی برای ارسال نیست.",show_alert=True); return
-            await query.answer()
-            await safe_edit(query.message,"📤 در حال ارسال...",reply_markup=None)
-            await broadcast(ctx,txt or "",photo=ph)
-
-        elif data=="bc_no":
-            ctx.user_data.pop("bc_text",None); ctx.user_data.pop("bc_photo",None)
-            await query.answer("لغو شد")
-            await safe_edit(query.message,"↩️ پخش لغو شد — هیچ پیامی ارسال نشد.",
-                            reply_markup=back_admin())
-
         elif data=="broadcast_cancel":
             global _broadcast_cancel
             _broadcast_cancel=True
             await query.answer("🛑 در حال توقف پخش...")
-
-        elif data=="export_reqs":
-            await query.answer()
-            await safe_edit(query.message,"📊 در حال آماده‌سازی فایل CSV...",reply_markup=None)
-            async with db.execute(
-                "SELECT id,product_name,first_name,username,phone,user_id,status,created_at FROM requests ORDER BY id DESC") as c:
-                rows=await c.fetchall()
-            buf=io.StringIO()
-            w=csv.writer(buf)
-            w.writerow(["#","محصول","نام","یوزرنیم","تلفن","آیدی","وضعیت","تاریخ"])
-            for r in rows:
-                w.writerow([r[0],r[1],r[2],r[3] or"-",r[4],r[5],"پیگیری شده" if r[6]=="done" else"جدید",r[7]])
-            fname=f"requests_{shamsi_now().replace(' ','_').replace(':','-')}.csv"
-            await ctx.bot.send_document(ADMIN_ID,
-                document=buf.getvalue().encode("utf-8-sig"),  # BOM برای Excel
-                filename=fname,caption=f"📊 {to_fa(len(rows))} درخواست")
-            await safe_edit(query.message,"✅ فایل CSV ارسال شد.",reply_markup=back_admin())
-
-        elif data.startswith("rq_done_"):
-            rid=int(data[8:])
-            async with db.execute("SELECT user_id,product_name,status FROM requests WHERE id=?",(rid,)) as c:
-                req_row=await c.fetchone()
-            if not req_row:
-                await query.answer("❌ درخواست یافت نشد.",show_alert=True); return
-            if req_row[2]=="done":
-                await query.answer("⚠️ این درخواست قبلاً پیگیری شده است.",show_alert=True)
-                try: await query.message.edit_reply_markup(reply_markup=None)
-                except: pass
-                return
-            await done_request(rid)
-            await query.answer("✅ پیگیری شد",show_alert=False)
-            # تشخیص: از اعلان (notification) یا از پنل مدیریت؟
-            is_notif=query.message.reply_markup and any(
-                btn.callback_data and btn.callback_data.startswith("rq_msg_")
-                for row in query.message.reply_markup.inline_keyboard for btn in row)
-            if is_notif:
-                try: await query.message.edit_reply_markup(reply_markup=None)
-                except: pass
-            else:
-                reqs=await get_requests(limit=25); total=await count_requests()
-                nc=await count_requests(only_new=True)
-                await safe_edit(query.message,
-                    f"📋 درخواست‌ها — ✅ پیگیری شد\n🆕 در انتظار پیگیری: {to_fa(nc)} | کل: {to_fa(total)}",
-                    reply_markup=reqs_kb(reqs,0,total))
-            try:
-                await ctx.bot.send_message(req_row[0],
-                    "✅ درخواست شما پیگیری شد.\nبه زودی با شما تماس خواهیم گرفت. 🙏")
-            except Forbidden:
-                await mark_left(req_row[0])
-                logger.info(f"req_done: کاربر {req_row[0]} ربات را بلاک کرده")
-            except Exception as e: logger.warning(f"req_done notify: {e}")
 
         elif data.startswith("rq_msg_"):
             target_uid=int(data[7:])
@@ -1524,23 +1382,6 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
                 reply_markup=cancel_menu())
 
         elif data=="noop": await query.answer()
-
-        elif data.startswith("rq_"):
-            await query.answer()
-            rid=int(data[3:])
-            async with db.execute("SELECT id,user_id,username,first_name,phone,product_name,status,created_at FROM requests WHERE id=?",(rid,)) as c: r=await c.fetchone()
-            if not r: return
-            st2="🆕 جدید" if r[6]=="new" else"✅ پیگیری شد"
-            sep="─"*20
-            txt=(f"📋 درخواست #{to_fa(r[0])}\n{sep}"
-                 f"\n📱 {r[5]}"
-                 f"\n{sep}"
-                 f"\n👤 {r[3] or'—'}"
-                 f"\n📞 {r[4]}"
-                 f"\n🆔 {r[1]}  {'@'+r[2] if r[2] else ''}"
-                 f"\n⏱ {r[7]}"
-                 f"\n{sep}\n{st2}")
-            await safe_edit(query.message,txt,reply_markup=req_kb(rid,r[6],r[1]))
 
         # ── ساعت کاری
         elif data=="wh_menu":
@@ -1661,11 +1502,9 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     user=update.effective_user; text=update.message.text.strip()
     await save_user(user)
     if user.id != ADMIN_ID:
-        # حین ثبت شماره تماس، spam block اعمال نشود تا درخواست گم نشود
-        if ctx.user_data.get("mode")!="req_phone":
-            _s=spam_check(user.id)
-            if _s=='block': return
-            if _s=='warn': return await update.message.reply_text("🐢 لطفاً آرام‌تر پیام دهید.")
+        _s=spam_check(user.id)
+        if _s=='block': return
+        if _s=='warn': return await update.message.reply_text("🐢 لطفاً آرام‌تر پیام دهید.")
         if await is_blocked(user.id): return
     if text=="❌ لغو عملیات":
         ctx.user_data.clear(); return await update.message.reply_text("❌ لغو شد.",reply_markup=main_menu())
@@ -1778,33 +1617,6 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             ctx.user_data.pop("mode",None); workhours["msg_closed"]=text; await save_workhours()
             await update.message.reply_text("✅",reply_markup=main_menu()); return
 
-    # ════ درخواست تماس — دریافت شماره ════
-    if mode=="req_phone":
-        digits=text.replace("-","").replace(" ","").replace("+","")
-        digits=digits.translate(FA_DIGITS)
-        if not digits.isdigit() or not 10<=len(digits)<=13:
-            await update.message.reply_text(
-                "❌ شماره معتبر نیست. مثال: ۰۹۱۲۳۴۵۶۷۸۹\nدوباره وارد کنید:",
-                reply_markup=cancel_menu()); return
-        ctx.user_data.pop("mode",None)
-        rid=await save_request(user.id,user.username,user.first_name,digits,"درخواست تماس")
-        if rid is None:
-            await update.message.reply_text(
-                "⚠️ شما در ۲۴ ساعت گذشته درخواست ثبت کرده‌اید.\nپشتیبانی در حال بررسی است. 🙏",
-                reply_markup=main_menu()); return
-        try:
-            req_kb=InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ پیگیری شد",callback_data=f"rq_done_{rid}"),
-                 InlineKeyboardButton("💬 پیام به کاربر",callback_data=f"rq_msg_{user.id}")]])
-            await ctx.bot.send_message(ADMIN_ID,
-                f"📝 درخواست تماس جدید!\n📞 {digits}\n"
-                f"👤 {user.first_name or'—'} | {'@'+user.username if user.username else'—'}\n🆔 {user.id}",
-                reply_markup=req_kb)
-        except Exception as e: logger.error(f"req notify: {e}")
-        await update.message.reply_text(
-            "✅ درخواست شما ثبت شد!\nپشتیبانی به زودی با شما تماس می‌گیرد. 🙏",
-            reply_markup=main_menu()); return
-
     # ════ user menu ════
     # تشخیص دکمه از روی label (که ممکن است ادمین تغییرش داده باشد)
     pressed = next((m for m in menu_cfg if m["label"]==text and m.get("enabled",True)), None)
@@ -1818,18 +1630,6 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         if len(msg)>4000: msg=msg[:3990]+"..."
         kb=InlineKeyboardMarkup([[InlineKeyboardButton("📆 ساعت کار هفتگی مجموعه",callback_data="wh_weekly")]])
         await send_banner(update.message,msg,"workhours",kb=kb); return
-
-    if mkey=="contact":
-        await record_stat("contact")
-        if not is_open():
-            await update.message.reply_text(
-                "🔴 فروشگاه در حال حاضر بسته است.\n"
-                "لطفاً در ساعات کاری دوباره تلاش کنید تا سریع‌تر پاسخ بگیرید.",
-                reply_markup=main_menu()); return
-        intro=responses.get("contact") or CONTACT_DEFAULT_TEXT
-        ctx.user_data["mode"]="req_phone"
-        await send_banner(update.message,f"{intro}\n\n📞 شماره تماس خود را وارد کنید:",
-                          "contact",kb=cancel_menu()); return
 
     # بخش‌های متنی (۱ تا ۵)
     if mkey and mkey in MENU_ITEMS:
@@ -1998,7 +1798,17 @@ async def post_shutdown(app):
     logger.info("✅ shutdown clean")
 
 def main():
-    app=ApplicationBuilder().token(TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
+    app=(ApplicationBuilder().token(TOKEN)
+         .post_init(post_init).post_shutdown(post_shutdown)
+         # پیش‌فرض PTB آپدیت‌ها را «یکی‌یکی» پردازش می‌کند: اگر ارسال عکس یک
+         # کاربر یک ثانیه طول بکشد، بقیه‌ی کاربران پشتش صف می‌کشند. با موازی
+         # کردن، هر کاربر مستقل از بقیه پاسخ می‌گیرد.
+         .concurrent_updates(32)
+         # استخر اتصال بزرگ‌تر تا ارسال‌های هم‌زمان پشت هم قفل نشوند
+         .connection_pool_size(64).pool_timeout(20.0)
+         .connect_timeout(10.0).read_timeout(20.0).write_timeout(20.0)
+         .get_updates_read_timeout(35.0)
+         .build())
     app.add_handler(CommandHandler("start",cmd_start))
     app.add_handler(CommandHandler("help",cmd_help))
     app.add_handler(CommandHandler("admin",cmd_admin))
