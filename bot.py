@@ -312,8 +312,24 @@ async def init_db():
     for sql in ["ALTER TABLE users ADD COLUMN is_blocked INTEGER DEFAULT 0",
                 "ALTER TABLE users ADD COLUMN has_left INTEGER DEFAULT 0"]:
         try: await db.execute(sql)
-        except: pass
+        except Exception as e:
+            # «ستون تکراری» یعنی مهاجرت قبلاً انجام شده — بقیه خطاها واقعی‌اند
+            if "duplicate column" not in str(e).lower():
+                logger.error(f"مهاجرت دیتابیس ناموفق: {sql} → {e}")
     await db.commit()
+    # تست واقعی نوشتن — بهتر است همین‌جا با پیام واضح بمیریم تا اینکه بعداً
+    # موقع اولین /start کاربر بترکد و ربات ظاهراً «بی‌صدا» شود
+    try:
+        await db.execute("CREATE TABLE IF NOT EXISTS _wtest(x INTEGER)")
+        await db.execute("DROP TABLE IF EXISTS _wtest")
+        await db.commit()
+    except Exception as e:
+        raise SystemExit(
+            f"❌ دیتابیس قابل نوشتن نیست: {e}\n"
+            f"   مسیر: {os.path.abspath(DB_FILE)}\n"
+            f"   کاربرِ اجراکننده‌ی سرویس باید اجازه نوشتن در این پوشه را داشته باشد\n"
+            f"   (SQLite علاوه بر فایل دیتابیس، به نوشتن در خودِ پوشه هم نیاز دارد).\n"
+            f"   رفع سریع:  sudo chown -R $(whoami) {os.path.dirname(os.path.abspath(DB_FILE))}")
 
 _seen_uids: dict = {}   # uid → زمان آخرین save_user
 _SEEN_TTL  = 300        # 5 دقیقه — اگر اخیراً ذخیره شده، skip کن

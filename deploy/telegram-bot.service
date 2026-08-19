@@ -4,9 +4,17 @@ After=network.target
 
 [Service]
 Type=simple
-User=www-data
+# بدون User یعنی root — چون پروژه معمولاً با root در /opt کلون می‌شود و
+# ربات باید در پوشه‌ی خودش بنویسد (users.db، فایل‌های JSON، WAL).
+# اگر می‌خواهید با کاربر غیر root اجرا شود، اول مالکیت را بدهید:
+#     sudo useradd -r -s /usr/sbin/nologin tgbot
+#     sudo chown -R tgbot:tgbot /opt/telegram-bot
+# سپس خط زیر را از حالت کامنت دربیاورید:
+# User=tgbot
 WorkingDirectory=/opt/telegram-bot
 EnvironmentFile=/opt/telegram-bot/.env
+# تا لاگ‌ها بلافاصله در journalctl دیده شوند (نه با تأخیر بافر)
+Environment=PYTHONUNBUFFERED=1
 ExecStart=/opt/telegram-bot/venv/bin/python bot.py
 Restart=on-failure
 RestartSec=5

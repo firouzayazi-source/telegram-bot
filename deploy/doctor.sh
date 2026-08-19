@@ -23,6 +23,21 @@ if [ -f .env ]; then
 fi
 
 echo
+echo "════════ ۳.۵) دسترسی نوشتن ════════"
+SVC_USER=$(systemctl show telegram-bot -p User --value 2>/dev/null)
+[ -z "$SVC_USER" ] && SVC_USER=root
+echo "کاربر سرویس: $SVC_USER"
+echo "مالک پوشه:   $(stat -c '%U:%G' . 2>/dev/null)"
+[ -f users.db ] && echo "مالک users.db: $(stat -c '%U:%G' users.db 2>/dev/null)"
+if sudo -u "$SVC_USER" test -w . 2>/dev/null; then
+  echo "✅ $SVC_USER می‌تواند در پوشه بنویسد"
+else
+  echo "⛔ $SVC_USER اجازه نوشتن در پوشه ندارد — خطای «readonly database» از همین‌جاست!"
+  echo "   رفع: sudo chown -R $SVC_USER:$SVC_USER $(pwd)"
+  echo "   یا: User را از فایل سرویس بردارید تا با root اجرا شود"
+fi
+
+echo
 echo "════════ ۴) چند نسخه در حال اجراست؟ ════════"
 n=$(pgrep -af "python.*(bot|app)\.py" | wc -l)
 pgrep -af "python.*(bot|app)\.py" || echo "(هیچ پروسه‌ای در حال اجرا نیست)"
