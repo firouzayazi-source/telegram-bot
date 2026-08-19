@@ -416,12 +416,15 @@ async def save_request(uid,username,first_name,phone,topic):
     await db.commit()
     return cur.lastrowid
 
-async def get_requests(offset=0,limit=25):
+async def get_requests(offset=0,limit=25,only_new=False):
+    where = "WHERE status='new' " if only_new else ""
     async with db.execute(
-        "SELECT id,user_id,username,first_name,phone,product_name,status,created_at FROM requests ORDER BY id DESC LIMIT ? OFFSET ?",
+        "SELECT id,user_id,username,first_name,phone,product_name,status,created_at FROM requests "
+        f"{where}ORDER BY id DESC LIMIT ? OFFSET ?",
         (limit,offset)) as c: return await c.fetchall()
 
-async def count_requests(): return await _cnt("SELECT COUNT(*) FROM requests")
+async def count_requests(only_new=False):
+    return await _cnt("SELECT COUNT(*) FROM requests" + (" WHERE status='new'" if only_new else ""))
 
 async def done_request(rid): await db.execute("UPDATE requests SET status='done' WHERE id=?",(rid,)); await db.commit()
 
@@ -673,15 +676,21 @@ def users_list_kb(rows,off,ft,total):
     btns.append([InlineKeyboardButton("🔙",callback_data="users_menu")]); return InlineKeyboardMarkup(btns)
 
 def udetail_kb(uid,is_bl): return InlineKeyboardMarkup([
+    [InlineKeyboardButton("💬 پیام به کاربر",callback_data=f"rq_msg_{uid}")],
     [InlineKeyboardButton("✅ رفع بلاک" if is_bl else "🚫 بلاک",callback_data=f"utog_{uid}")],
     [InlineKeyboardButton("🔙",callback_data="users_menu")]])
 
-def reqs_kb(reqs,offset=0,total=0):
-    btns=[[InlineKeyboardButton(f"{'🆕' if r[6]=='new' else '✅'} {r[5]} — {r[3]}",callback_data=f"rq_{r[0]}")] for r in reqs]
+def reqs_kb(reqs,offset=0,total=0,only_new=False):
+    f="new" if only_new else "all"
+    # نام و شماره مفیدند — product_name برای همه یکسان است و چیزی اضافه نمی‌کند
+    btns=[[InlineKeyboardButton(f"{'🆕' if r[6]=='new' else '✅'} {r[3] or'—'} — {r[4]}",
+                                callback_data=f"rq_{r[0]}")] for r in reqs]
     nav=[]
-    if offset>0: nav.append(InlineKeyboardButton("▶️ جدیدتر",callback_data=f"admin_reqs_{offset-25}"))
-    if offset+25<total: nav.append(InlineKeyboardButton("◀️ قدیمی‌تر",callback_data=f"admin_reqs_{offset+25}"))
+    if offset>0: nav.append(InlineKeyboardButton("▶️ جدیدتر",callback_data=f"arq_{f}_{offset-25}"))
+    if offset+25<total: nav.append(InlineKeyboardButton("◀️ قدیمی‌تر",callback_data=f"arq_{f}_{offset+25}"))
     if nav: btns.append(nav)
+    btns.append([InlineKeyboardButton("📋 همه" if only_new else "🆕 فقط جدیدها",
+                                      callback_data=f"arq_{'all' if only_new else 'new'}_0")])
     btns.append([InlineKeyboardButton("📊 Export CSV",callback_data="export_reqs")])
     btns.append([InlineKeyboardButton("🔙",callback_data="back_to_admin")]); return InlineKeyboardMarkup(btns)
 
@@ -724,7 +733,6 @@ async def broadcast(ctx, text, photo=None):
                 if photo: await ctx.bot.send_photo(uid, photo=photo, caption=text)
                 else:     await ctx.bot.send_message(uid, text)
                 ok += 1
-                await asyncio.sleep(0.05)
             except Forbidden:
                 # کاربر ربات را بلاک کرده یا اکانتش حذف شده — علامت بزن تا
                 # پخش‌های بعدی وقت تلف نکنند و آمار واقعی بماند
@@ -740,6 +748,7 @@ async def broadcast(ctx, text, photo=None):
                         ok += 1
                     except: fail += 1
                 else: fail += 1
+            await asyncio.sleep(0.05)   # همیشه — وگرنه زنجیره خطا API را می‌کوبد
             if i % 20 == 0 or i == total:
                 try: await st.edit_text(f"📢 {to_fa(ok)}✔️ {to_fa(fail)}❌  {to_fa(i)}/{to_fa(total)}",reply_markup=cancel_kb if i<total else None)
                 except: pass
@@ -811,25 +820,87 @@ async def _auto_backup_loop(bot):
             logger.error(f"auto_backup: {e}")
             await asyncio.sleep(3600)
 
+BACKUP_MAP = {"data.json":DATA_FILE,"banner.json":BANNER_FILE,"workhours.json":WORKHOURS_FILE,
+              "buttons.json":BUTTONS_FILE,"settings.json":SETTINGS_FILE,"stats.json":STATS_FILE,
+              "menu.json":MENU_FILE,"users.db":DB_FILE}
+SQLITE_MAGIC = b"SQLite format 3\x00"
+MAX_RESTORE_BYTES = 200 * 1024 * 1024   # سقف ایمنی برای فایل‌های داخل ZIP
+
+async def _safety_snapshot():
+    """قبل از بازگردانی، وضعیت فعلی را کنار می‌گذارد تا اگر بکاپ خراب بود برگردیم."""
+    path = os.path.join(os.path.dirname(os.path.abspath(DB_FILE)), "pre_restore.zip")
+    try:
+        with zipfile.ZipFile(path,"w",zipfile.ZIP_DEFLATED) as zf:
+            for name,fp in BACKUP_MAP.items():
+                if os.path.exists(fp): zf.write(fp,name)
+        return path
+    except Exception as e:
+        logger.warning(f"safety snapshot ناموفق: {e}"); return None
+
 async def restore_backup(bot,file_id):
+    """بازگردانی بکاپ.
+
+    نکته حیاتی: users.db در حالت WAL باز است. اگر فایل را زیر پای اتصالِ باز
+    عوض کنیم، فایل‌های users.db-wal / -shm قدیمی روی داده‌ی تازه اعمال می‌شوند
+    و بازگردانی عملاً بی‌اثر می‌ماند. پس باید اتصال بسته، WAL پاک، و دوباره
+    باز شود.
+    """
+    global db, _seen_uids, _block_cache
     try:
         f=await bot.get_file(file_id); buf=io.BytesIO()
         await f.download_to_memory(buf); buf.seek(0)
         with zipfile.ZipFile(buf,"r") as zf:
-            mapping={"data.json":DATA_FILE,"banner.json":BANNER_FILE,"workhours.json":WORKHOURS_FILE,
-                     "buttons.json":BUTTONS_FILE,"settings.json":SETTINGS_FILE,"stats.json":STATS_FILE,"menu.json":MENU_FILE,"users.db":DB_FILE}
-            restored=[]
-            for name in zf.namelist():
-                if name in mapping:
-                    async with aiofiles.open(mapping[name],"wb") as out: await out.write(zf.read(name))
-                    restored.append(name)
+            members=[i for i in zf.infolist() if i.filename in BACKUP_MAP]
+            if not members:
+                return False,"این فایل ZIP هیچ‌کدام از فایل‌های بکاپ را ندارد."
+            total=sum(i.file_size for i in members)
+            if total>MAX_RESTORE_BYTES:
+                return False,f"حجم بکاپ غیرعادی است ({total//1024//1024} مگابایت) — بازگردانی انجام نشد."
+            payload={i.filename:zf.read(i.filename) for i in members}
+
+        # اعتبارسنجی پیش از دست‌زدن به هر فایلی
+        if "users.db" in payload and not payload["users.db"].startswith(SQLITE_MAGIC):
+            return False,"فایل users.db داخل ZIP یک دیتابیس معتبر نیست."
+        for name in ("data.json","banner.json","workhours.json","buttons.json","settings.json","stats.json","menu.json"):
+            if name in payload:
+                try: json.loads(payload[name].decode("utf-8"))
+                except Exception: return False,f"فایل {name} داخل ZIP خراب است."
+
+        snapshot=await _safety_snapshot()
+
+        # اتصال را ببند تا جایگزینی users.db امن باشد
+        if "users.db" in payload and db is not None:
+            try: await db.close()
+            except Exception as e: logger.warning(f"بستن دیتابیس: {e}")
+            db=None
+
+        restored=[]
+        for name,data_bytes in payload.items():
+            async with aiofiles.open(BACKUP_MAP[name],"wb") as out: await out.write(data_bytes)
+            restored.append(name)
+
+        if "users.db" in payload:
+            # WAL/SHM قدیمی متعلق به دیتابیس قبلی‌اند و باید بروند
+            for suffix in ("-wal","-shm"):
+                try: os.remove(DB_FILE+suffix)
+                except FileNotFoundError: pass
+                except Exception as e: logger.warning(f"حذف {DB_FILE+suffix}: {e}")
+            _seen_uids={}; _block_cache={}
+            await init_db()
+
         await load_data(); await load_banners(); await load_workhours()
         await load_buttons(); await load_settings(); await load_stats(); await load_menu()
         # نرمال‌سازی فرمت فایل‌ها روی دیسک (جلوگیری از مشکل فرمت قدیمی بعد از restart)
         await save_banners(); await save_buttons()
+        if snapshot: logger.info(f"بکاپ ایمنی پیش از بازگردانی: {snapshot}")
         return True,restored
     except Exception as e:
-        logger.error(f"restore: {e}"); return False,str(e)
+        logger.error(f"restore: {e}",exc_info=True)
+        # اگر اتصال بسته مانده، دوباره بازش کن تا ربات فلج نشود
+        if db is None:
+            try: await init_db()
+            except Exception as e2: logger.error(f"بازگشایی دیتابیس ناموفق: {e2}")
+        return False,str(e)
 
 # ════════════════════════════════════════════════
 #  HANDLERS — cmd_start / cmd_admin
@@ -977,11 +1048,28 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         elif data=="backup_get":
             await query.answer()
             await safe_edit(query.message,"💾 در حال تهیه...",reply_markup=None)
-            await send_backup(query.message._bot)
+            await send_backup(ctx.bot)
             await safe_edit(query.message,"✅ بک‌آپ ارسال شد.",reply_markup=backup_kb())
 
         elif data.startswith("backup_auto_"):
+            # فقط تأیید — بازگردانی کل کاربران و تنظیمات را جایگزین می‌کند
             idx=int(data[12:])
+            registry_rev=list(reversed(_backup_registry))
+            if idx>=len(registry_rev):
+                await query.answer("❌ بکاپ یافت نشد.",show_alert=True); return
+            entry=registry_rev[idx]
+            await query.answer()
+            await safe_edit(query.message,
+                f"⚠️ بازگردانی از بکاپ {entry['date']}\n"+"─"*18+
+                "\n\nتمام کاربران، درخواست‌ها، متن‌ها و تنظیمات فعلی با نسخه‌ی این "
+                "بکاپ جایگزین می‌شوند.\n\n"
+                "(از وضعیت فعلی یک نسخه‌ی ایمنی در pre_restore.zip نگه داشته می‌شود.)",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ بله، بازگردان",callback_data=f"backup_do_{idx}")],
+                    [InlineKeyboardButton("↩️ انصراف",callback_data="backup")]]))
+
+        elif data.startswith("backup_do_"):
+            idx=int(data[10:])
             registry_rev=list(reversed(_backup_registry))
             if idx>=len(registry_rev):
                 await query.answer("❌ بکاپ یافت نشد.",show_alert=True); return
@@ -997,7 +1085,10 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         elif data=="backup_import":
             await query.answer()
             ctx.user_data["mode"]="backup_restore"
-            await query.message.reply_text("📥 فایل ZIP بک‌آپ را ارسال کنید:",reply_markup=cancel_menu())
+            await query.message.reply_text(
+                "📥 فایل ZIP بک‌آپ را ارسال کنید.\n\n"
+                "⚠️ محتوای فایل جایگزین کاربران، درخواست‌ها و تنظیمات فعلی می‌شود.",
+                reply_markup=cancel_menu())
 
         # ── مدیریت بخش‌ها — یکپارچه برای تمام بخش‌ها
         elif data=="sections":
@@ -1170,21 +1261,25 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             await safe_edit(query.message,f"🔘 {SECTION_NAMES.get(key,key)}",reply_markup=sec_btns_kb(key))
 
         # ── درخواست‌ها
-        elif data=="admin_reqs" or data.startswith("admin_reqs_"):
+        elif data=="admin_reqs" or data.startswith("arq_"):
             await query.answer()
-            offset=0
-            if data.startswith("admin_reqs_"):
-                try: offset=int(data[11:])
-                except: offset=0
-            reqs=await get_requests(offset=offset,limit=25)
-            total=await count_requests()
+            only_new=False; offset=0
+            if data.startswith("arq_"):
+                try:
+                    _,f,off=data.split("_",2); only_new=(f=="new"); offset=max(0,int(off))
+                except Exception: only_new=False; offset=0
+            reqs=await get_requests(offset=offset,limit=25,only_new=only_new)
+            total=await count_requests(only_new=only_new)
+            new_total=await count_requests(only_new=True)
             if not reqs and offset==0:
-                await safe_edit(query.message,"📋 درخواستی وجود ندارد.",reply_markup=back_admin()); return
-            nc=sum(1 for r in reqs if r[6]=="new")
+                await safe_edit(query.message,
+                    "📋 درخواست جدیدی نیست." if only_new else "📋 درخواستی وجود ندارد.",
+                    reply_markup=reqs_kb([],0,0,only_new)); return
             rng=f"{to_fa(offset+1)}–{to_fa(min(offset+25,total))}"
+            title="🆕 درخواست‌های جدید" if only_new else "📋 همه درخواست‌ها"
             await safe_edit(query.message,
-                f"📋 درخواست‌ها  [{rng} از {to_fa(total)}]\n🆕 جدید: {to_fa(nc)}",
-                reply_markup=reqs_kb(reqs,offset,total))
+                f"{title}  [{rng} از {to_fa(total)}]\n🆕 در انتظار پیگیری: {to_fa(new_total)}",
+                reply_markup=reqs_kb(reqs,offset,total,only_new))
 
         elif data=="broadcast_cancel":
             global _broadcast_cancel
@@ -1230,14 +1325,16 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
                 except: pass
             else:
                 reqs=await get_requests(limit=25); total=await count_requests()
-                nc=sum(1 for r in reqs if r[6]=="new")
+                nc=await count_requests(only_new=True)
                 await safe_edit(query.message,
-                    f"📋 درخواست‌ها — ✅ پیگیری شد\n🆕 جدید: {to_fa(nc)} | کل: {to_fa(total)}",
+                    f"📋 درخواست‌ها — ✅ پیگیری شد\n🆕 در انتظار پیگیری: {to_fa(nc)} | کل: {to_fa(total)}",
                     reply_markup=reqs_kb(reqs,0,total))
             try:
                 await ctx.bot.send_message(req_row[0],
-                    f"✅ درخواست خرید شما برای «{req_row[1]}» پیگیری شد.\n"
-                    f"به زودی با شما تماس خواهیم گرفت. 🙏")
+                    "✅ درخواست شما پیگیری شد.\nبه زودی با شما تماس خواهیم گرفت. 🙏")
+            except Forbidden:
+                await mark_left(req_row[0])
+                logger.info(f"req_done: کاربر {req_row[0]} ربات را بلاک کرده")
             except Exception as e: logger.warning(f"req_done notify: {e}")
 
         elif data.startswith("rq_msg_"):
@@ -1341,10 +1438,11 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
 
         elif data.startswith("uv_"):
             uid2=int(data[3:])
-            async with db.execute("SELECT user_id,first_name,username,joined_at,last_seen,is_blocked FROM users WHERE user_id=?",(uid2,)) as c: row=await c.fetchone()
+            async with db.execute("SELECT user_id,first_name,username,joined_at,last_seen,is_blocked,has_left FROM users WHERE user_id=?",(uid2,)) as c: row=await c.fetchone()
             if not row: await query.answer("یافت نشد!",show_alert=True); return
             await query.answer()
             sep="─"*20
+            status="🚫 بلاک‌شده توسط شما" if row[5] else ("🚪 ربات را بلاک/حذف کرده" if row[6] else "✅ فعال")
             utxt=(f"👤 {row[1] or'—'}"
                   f"\n{'@'+row[2] if row[2] else'بدون یوزرنیم'}"
                   f"\n🆔 {row[0]}"
@@ -1352,7 +1450,7 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
                   f"\n📅 عضویت: {row[3]}"
                   f"\n🕐 آخرین فعالیت: {row[4]}"
                   f"\n{sep}"
-                  f"\n{'🚫 بلاک‌شده' if row[5] else '✅ فعال'}")
+                  f"\n{status}")
             await safe_edit(query.message,utxt,reply_markup=udetail_kb(uid2,bool(row[5])))
 
         elif data.startswith("utog_"):
@@ -1416,6 +1514,11 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             try:
                 await ctx.bot.send_message(target_uid,f"📩 پیام از فروشگاه:\n\n{text}")
                 await update.message.reply_text("✅ پیام ارسال شد.",reply_markup=main_menu())
+            except Forbidden:
+                await mark_left(target_uid)
+                await update.message.reply_text(
+                    "🚪 این کاربر ربات را بلاک یا حذف کرده — پیام به او نمی‌رسد.\n"
+                    "از فهرست پخش همگانی کنار گذاشته شد.",reply_markup=main_menu())
             except Exception as e:
                 await update.message.reply_text(f"❌ خطا در ارسال: {e}",reply_markup=main_menu())
             return
@@ -1564,6 +1667,10 @@ async def photo_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             await ctx.bot.send_photo(target_uid,photo=photo.file_id,
                 caption=f"📩 پیام از فروشگاه:\n\n{caption}" if caption else "📩 پیام از فروشگاه")
             await update.message.reply_text("✅ تصویر ارسال شد.",reply_markup=main_menu())
+        except Forbidden:
+            await mark_left(target_uid)
+            await update.message.reply_text(
+                "🚪 این کاربر ربات را بلاک یا حذف کرده — پیام به او نمی‌رسد.",reply_markup=main_menu())
         except Exception as e:
             await update.message.reply_text(f"❌ خطا در ارسال: {e}",reply_markup=main_menu())
         return

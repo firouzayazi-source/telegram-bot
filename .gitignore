@@ -45,6 +45,7 @@ settings.json
 stats.json
 menu.json
 backups.json
+pre_restore.zip
 
 # ── Backup files
 backup_*.zip
