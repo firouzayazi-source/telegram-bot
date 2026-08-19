@@ -76,7 +76,18 @@ sudo journalctl -u telegram-bot -f
 برای آپدیت بعدی:
 
 ```bash
-cd /opt/telegram-bot && git pull && sudo systemctl restart telegram-bot
+cd /opt/telegram-bot && git pull && bash deploy/restart.sh
+```
+
+`deploy/restart.sh` ری‌استارت امن است: سرویس را متوقف می‌کند، اگر پروسه‌ای از
+همین پروژه جا مانده باشد فقط همان را می‌بندد (به سرویس‌های دیگر سرور کاری
+ندارد)، وضعیت `failed` را پاک می‌کند، دوباره استارت می‌زند و در پایان وضعیت و
+۱۵ خط آخر لاگ را نشان می‌دهد.
+
+اگر مشکلی بود:
+
+```bash
+bash deploy/doctor.sh
 ```
 
 -----
