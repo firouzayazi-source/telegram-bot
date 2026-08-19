@@ -45,6 +45,7 @@ settings.json
 stats.json
 menu.json
 backups.json
+places.json
 pre_restore.zip
 *.corrupt
 

@@ -27,7 +27,7 @@ except ValueError:
     raise SystemExit("❌ ADMIN_ID باید عدد باشد (آیدی عددی تلگرام، نه یوزرنیم).")
 DATA_FILE = "data.json"; DB_FILE = "users.db"; BANNER_FILE = "banner.json"
 WORKHOURS_FILE = "workhours.json"; BUTTONS_FILE = "buttons.json"
-MENU_FILE = "menu.json"; BACKUPS_FILE = "backups.json"
+MENU_FILE = "menu.json"; BACKUPS_FILE = "backups.json"; PLACES_FILE = "places.json"
 SETTINGS_FILE = "settings.json"; STATS_FILE = "stats.json"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -76,7 +76,7 @@ SECTION_NAMES = {"welcome":"🏠 خوش‌آمدگویی",
                  "6":"🔖 دکمه ذخیره ۱","7":"🔖 دکمه ذخیره ۲"}
 
 # ── state
-responses=None; banners={}; workhours={}; buttons={}; settings={}; stats={}
+responses=None; banners={}; workhours={}; buttons={}; settings={}; stats={}; places={}
 
 DEFAULT_WH = {"enabled":True,"schedule":{
     "0":{"open":True,"shifts":[{"from":"11:00","to":"14:00"},{"from":"17:00","to":"23:00"}]},
@@ -92,6 +92,9 @@ DEFAULT_SETTINGS = {"notify_new_user":True,"store_open":True,"forward_user_msgs"
 # ── helpers
 def get_banner(k): banners.setdefault(k,{"file_id":None,"active":False}); return banners[k]
 def get_sec_btns(k): buttons.setdefault(k,{"enabled":True,"items":[]}); return buttons[k]
+def get_place(k):
+    places.setdefault(k,{"lat":None,"lon":None,"title":"","address":"","active":False})
+    return places[k]
 def get_setting(k): return settings.get(k,DEFAULT_SETTINGS.get(k,True))
 
 HHMM_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
@@ -265,6 +268,11 @@ async def load_buttons():
     buttons=await _rj(BUTTONS_FILE,dict)
     for k in SECTION_NAMES: buttons.setdefault(k,{"enabled":True,"items":[]})
 async def save_buttons(): await _wj(BUTTONS_FILE,buttons)
+
+async def load_places():
+    global places
+    places=await _rj(PLACES_FILE,dict)
+async def save_places(): return await _wj(PLACES_FILE,places)
 
 async def load_menu():
     global menu_cfg
@@ -690,7 +698,41 @@ def section_kb(key):
     rows=[[InlineKeyboardButton("✏️ ویرایش متن",callback_data=f"sec_text_{key}")]]
     rows.append([InlineKeyboardButton(ban_lbl,callback_data=f"sec_ban_{key}")])
     rows.append([InlineKeyboardButton(btn_lbl,callback_data=f"sec_btns_{key}")])
+    pl=places.get(key) or {}
+    if pl.get("lat") is not None:
+        loc_lbl=f"📍 لوکیشن  {'🟢 فعال' if pl.get('active') else '🔴 غیرفعال'}"
+    else:
+        loc_lbl="📍 لوکیشن  ➕ ندارد"
+    rows.append([InlineKeyboardButton(loc_lbl,callback_data=f"sec_loc_{key}")])
     rows.append([InlineKeyboardButton("🔙 بازگشت",callback_data="sections")])
+    return InlineKeyboardMarkup(rows)
+
+def place_text(key):
+    pl=places.get(key) or {}
+    name=SECTION_NAMES.get(key,key)
+    out=[f"📍 لوکیشن: {name}","─"*20]
+    if pl.get("lat") is None:
+        out += ["❌ هنوز لوکیشنی ثبت نشده است.","",
+                "با «📤 ثبت لوکیشن» و سپس فرستادن موقعیت از منوی 📎 تلگرام،",
+                "نقشه داخل خودِ تلگرام برای کاربران باز می‌شود — بدون لینک بیرونی."]
+    else:
+        out += ["🟢 به کاربران نمایش داده می‌شود" if pl.get("active")
+                else "⚫️ ذخیره شده ولی نمایش داده نمی‌شود",
+                f"🏷 {pl.get('title') or SHOP_NAME}"]
+        if pl.get("address"): out.append(f"🗺 {pl['address']}")
+        out.append(f"🧭 {pl['lat']:.6f}, {pl['lon']:.6f}")
+    return "\n".join(out)
+
+def place_kb(key):
+    pl=places.get(key) or {}
+    rows=[[InlineKeyboardButton("📤 ثبت لوکیشن" if pl.get("lat") is None else "🔄 تغییر لوکیشن",
+                                callback_data=f"loc_up_{key}")]]
+    if pl.get("lat") is not None:
+        rows.append([InlineKeyboardButton("🔴 غیرفعال‌سازی" if pl.get("active") else "🟢 فعال‌سازی",
+                                          callback_data=f"loc_tg_{key}")])
+        rows.append([InlineKeyboardButton("✏️ عنوان و آدرس",callback_data=f"loc_ed_{key}")])
+        rows.append([InlineKeyboardButton("🗑 حذف لوکیشن",callback_data=f"loc_dl_{key}")])
+    rows.extend(_nav(back=f"sec_{key}"))
     return InlineKeyboardMarkup(rows)
 
 def banner_kb(key):
@@ -836,6 +878,33 @@ def human_kb(n):
     except Exception: return "؟"
     return f"{to_fa(round(n/1024))} کیلوبایت" if n else "؟"
 
+SHOP_NAME = "استوک لند"
+
+async def send_place(msg,key):
+    """اگر برای این بخش لوکیشن ثبت شده، نقشه‌ی بومی تلگرام را می‌فرستد.
+
+    sendVenue یک کارت نقشه داخل خود تلگرام می‌سازد؛ کاربر بدون خروج از تلگرام
+    پین را می‌بیند و با یک لمس مسیریابی برایش باز می‌شود.
+    """
+    pl=places.get(key) or {}
+    if not (pl.get("active") and pl.get("lat") is not None and pl.get("lon") is not None):
+        return
+    try:
+        await msg.reply_venue(latitude=float(pl["lat"]),longitude=float(pl["lon"]),
+                              title=pl.get("title") or SHOP_NAME,
+                              address=pl.get("address") or "")
+    except Exception as e:
+        logger.error(f"venue[{key}]: {e}")
+        try: await msg.reply_location(latitude=float(pl["lat"]),longitude=float(pl["lon"]))
+        except Exception as e2: logger.error(f"location[{key}]: {e2}")
+
+async def send_place_preview(msg,key):
+    pl=places.get(key) or {}
+    if pl.get("lat") is None: return
+    await msg.reply_venue(latitude=float(pl["lat"]),longitude=float(pl["lon"]),
+                          title=pl.get("title") or SHOP_NAME,
+                          address=pl.get("address") or "")
+
 async def send_banner(msg,text,key,kb=None):
     b=get_banner(key)
     if b.get("active") and b.get("file_id"):
@@ -909,7 +978,8 @@ async def send_backup(bot):
     ts=shamsi_now().replace(" ","_").replace("—","-").replace(":","-")
     buf=io.BytesIO()
     files=[(DATA_FILE,"data.json"),(BANNER_FILE,"banner.json"),(WORKHOURS_FILE,"workhours.json"),
-           (BUTTONS_FILE,"buttons.json"),(SETTINGS_FILE,"settings.json"),(STATS_FILE,"stats.json"),(MENU_FILE,"menu.json"),(DB_FILE,"users.db")]
+           (BUTTONS_FILE,"buttons.json"),(SETTINGS_FILE,"settings.json"),(STATS_FILE,"stats.json"),
+           (MENU_FILE,"menu.json"),(PLACES_FILE,"places.json"),(DB_FILE,"users.db")]
     with zipfile.ZipFile(buf,"w",zipfile.ZIP_DEFLATED) as zf:
         for fp,name in files:
             try:
@@ -954,7 +1024,7 @@ async def _auto_backup_loop(bot):
 
 BACKUP_MAP = {"data.json":DATA_FILE,"banner.json":BANNER_FILE,"workhours.json":WORKHOURS_FILE,
               "buttons.json":BUTTONS_FILE,"settings.json":SETTINGS_FILE,"stats.json":STATS_FILE,
-              "menu.json":MENU_FILE,"users.db":DB_FILE}
+              "menu.json":MENU_FILE,"places.json":PLACES_FILE,"users.db":DB_FILE}
 SQLITE_MAGIC = b"SQLite format 3\x00"
 MAX_RESTORE_BYTES = 200 * 1024 * 1024   # سقف ایمنی برای فایل‌های داخل ZIP
 
@@ -993,7 +1063,7 @@ async def restore_backup(bot,file_id):
         # اعتبارسنجی پیش از دست‌زدن به هر فایلی
         if "users.db" in payload and not payload["users.db"].startswith(SQLITE_MAGIC):
             return False,"فایل users.db داخل ZIP یک دیتابیس معتبر نیست."
-        for name in ("data.json","banner.json","workhours.json","buttons.json","settings.json","stats.json","menu.json"):
+        for name in ("data.json","banner.json","workhours.json","buttons.json","settings.json","stats.json","menu.json","places.json"):
             if name in payload:
                 try: json.loads(payload[name].decode("utf-8"))
                 except Exception: return False,f"فایل {name} داخل ZIP خراب است."
@@ -1021,7 +1091,7 @@ async def restore_backup(bot,file_id):
             await init_db()
 
         await load_data(); await load_banners(); await load_workhours()
-        await load_buttons(); await load_settings(); await load_stats(); await load_menu()
+        await load_buttons(); await load_settings(); await load_stats(); await load_menu(); await load_places()
         # نرمال‌سازی فرمت فایل‌ها روی دیسک (جلوگیری از مشکل فرمت قدیمی بعد از restart)
         await save_banners(); await save_buttons()
         if snapshot: logger.info(f"بکاپ ایمنی پیش از بازگردانی: {snapshot}")
@@ -1286,7 +1356,7 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
                 f"🎛 مدیریت منوی اصلی\n{'─'*18}\nدکمه فعال: {to_fa(en)} از {to_fa(len(menu_cfg))}\n\n✅ به حالت پیش‌فرض بازگشت.",
                 reply_markup=menu_mgr_kb())
 
-        elif data.startswith("sec_") and not any(data.startswith(p) for p in["sec_text_","sec_ban_","sec_btns_"]):
+        elif data.startswith("sec_") and not any(data.startswith(p) for p in["sec_text_","sec_ban_","sec_btns_","sec_loc_"]):
             await query.answer()
             key=data[4:]
             from telegram.error import BadRequest
@@ -1304,6 +1374,47 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             await query.answer()
             ctx.user_data.update({"mode":"edit_text","edit_key":key})
             await query.message.reply_text(f"✏️ متن فعلی:\n\n{responses.get(key,'تنظیم نشده')}\n\nمتن جدید:",reply_markup=cancel_menu())
+
+        elif data.startswith("sec_loc_"):
+            await query.answer()
+            key=data[8:]
+            await safe_edit(query.message,place_text(key),reply_markup=place_kb(key))
+            pl=places.get(key) or {}
+            if pl.get("lat") is not None:
+                try: await send_place_preview(query.message,key)
+                except Exception as e: logger.debug(f"place preview: {e}")
+
+        elif data.startswith("loc_up_"):
+            await query.answer()
+            key=data[7:]; ctx.user_data.update({"mode":"loc_up","loc_key":key})
+            await query.message.reply_text(
+                "📍 حالا موقعیت را بفرستید:\n\n"
+                "۱) روی 📎 (گیره) کنار فیلد تایپ بزنید\n"
+                "۲) گزینه‌ی «Location / موقعیت مکانی» را انتخاب کنید\n"
+                "۳) پین را دقیقاً روی فروشگاه بگذارید و بفرستید\n\n"
+                "می‌توانید لوکیشن فوروارد‌شده از جای دیگر را هم بفرستید.",
+                reply_markup=cancel_menu())
+
+        elif data.startswith("loc_tg_"):
+            key=data[7:]; pl=get_place(key)
+            pl["active"]=not pl.get("active",False); await save_places()
+            await query.answer("🟢 فعال شد" if pl["active"] else "⚫️ غیرفعال شد",show_alert=True)
+            await safe_edit(query.message,place_text(key),reply_markup=place_kb(key))
+
+        elif data.startswith("loc_ed_"):
+            await query.answer()
+            key=data[7:]; ctx.user_data.update({"mode":"loc_ed","loc_key":key})
+            pl=get_place(key)
+            await query.message.reply_text(
+                f"✏️ عنوان و آدرس نقشه را در یک خط بنویسید، با «|» جدا شده:\n\n"
+                f"مثال:\n{SHOP_NAME} | قم، عمار یاسر، بازار سلام، طبقه اول واحد F11\n\n"
+                f"فعلی: {pl.get('title') or SHOP_NAME} | {pl.get('address') or '—'}",
+                reply_markup=cancel_menu())
+
+        elif data.startswith("loc_dl_"):
+            key=data[7:]; places.pop(key,None); await save_places()
+            await query.answer("🗑 حذف شد",show_alert=True)
+            await safe_edit(query.message,place_text(key),reply_markup=place_kb(key))
 
         elif data.startswith("sec_ban_"):
             await query.answer()
@@ -1591,6 +1702,18 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
                     if nt: it["title"]=nt
                     if text!=".": it["url"]=text if text.startswith("http") else f"https://{text}"
             await save_buttons(); await update.message.reply_text("✅ ویرایش شد.",reply_markup=main_menu()); return
+        if mode=="loc_ed":
+            key=ctx.user_data.pop("loc_key",None); ctx.user_data.pop("mode",None)
+            pl=get_place(key) if key else None
+            if pl is None:
+                await update.message.reply_text("❌ خطا.",reply_markup=main_menu()); return
+            parts=[x.strip() for x in text.split("|",1)]
+            pl["title"]=parts[0] or SHOP_NAME
+            pl["address"]=parts[1] if len(parts)>1 else ""
+            await save_places()
+            await update.message.reply_text("✅ ذخیره شد.",reply_markup=main_menu())
+            await update.message.reply_text(place_text(key),reply_markup=place_kb(key)); return
+
         if mode=="wh_shifts":
             dk=ctx.user_data.get("wh_day")
             bad="❌ فرمت اشتباه!\nساعت‌ها باید به شکل HH:MM باشند.\nمثال: 11:00-14:00,17:00-23:00"
@@ -1636,7 +1759,8 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         await record_stat(mkey); content=responses.get(mkey,"تنظیم نشده")
         full=build_msg(text,content,mkey)
         kb=user_sec_kb(mkey)
-        await send_banner(update.message,full,mkey,kb=kb); return
+        await send_banner(update.message,full,mkey,kb=kb)
+        await send_place(update.message,mkey); return
 
     # پیام آزاد کاربر — به‌جای «گزینه نامعتبر»، برای ادمین فوروارد می‌شود
     if user.id!=ADMIN_ID and get_setting("forward_user_msgs"):
@@ -1719,6 +1843,44 @@ async def photo_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         return
 
 # ════════════════════════════════════════════════
+#  LOCATION HANDLER — ثبت لوکیشن بخش‌ها
+# ════════════════════════════════════════════════
+async def location_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
+    user=update.effective_user
+    if user.id!=ADMIN_ID: return
+    if ctx.user_data.get("mode")!="loc_up": return
+    key=ctx.user_data.pop("loc_key",None); ctx.user_data.pop("mode",None)
+    if not key:
+        await update.message.reply_text("❌ خطا.",reply_markup=main_menu()); return
+    msg=update.message
+    # هم «موقعیت مکانی» ساده و هم «مکان/Venue» فورواردشده پشتیبانی می‌شود
+    ven=getattr(msg,"venue",None)
+    loc=getattr(msg,"location",None) or (ven.location if ven else None)
+    if not loc:
+        await update.message.reply_text("❌ موقعیت دریافت نشد.",reply_markup=main_menu()); return
+    pl=get_place(key)
+    pl["lat"]=loc.latitude; pl["lon"]=loc.longitude; pl["active"]=True
+    if ven:
+        pl["title"]=ven.title or pl.get("title") or SHOP_NAME
+        pl["address"]=ven.address or pl.get("address") or ""
+    else:
+        pl.setdefault("title",SHOP_NAME) or None
+        if not pl.get("title"): pl["title"]=SHOP_NAME
+        if not pl.get("address"):
+            # اولین خط متن همان بخش به‌عنوان آدرس پیش‌فرض
+            first=(responses.get(key,"") or "").strip().splitlines()
+            pl["address"]=(first[0][:200] if first else "")
+    ok=await save_places()
+    await update.message.reply_text(
+        ("✅ لوکیشن ثبت و فعال شد." if ok else "⚠️ ثبت شد ولی روی دیسک ذخیره نشد!")
+        + "\n\nاز این پس وقتی کاربر این بخش را باز کند، نقشه داخل خودِ تلگرام"
+          " برایش می‌آید — بدون نیاز به لینک بیرونی.",
+        reply_markup=main_menu())
+    try: await send_place_preview(update.message,key)
+    except Exception as e: logger.error(f"preview after set: {e}")
+    await update.message.reply_text(place_text(key),reply_markup=place_kb(key))
+
+# ════════════════════════════════════════════════
 #  DOCUMENT HANDLER (backup import)
 # ════════════════════════════════════════════════
 async def document_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
@@ -1741,7 +1903,7 @@ async def document_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
 async def post_init(app):
     await init_db(); await load_data(); await load_banners()
     await load_workhours(); await load_buttons(); await load_settings()
-    await load_stats(); await load_menu(); await load_backup_registry()
+    await load_stats(); await load_menu(); await load_places(); await load_backup_registry()
     asyncio.ensure_future(_spam_cleanup_loop())
     asyncio.ensure_future(_stats_flush_loop())
     asyncio.ensure_future(_auto_backup_loop(app.bot))
@@ -1815,6 +1977,7 @@ def main():
     app.add_handler(CallbackQueryHandler(callbacks))
     app.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND,photo_handler))
     app.add_handler(MessageHandler(filters.Document.ZIP & ~filters.COMMAND,document_handler))
+    app.add_handler(MessageHandler(filters.LOCATION | filters.VENUE,location_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,text_handler))
     app.add_error_handler(on_error)
     print("🚀 ربات در حال اجراست...")
