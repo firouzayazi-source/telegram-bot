@@ -18,6 +18,11 @@ Environment=PYTHONUNBUFFERED=1
 ExecStart=/opt/telegram-bot/venv/bin/python bot.py
 Restart=on-failure
 RestartSec=5
+# اگر پروسه به هر دلیلی سر خاموش‌شدن گیر کرد، به‌جای ۹۰ ثانیه پیش‌فرض
+# سریع kill شود — وگرنه سرویس در حالت deactivating می‌ماند و نسخه‌ی جدید
+# با نسخه‌ی قدیمی روی getUpdates تداخل (Conflict) پیدا می‌کند.
+TimeoutStopSec=20
+KillMode=mixed
 
 [Install]
 WantedBy=multi-user.target

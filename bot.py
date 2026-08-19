@@ -1852,8 +1852,21 @@ async def on_error(update:object,ctx:ContextTypes.DEFAULT_TYPE):
     except Exception as e: logger.error(f"گزارش خطا به ادمین نرسید: {e}")
 
 async def post_shutdown(app):
-    """قبل از خاموش‌شدن — داده‌های in-memory را flush کن تا چیزی گم نشود."""
+    """قبل از خاموش‌شدن — flush داده‌ها و بستن دیتابیس.
+
+    بستن db حیاتی است: aiosqlite یک رشته‌ی non-daemon می‌سازد، پس اگر اتصال
+    باز بماند پروسه هرگز خارج نمی‌شود. systemd آن‌وقت تا TimeoutStopSec صبر
+    می‌کند (پیش‌فرض ۹۰ ثانیه) و سرویس در حالت deactivating گیر می‌کند؛ در همان
+    فاصله نسخه‌ی جدید با نسخه‌ی قدیمی روی getUpdates تداخل (Conflict) پیدا
+    می‌کند و ربات عملاً از کار می‌افتد.
+    """
+    global db
     if _stats_dirty:   await save_stats();   logger.info("shutdown: stats saved")
+    if db is not None:
+        try:
+            await db.close(); db=None
+            logger.info("shutdown: دیتابیس بسته شد")
+        except Exception as e: logger.error(f"بستن دیتابیس هنگام خاموشی: {e}")
     logger.info("✅ shutdown clean")
 
 def main():

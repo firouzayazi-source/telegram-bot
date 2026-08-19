@@ -3,7 +3,13 @@
 #   bash deploy/doctor.sh
 cd "$(dirname "$0")/.." || exit 1
 echo "════════ ۱) وضعیت سرویس ════════"
-systemctl is-active telegram-bot 2>/dev/null || echo "(سرویس فعال نیست)"
+STATE=$(systemctl is-active telegram-bot 2>/dev/null)
+echo "${STATE:-(نامشخص)}"
+if [ "$STATE" = "deactivating" ]; then
+  echo "⛔ سرویس در حال خاموش‌شدن گیر کرده — پروسه‌ی قبلی خارج نشده."
+  echo "   رفع فوری: sudo systemctl kill -s SIGKILL telegram-bot && sudo systemctl start telegram-bot"
+fi
+[ "$STATE" = "active" ] || echo "(سرویس فعال نیست)"
 systemctl show telegram-bot -p ExecStart --value 2>/dev/null | sed 's/^/ExecStart: /'
 systemctl show telegram-bot -p EnvironmentFiles --value 2>/dev/null | sed 's/^/EnvFile:   /'
 systemctl show telegram-bot -p WorkingDirectory --value 2>/dev/null | sed 's/^/WorkDir:   /'
