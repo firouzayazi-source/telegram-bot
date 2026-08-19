@@ -579,7 +579,7 @@ def user_sec_kb(key):
     return InlineKeyboardMarkup(btns) if btns else None
 
 # ── admin keyboards
-def back_admin(): return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به پنل",callback_data="back_to_admin")]])
+def back_admin(): return InlineKeyboardMarkup(_nav())
 
 def backup_kb():
     rows=[
@@ -590,18 +590,111 @@ def backup_kb():
         rows.append([InlineKeyboardButton("──── بکاپ‌های خودکار ────",callback_data="noop")])
         for i,b in enumerate(reversed(_backup_registry)):
             rows.append([InlineKeyboardButton(f"♻️ {b['date']}",callback_data=f"backup_auto_{i}")])
-    rows.append([InlineKeyboardButton("🔙 تنظیمات",callback_data="settings_menu")])
+    rows.extend(_nav(back="settings_menu"))
     return InlineKeyboardMarkup(rows)
 
-def admin_menu():
+# ════════════════════════════════════════════════
+#  پنل ادمین — صفحه اصلی زنده
+# ════════════════════════════════════════════════
+HOME_CB = "adm_home"
+
+def _nav(*extra, home=True, back=None):
+    """ردیف ناوبری استاندارد ته هر صفحه — همه‌جا یکسان."""
+    row=[]
+    if back: row.append(InlineKeyboardButton("🔙 بازگشت",callback_data=back))
+    if home: row.append(InlineKeyboardButton("🏠 پنل اصلی",callback_data=HOME_CB))
+    rows=[list(e) for e in extra]
+    if row: rows.append(row)
+    return rows
+
+async def admin_home_text():
+    """وضعیت لحظه‌ای فروشگاه — مهم‌ترین اعداد بدون نیاز به باز کردن چیزی."""
+    t,d,nt,pend = await asyncio.gather(
+        total_users(), today_users(), new_today(), count_requests(only_new=True))
+    opened=is_open()
+    sep="─"*20
+    lines=[f"👑 پنل مدیریت — {shamsi_now()}", sep]
+    if not get_setting("store_open"):
+        lines.append("🔴 فروشگاه دستی بسته شده است")
+    else:
+        lines.append("🟢 فروشگاه باز است" if opened else "🔴 خارج از ساعت کاری")
+    wh=workhours.get("schedule",{}).get(
+        str(jdatetime.datetime.fromgregorian(datetime=datetime.now(IRAN_TZ)).weekday()),{})
+    if wh.get("open") and wh.get("shifts"):
+        sh=" و ".join(f"{to_fa(x['from'])}–{to_fa(x['to'])}" for x in wh["shifts"])
+        lines.append(f"🕐 امروز: {sh}")
+    elif workhours.get("enabled",True):
+        lines.append("🕐 امروز تعطیل است")
+    lines += [sep,
+              f"👥 {to_fa(t)} کاربر  ·  🆕 {to_fa(nt)} امروز  ·  📅 {to_fa(d)} فعال امروز"]
+    lines.append(f"📬 {to_fa(pend)} درخواست در انتظار پیگیری" if pend
+                 else "📬 درخواستی در انتظار نیست")
+    return "\n".join(lines), pend
+
+async def admin_home_kb():
+    pend=await count_requests(only_new=True)
+    reqs=f"📬 درخواست‌ها ({to_fa(pend)})" if pend else "📬 درخواست‌ها"
+    shop=("🔴 بستن فروشگاه" if get_setting("store_open") else "🟢 باز کردن فروشگاه")
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊 داشبورد",callback_data="dash"),
+        [InlineKeyboardButton(reqs,callback_data="admin_reqs"),
          InlineKeyboardButton("👥 کاربران",callback_data="users_menu")],
-        [InlineKeyboardButton("📬 درخواست‌ها",callback_data="admin_reqs")],
-        [InlineKeyboardButton("🕐 ساعت کاری",callback_data="wh_menu"),
-         InlineKeyboardButton("📣 پخش همگانی",callback_data="broadcast")],
-        [InlineKeyboardButton("⚙️ تنظیمات",callback_data="settings_menu")],
+        [InlineKeyboardButton("✏️ محتوای ربات",callback_data="adm_content"),
+         InlineKeyboardButton("🕐 ساعت کاری",callback_data="wh_menu")],
+        [InlineKeyboardButton("📣 پیام همگانی",callback_data="broadcast"),
+         InlineKeyboardButton("📊 آمار",callback_data="adm_stats")],
+        [InlineKeyboardButton(shop,callback_data="stg_store_open")],
+        [InlineKeyboardButton("⚙️ تنظیمات",callback_data="settings_menu"),
+         InlineKeyboardButton("🔄 بروزرسانی",callback_data=HOME_CB)],
     ])
+
+async def show_home(msg, edit=True):
+    txt,_=await admin_home_text(); kb=await admin_home_kb()
+    if edit: await safe_edit(msg,txt,reply_markup=kb)
+    else:    await msg.reply_text(txt,reply_markup=kb)
+
+def settings_text():
+    return ("⚙️ تنظیمات\n"+"─"*20+
+            "\nبا زدن هر گزینه، روشن/خاموش می‌شود.")
+
+def stats_kb():
+    return InlineKeyboardMarkup(_nav(
+        [InlineKeyboardButton("🗑 صفر کردن آمار بازدید",callback_data="stats_reset")],
+        [InlineKeyboardButton("🔄 بروزرسانی",callback_data="adm_stats")],
+    ))
+
+async def stats_text():
+    """داشبورد و آمار بخش‌ها در یک صفحه — قبلاً دو صفحه جدا بود."""
+    t,d,w,m,nt,bl,lf,rq,rn = await asyncio.gather(
+        total_users(),today_users(),week_users(),month_users(),new_today(),
+        blk_count(),left_count(),count_requests(),count_requests(only_new=True))
+    sep="─"*20
+    out=[f"📊 آمار — {shamsi_now()}",sep,
+         f"👥 کل کاربران: {to_fa(t)}",
+         f"✅ فعال: {to_fa(t-lf-bl)}   🚪 ترک‌کرده: {to_fa(lf)}   🚫 بلاک: {to_fa(bl)}",
+         sep,
+         f"🆕 عضو امروز:  {to_fa(nt)}",
+         f"📅 فعال امروز: {to_fa(d)}  {progress_bar(d,t)}",
+         f"📆 فعال هفته:  {to_fa(w)}  {progress_bar(w,t)}",
+         f"🗓 فعال ماه:   {to_fa(m)}  {progress_bar(m,t)}",
+         sep,
+         f"📬 درخواست‌ها: {to_fa(rq)}  ·  در انتظار: {to_fa(rn)}"]
+    labels=dict(SECTION_NAMES); labels["wh_page"]="🕐 ساعت کاری"
+    rows=sorted(((labels.get(k,k),v) for k,v in stats.items() if v),key=lambda r:-r[1])
+    out += [sep,"📈 بازدید بخش‌ها"]
+    if not rows:
+        out.append("هنوز بازدیدی ثبت نشده است.")
+    else:
+        top=rows[0][1]
+        out += [f"{progress_bar(v,top)} {to_fa(v)}  {name}" for name,v in rows[:12]]
+        out.append(f"مجموع: {to_fa(sum(v for _,v in rows))} بازدید")
+    txt="\n".join(out)
+    return txt[:3990]+"…" if len(txt)>4000 else txt
+
+def content_kb():
+    return InlineKeyboardMarkup(_nav(
+        [InlineKeyboardButton("🧩 دکمه‌های منوی اصلی",callback_data="menu_mgr")],
+        [InlineKeyboardButton("📝 متن، بنر و لینک بخش‌ها",callback_data="sections")],
+    ))
 
 # ترتیب نمایش بخش‌ها — دقیقاً مطابق منوی کاربر
 SECTION_ORDER = ["welcome","1","2","3","4","5","contact","workhours","6","7"]
@@ -621,7 +714,7 @@ def sections_kb():
         row.append(InlineKeyboardButton(label,callback_data=f"sec_{key}"))
         if len(row)==2: btns.append(row); row=[]
     if row: btns.append(row)
-    btns.append([InlineKeyboardButton("🔙 تنظیمات",callback_data="settings_menu")])
+    btns.extend(_nav(back="adm_content"))
     return InlineKeyboardMarkup(btns)
 
 def section_kb(key):
@@ -640,7 +733,19 @@ def banner_kb(key):
     btns=[[InlineKeyboardButton("📤 آپلود تصویر",callback_data=f"ban_up_{key}")],
           [InlineKeyboardButton(tg,callback_data=f"ban_tg_{key}")]]
     if b.get("file_id"): btns.append([InlineKeyboardButton("🗑 حذف تصویر",callback_data=f"ban_dl_{key}")])
-    btns.append([InlineKeyboardButton("🔙 بازگشت",callback_data=f"sec_{key}")]); return InlineKeyboardMarkup(btns)
+    btns.extend(_nav(back=f"sec_{key}")); return InlineKeyboardMarkup(btns)
+
+def banner_text(key):
+    b=get_banner(key); name=SECTION_NAMES.get(key,key)
+    lines=[f"🖼 بنر: {name}","─"*20]
+    if not b.get("file_id"):
+        lines.append("❌ هنوز تصویری ثبت نشده است.")
+    else:
+        lines.append("🟢 فعال — به کاربران نمایش داده می‌شود" if b.get("active")
+                     else "⚫️ غیرفعال — ذخیره شده ولی نمایش داده نمی‌شود")
+        if b.get("w"): lines.append(f"📐 {to_fa(b['w'])}×{to_fa(b.get('h',0))}")
+        lines.append("♻️ روی سرور تلگرام ذخیره است — بدون آپلود مجدد ارسال می‌شود.")
+    return "\n".join(lines)
 
 def sec_btns_kb(key):
     sec=get_sec_btns(key); tg="🔴 غیرفعال‌سازی" if sec.get("enabled") else "🟢 فعال‌سازی"
@@ -648,8 +753,8 @@ def sec_btns_kb(key):
     for it in sec.get("items",[]):
         btns.append([InlineKeyboardButton(f"🔗 {it['title']}",callback_data=f"btn_ed_{key}_{it['id']}"),
                      InlineKeyboardButton("🗑 حذف",callback_data=f"btn_dl_{key}_{it['id']}")])
-    btns.append([InlineKeyboardButton("➕ افزودن دکمه",callback_data=f"btn_add_{key}"),
-                 InlineKeyboardButton("🔙 بازگشت",callback_data=f"sec_{key}")])
+    btns.append([InlineKeyboardButton("➕ افزودن دکمه",callback_data=f"btn_add_{key}")])
+    btns.extend(_nav(back=f"sec_{key}"))
     return InlineKeyboardMarkup(btns)
 
 def wh_kb():
@@ -665,7 +770,7 @@ def wh_kb():
         btns.append(row)
     btns+=[[InlineKeyboardButton("✏️ پیام باز",callback_data="wh_mop"),
             InlineKeyboardButton("✏️ پیام بسته",callback_data="wh_mcl")],
-           [InlineKeyboardButton("🔙 پنل اصلی",callback_data="back_to_admin")]]
+           ]+_nav()
     return InlineKeyboardMarkup(btns)
 
 def wh_day_kb(dk):
@@ -683,7 +788,7 @@ def menu_mgr_kb():
         status="🟢" if m.get("enabled",True) else "⚫️"
         btns.append([InlineKeyboardButton(f"{status} {m['label']}",callback_data=f"mi_{m['key']}")])
     btns.append([InlineKeyboardButton("♻️ بازگردانی به حالت پیش‌فرض",callback_data="menu_reset")])
-    btns.append([InlineKeyboardButton("🔙 تنظیمات",callback_data="settings_menu")])
+    btns.extend(_nav(back="adm_content"))
     return InlineKeyboardMarkup(btns)
 
 def menu_item_kb(key):
@@ -713,22 +818,21 @@ def menu_item_kb(key):
 def settings_kb():
     notif="🟢" if get_setting("notify_new_user") else "⚫️"
     fwd="🟢" if get_setting("forward_user_msgs") else "⚫️"
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎛 مدیریت منو",callback_data="menu_mgr")],
-        [InlineKeyboardButton("✏️ مدیریت بخش‌ها",callback_data="sections")],
-        [InlineKeyboardButton("💾 پشتیبان‌گیری",callback_data="backup")],
+    shop="🟢" if get_setting("store_open") else "🔴"
+    return InlineKeyboardMarkup(_nav(
+        [InlineKeyboardButton(f"{shop} فروشگاه باز است",callback_data="stg_store_open")],
         [InlineKeyboardButton(f"{notif} اعلان عضو جدید",callback_data="stg_notify_new_user")],
         [InlineKeyboardButton(f"{fwd} دریافت پیام کاربران",callback_data="stg_forward_user_msgs")],
-        [InlineKeyboardButton("🔙 پنل اصلی",callback_data="back_to_admin")],
-    ])
+        [InlineKeyboardButton("💾 پشتیبان‌گیری و بازیابی",callback_data="backup")],
+    ))
 
-def users_menu_kb(): return InlineKeyboardMarkup([
+def users_menu_kb(): return InlineKeyboardMarkup(_nav(
+    [InlineKeyboardButton("🔍 جستجوی کاربر",callback_data="users_search")],
     [InlineKeyboardButton("👥 همه کاربران",callback_data="ul_all_0"),
      InlineKeyboardButton("🆕 امروز",callback_data="ul_today_0")],
     [InlineKeyboardButton("📆 این هفته",callback_data="ul_week_0"),
      InlineKeyboardButton("🚫 بلاک‌شده‌ها",callback_data="ul_blocked_0")],
-    [InlineKeyboardButton("🔍 جستجوی کاربر",callback_data="users_search")],
-    [InlineKeyboardButton("🔙 پنل اصلی",callback_data="back_to_admin")]])
+))
 
 def users_list_kb(rows,off,ft,total):
     btns=[[InlineKeyboardButton(f"{'🚫 ' if r[4] else ''}{r[1] or '—'} | {r[0]}",callback_data=f"uv_{r[0]}")] for r in rows]
@@ -755,7 +859,7 @@ def reqs_kb(reqs,offset=0,total=0,only_new=False):
     btns.append([InlineKeyboardButton("📋 همه" if only_new else "🆕 فقط جدیدها",
                                       callback_data=f"arq_{'all' if only_new else 'new'}_0")])
     btns.append([InlineKeyboardButton("📊 Export CSV",callback_data="export_reqs")])
-    btns.append([InlineKeyboardButton("🔙",callback_data="back_to_admin")]); return InlineKeyboardMarkup(btns)
+    btns.extend(_nav()); return InlineKeyboardMarkup(btns)
 
 def req_kb(rid,status,uid=0):
     btns=[]
@@ -767,6 +871,28 @@ def req_kb(rid,status,uid=0):
     btns.append([InlineKeyboardButton("🔙",callback_data="admin_reqs")]); return InlineKeyboardMarkup(btns)
 
 # ── send with banner
+# ── عکس‌ها ───────────────────────────────────────
+# تلگرام هر عکس را در چند اندازه نگه می‌دارد و برای هرکدام یک file_id می‌دهد.
+# با ذخیره‌ی file_id، عکس فقط یک‌بار آپلود می‌شود و برای همیشه بازاستفاده
+# می‌گردد. انتخاب نسخه‌ی مناسب (نه بزرگ‌ترین) یعنی کاربران حجم کمتری دانلود
+# می‌کنند — بدون نیاز به هیچ کتابخانه‌ی پردازش تصویر.
+BANNER_MAX_W = 1280      # عرض هدف برای بنر
+THUMB_MAX_W  = 320       # عرض هدف برای پیش‌نمایش پنل
+
+def _area(p): return (getattr(p,"width",0) or 0)*(getattr(p,"height",0) or 0)
+
+def pick_photo(sizes,max_w=BANNER_MAX_W):
+    """سبک‌ترین نسخه‌ای که هنوز کیفیت کافی دارد (عرض ≤ max_w)."""
+    if not sizes: return None
+    ordered=sorted(sizes,key=_area)
+    fit=[p for p in ordered if (getattr(p,"width",0) or 0)<=max_w]
+    return fit[-1] if fit else ordered[0]
+
+def human_kb(n):
+    try: n=int(n or 0)
+    except Exception: return "؟"
+    return f"{to_fa(round(n/1024))} کیلوبایت" if n else "؟"
+
 async def send_banner(msg,text,key,kb=None):
     b=get_banner(key)
     if b.get("active") and b.get("file_id"):
@@ -995,7 +1121,7 @@ async def cmd_help(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
 
 async def cmd_admin(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id!=ADMIN_ID: return await update.message.reply_text("⛔ دسترسی ندارید")
-    await update.message.reply_text("👑 پنل مدیریت استوک لند",reply_markup=admin_menu())
+    await show_home(update.message,edit=False)
 
 # ════════════════════════════════════════════════
 #  USER CALLBACKS
@@ -1048,56 +1174,29 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
 
     # ════ ADMIN — هر handler خودش answer می‌زنه تا show_alert درست کار کنه
     try:
-        if data=="back_to_admin":
+        if data in (HOME_CB,"back_to_admin"):
             await query.answer()
-            await safe_edit(query.message,"👑 پنل مدیریت استوک لند",reply_markup=admin_menu())
+            await show_home(query.message)
 
-        elif data=="dash":
+        elif data=="adm_content":
             await query.answer()
-            t,d,w,m,nt,bl,lf=await asyncio.gather(
-                total_users(),today_users(),week_users(),
-                month_users(),new_today(),blk_count(),left_count())
-            sep="─"*22
-            dash=(f"📊 داشبورد — {shamsi_now()}\n{sep}"
-                  f"\n👥 کل کاربران: {to_fa(t)}     🚫 بلاک: {to_fa(bl)}"
-                  f"\n✅ فعال: {to_fa(t-lf)}     🚪 ترک‌کرده: {to_fa(lf)}"
-                  f"\n{sep}"
-                  f"\n🆕 عضو امروز:   {to_fa(nt)}"
-                  f"\n📅 فعال امروز:  {to_fa(d)}   {progress_bar(d,t)}"
-                  f"\n📆 فعال هفته:   {to_fa(w)}   {progress_bar(w,t)}"
-                  f"\n🗓  فعال ماه:    {to_fa(m)}   {progress_bar(m,t)}"
-                  f"\n{sep}")
-            if len(dash)>4000: dash=dash[:3990]+"..."
-            await safe_edit(query.message,dash,reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📈 آمار بخش‌ها",callback_data="stats_page")],
-                [InlineKeyboardButton("🔙 پنل اصلی",callback_data="back_to_admin")]]))
+            n_btn=sum(len(get_sec_btns(k).get("items",[])) for k in SECTION_NAMES)
+            n_ban=sum(1 for k in SECTION_NAMES if get_banner(k).get("file_id"))
+            en=sum(1 for m in menu_cfg if m.get("enabled",True))
+            await safe_edit(query.message,
+                "✏️ محتوای ربات\n"+"─"*20+
+                f"\n🧩 {to_fa(en)} دکمه در منوی اصلی فعال است"
+                f"\n📝 {to_fa(len(SECTION_NAMES))} بخش  ·  🖼 {to_fa(n_ban)} بنر  ·  🔗 {to_fa(n_btn)} لینک",
+                reply_markup=content_kb())
 
-        elif data=="stats_page":
+        elif data in ("adm_stats","dash","stats_page"):
             await query.answer()
-            # نام قابل‌فهم برای هر کلید آماری
-            labels=dict(SECTION_NAMES); labels["wh_page"]="🕐 ساعت کاری"
-            rows=[(labels.get(k,k),v) for k,v in stats.items() if v]
-            rows.sort(key=lambda r:-r[1])
-            sep="─"*22
-            if not rows:
-                txt=f"📈 آمار بخش‌ها\n{sep}\n\nهنوز بازدیدی ثبت نشده است."
-            else:
-                top=rows[0][1]
-                lines=[f"{progress_bar(v,top)}  {to_fa(v)}  {name}" for name,v in rows]
-                txt=(f"📈 آمار بخش‌ها — {shamsi_now()}\n{sep}\n"
-                     + "\n".join(lines)
-                     + f"\n{sep}\n📊 مجموع بازدید: {to_fa(sum(v for _,v in rows))}")
-            if len(txt)>4000: txt=txt[:3990]+"..."
-            await safe_edit(query.message,txt,reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🗑 صفر کردن آمار",callback_data="stats_reset")],
-                [InlineKeyboardButton("🔙 داشبورد",callback_data="dash")]]))
+            await safe_edit(query.message,await stats_text(),reply_markup=stats_kb())
 
         elif data=="stats_reset":
             stats.clear(); await save_stats()
             await query.answer("✅ آمار صفر شد",show_alert=True)
-            await safe_edit(query.message,"📈 آمار بخش‌ها\n\nآمار صفر شد.",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🔙 داشبورد",callback_data="dash")]]))
+            await safe_edit(query.message,await stats_text(),reply_markup=stats_kb())
 
         elif data=="broadcast":
             await query.answer()
@@ -1266,10 +1365,12 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         elif data.startswith("sec_ban_"):
             await query.answer()
             key=data[8:]; b=get_banner(key)
-            await safe_edit(query.message,
-                f"🖼 بنر: {SECTION_NAMES.get(key,key)}\n"
-                f"{'✅ آپلود شده' if b.get('file_id') else '❌ ندارد'} | {'✅ فعال' if b.get('active') else '❌ غیرفعال'}",
-                reply_markup=banner_kb(key))
+            await safe_edit(query.message,banner_text(key),reply_markup=banner_kb(key))
+            # پیش‌نمایش با نسخه‌ی کوچک — سریع و کم‌حجم
+            th=b.get("thumb_id") or b.get("file_id")
+            if th:
+                try: await query.message.reply_photo(photo=th,caption=f"👁 پیش‌نمایش بنر «{SECTION_NAMES.get(key,key)}»")
+                except Exception as e: logger.debug(f"thumb preview: {e}")
 
         elif data.startswith("ban_up_"):
             await query.answer()
@@ -1280,13 +1381,13 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             key=data[7:]; b=get_banner(key)
             if not b.get("file_id"): await query.answer("ابتدا عکس آپلود کنید!",show_alert=True); return
             b["active"]=not b.get("active",False); await save_banners()
-            await query.answer("✅ فعال" if b["active"] else"❌ غیرفعال",show_alert=True)
-            await safe_edit(query.message,f"🖼 {SECTION_NAMES.get(key,key)} | {'✅ فعال' if b['active'] else '❌ غیرفعال'}",reply_markup=banner_kb(key))
+            await query.answer("✅ فعال شد" if b["active"] else"⚫️ غیرفعال شد",show_alert=True)
+            await safe_edit(query.message,banner_text(key),reply_markup=banner_kb(key))
 
         elif data.startswith("ban_dl_"):
             key=data[7:]; banners[key]={"file_id":None,"active":False}; await save_banners()
             await query.answer("🗑 حذف شد.",show_alert=True)
-            await safe_edit(query.message,f"🖼 {SECTION_NAMES.get(key,key)} | ❌",reply_markup=banner_kb(key))
+            await safe_edit(query.message,banner_text(key),reply_markup=banner_kb(key))
 
         elif data.startswith("sec_btns_"):
             key=data[9:]
@@ -1482,16 +1583,20 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         # ── تنظیمات
         elif data=="settings_menu":
             await query.answer()
-            await safe_edit(query.message,
-                "⚙️ تنظیمات\n" + "─"*18 + "\nمدیریت منو، بخش‌ها و اعلان‌ها:",
-                reply_markup=settings_kb())
+            await safe_edit(query.message,settings_text(),reply_markup=settings_kb())
 
         elif data.startswith("stg_"):
             key=data[4:]; settings[key]=not get_setting(key); await save_settings()
-            await query.answer("✅ ذخیره شد",show_alert=True)
-            await safe_edit(query.message,
-                "⚙️ تنظیمات\n" + "─"*18 + "\nمدیریت منو، بخش‌ها و اعلان‌ها:",
-                reply_markup=settings_kb())
+            on=get_setting(key)
+            if key=="store_open":
+                await query.answer("🟢 فروشگاه باز شد" if on else "🔴 فروشگاه بسته شد",show_alert=True)
+            else:
+                await query.answer("✅ فعال شد" if on else "⚫️ غیرفعال شد",show_alert=True)
+            # از هر صفحه‌ای آمده، همان‌جا بماند
+            if "⚙️ تنظیمات" in (query.message.text or ""):
+                await safe_edit(query.message,settings_text(),reply_markup=settings_kb())
+            else:
+                await show_home(query.message)
 
         # ── کاربران
         elif data=="users_menu":
@@ -1762,11 +1867,34 @@ async def photo_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     if mode=="ban_up":
         key=ctx.user_data.pop("ban_key",None); ctx.user_data.pop("mode",None)
         if not key: await update.message.reply_text("❌ خطا.",reply_markup=main_menu()); return
-        get_banner(key); banners[key]["file_id"]=photo.file_id; banners[key]["active"]=True; await save_banners()
-        await update.message.reply_text(f"✅ بنر «{SECTION_NAMES.get(key,key)}» آپلود شد!",reply_markup=main_menu()); return
+        sizes=update.message.photo
+        big=sizes[-1]                                   # نسخه‌ی اصلی (سنگین)
+        main=pick_photo(sizes) or big                   # نسخه‌ی بهینه برای ارسال
+        thumb=pick_photo(sizes,THUMB_MAX_W) or main     # پیش‌نمایش پنل
+        b=get_banner(key)
+        if b.get("uid") and b["uid"]==main.file_unique_id:
+            b["active"]=True; await save_banners()
+            await update.message.reply_text(
+                "ℹ️ همین تصویر از قبل ثبت شده بود — دوباره آپلود نشد، فقط فعال شد.",
+                reply_markup=main_menu()); return
+        b.update({"file_id":main.file_id,"uid":main.file_unique_id,
+                  "w":getattr(main,"width",0),"h":getattr(main,"height",0),
+                  "thumb_id":thumb.file_id,"active":True})
+        await save_banners()
+        saved=""
+        if getattr(big,"file_size",0) and getattr(main,"file_size",0) and main.file_id!=big.file_id:
+            saved=(f"\n📉 به‌جای {human_kb(big.file_size)}، نسخه‌ی "
+                   f"{human_kb(main.file_size)} استفاده می‌شود.")
+        await update.message.reply_text(
+            f"✅ بنر «{SECTION_NAMES.get(key,key)}» ثبت شد.\n"
+            f"📐 {to_fa(getattr(main,'width',0))}×{to_fa(getattr(main,'height',0))}"
+            f"{saved}\n\n♻️ این تصویر فقط یک‌بار آپلود می‌شود و از این پس بدون "
+            f"آپلود مجدد برای کاربران ارسال می‌گردد.",
+            reply_markup=main_menu()); return
     if mode=="broadcast":
         ctx.user_data.pop("mode",None); caption=update.message.caption or""
-        ctx.user_data["bc_text"]=caption; ctx.user_data["bc_photo"]=photo.file_id
+        bc=pick_photo(update.message.photo) or photo   # سبک‌تر = ارسال سریع‌تر به همه
+        ctx.user_data["bc_text"]=caption; ctx.user_data["bc_photo"]=bc.file_id
         n=len(await get_all_uids())
         await update.message.reply_text(
             f"👁 این تصویر برای {to_fa(n)} کاربر ارسال می‌شود.\nتأیید می‌کنید؟",
