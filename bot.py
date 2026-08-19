@@ -1,4 +1,4 @@
-import os, json, time, asyncio, logging, aiosqlite, jdatetime, pytz, zipfile, io, csv, html, traceback
+import os, re, json, time, asyncio, logging, aiosqlite, jdatetime, pytz, zipfile, io, csv, html, secrets, traceback
 from datetime import datetime, timedelta
 import aiofiles
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
@@ -91,21 +91,42 @@ DEFAULT_WH = {"enabled":True,"schedule":{
     "6":{"open":True,"shifts":[{"from":"17:00","to":"23:00"}]}},
     "msg_open":"✅ هم‌اکنون باز است","msg_closed":"🔴 هم‌اکنون بسته است"}
 DEFAULT_SETTINGS = {"notify_new_user":True,"store_open":True,"forward_user_msgs":True}
-DEFAULT_SEC_WH = {k:True for k in SECTION_NAMES}
 
 # ── helpers
 def get_banner(k): banners.setdefault(k,{"file_id":None,"active":False}); return banners[k]
 def get_sec_btns(k): buttons.setdefault(k,{"enabled":True,"items":[]}); return buttons[k]
 def get_setting(k): return settings.get(k,DEFAULT_SETTINGS.get(k,True))
 
+HHMM_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+
+def valid_shift(sh):
+    return bool(HHMM_RE.match(sh.get("from","")) and HHMM_RE.match(sh.get("to","")))
+
+def in_shift(ns, sh):
+    """آیا ساعت ns داخل شیفت است؟ شیفت‌های نیمه‌شب‌گذر (۲۲:۰۰ تا ۰۲:۰۰) هم پشتیبانی می‌شوند."""
+    if not valid_shift(sh): return False
+    f,t = sh["from"], sh["to"]
+    if f <= t: return f <= ns <= t          # شیفت عادی
+    return ns >= f or ns <= t                # از نیمه‌شب رد می‌شود
+
 def is_open():
     if not get_setting("store_open"): return False
     if not workhours.get("enabled",True): return True
     now=datetime.now(IRAN_TZ); j=jdatetime.datetime.fromgregorian(datetime=now)
-    day=workhours.get("schedule",{}).get(str(j.weekday()),{})
-    if not day.get("open",False): return False
     ns=now.strftime("%H:%M")
-    return any(s["from"]<=ns<=s["to"] for s in day.get("shifts",[]))
+    # شیفتی که از نیمه‌شب گذشته، متعلق به «دیروز» است
+    today=str(j.weekday()); yday=str((j.weekday()-1) % 7)
+    sched=workhours.get("schedule",{})
+    d=sched.get(today,{})
+    if d.get("open",False) and any(in_shift(ns,sh) for sh in d.get("shifts",[])
+                                   if sh.get("from","") <= sh.get("to","")):
+        return True
+    for key in (today,yday):
+        dd=sched.get(key,{})
+        if not dd.get("open",False): continue
+        for sh in dd.get("shifts",[]):
+            if sh.get("from","") > sh.get("to","") and in_shift(ns,sh): return True
+    return False
 
 def wh_today_block():
     if not workhours.get("enabled",True): return None
@@ -132,6 +153,32 @@ def wh_full_table():
             sh=" و ".join(f"{to_fa(s['from'])} تا {to_fa(s['to'])}" for s in day.get("shifts",[]))
             rows.append(f"✅ {name}: {sh}")
     return "\n".join(rows)
+
+def new_btn_id():
+    """شناسه یکتا — time.time() ثانیه‌ای بود و دو دکمه در یک ثانیه شناسه یکسان می‌گرفتند."""
+    return "b" + secrets.token_hex(4)
+
+# طرح‌های مجاز برای دکمه‌های لینک؛ لینک نامعتبر باعث می‌شود تلگرام کل پیام
+# آن بخش را رد کند و بخش برای همه کاربران از کار بیفتد.
+# میزبان باید حداقل یک نقطه و یک TLD حرفی داشته باشد، وگرنه چیزی مثل
+# «https://سلام» هم قبول می‌شد و دکمه در تلگرام رد می‌شد.
+_URL_RE = re.compile(
+    r"^https?://"                       # طرح
+    r"(?:[^\s:@/]+(?::[^\s@/]*)?@)?"     # user:pass اختیاری
+    r"[\w\u0080-\uffff-]+"              # برچسب اول دامنه
+    r"(?:\.[\w\u0080-\uffff-]+)*"      # برچسب‌های میانی
+    r"\.[A-Za-z\u0080-\uffff]{2,}"      # TLD
+    r"(?::\d{1,5})?"                    # پورت اختیاری
+    r"(?:[/?#]\S*)?$",                  # مسیر اختیاری
+    re.IGNORECASE)
+
+def normalize_url(text):
+    """لینک را نرمال و اعتبارسنجی می‌کند. اگر معتبر نبود None برمی‌گرداند."""
+    t=(text or "").strip()
+    if not t: return None
+    if t.startswith(("tg://","mailto:")): return t
+    if not t.lower().startswith(("http://","https://")): t="https://"+t
+    return t if _URL_RE.match(t) and len(t)<=2048 else None
 
 def build_msg(title,content,sec_key):
     lines=[f"✦ {title}","",content]
@@ -160,25 +207,41 @@ async def _stats_flush_loop():
 
 # ── load/save
 async def _rj(path,default):
+    """خواندن JSON. فایلِ خراب قرنطینه می‌شود تا ذخیره‌ی بعدی رویش ننویسد."""
     try:
-        async with aiofiles.open(path,"r",encoding="utf-8") as f: return json.loads(await f.read())
-    except: return default() if callable(default) else default
+        async with aiofiles.open(path,"r",encoding="utf-8") as f:
+            return json.loads(await f.read())
+    except FileNotFoundError:
+        pass                      # اولین اجرا — طبیعی است
+    except Exception as e:
+        # فایل هست ولی خراب است. اگر کاری نکنیم، ذخیره‌ی بعدی محتوای
+        # فروشگاه را با پیش‌فرض بازنویسی و برای همیشه نابود می‌کند.
+        bad=f"{path}.corrupt"
+        try:
+            os.replace(path,bad)
+            logger.error(f"⚠️ {path} خراب بود ({e}) — به {bad} منتقل شد و پیش‌فرض بارگذاری شد.")
+        except Exception as e2:
+            logger.error(f"⚠️ {path} خراب است ({e}) و قرنطینه هم نشد: {e2}")
+    return default() if callable(default) else default
 
 async def _wj(path,data):
+    """نوشتن اتمیک. در صورت شکست False برمی‌گرداند تا فراخوان بتواند خبر بدهد."""
     tmp=path+".tmp"
     try:
         async with aiofiles.open(tmp,"w",encoding="utf-8") as f:
             await f.write(json.dumps(data,ensure_ascii=False,indent=2))
         os.replace(tmp,path)   # atomic — اگر crash کند فایل اصلی سالم می‌ماند
+        return True
     except Exception as e:
         logger.error(f"write {path}: {e}")
         try: os.unlink(tmp)
-        except: pass
+        except Exception: pass
+        return False
 
 async def load_data():
     global responses
     responses=await _rj(DATA_FILE,lambda:dict(MENU_ITEMS,welcome="✨ خوش آمدید به ربات استوک لند"))
-async def save_data(): await _wj(DATA_FILE,responses)
+async def save_data(): return await _wj(DATA_FILE,responses)
 
 async def load_banners():
     global banners
@@ -265,7 +328,7 @@ async def load_settings():
     global settings
     settings=await _rj(SETTINGS_FILE,dict)
     if not settings:
-        settings=dict(DEFAULT_SETTINGS); settings["section_workhours"]=dict(DEFAULT_SEC_WH)
+        settings=dict(DEFAULT_SETTINGS)
         await save_settings()
 async def save_settings(): await _wj(SETTINGS_FILE,settings)
 async def load_stats():
@@ -1281,6 +1344,20 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
                 f"{title}  [{rng} از {to_fa(total)}]\n🆕 در انتظار پیگیری: {to_fa(new_total)}",
                 reply_markup=reqs_kb(reqs,offset,total,only_new))
 
+        elif data=="bc_go":
+            txt=ctx.user_data.pop("bc_text",None); ph=ctx.user_data.pop("bc_photo",None)
+            if txt is None and ph is None:
+                await query.answer("❌ پیامی برای ارسال نیست.",show_alert=True); return
+            await query.answer()
+            await safe_edit(query.message,"📤 در حال ارسال...",reply_markup=None)
+            await broadcast(ctx,txt or "",photo=ph)
+
+        elif data=="bc_no":
+            ctx.user_data.pop("bc_text",None); ctx.user_data.pop("bc_photo",None)
+            await query.answer("لغو شد")
+            await safe_edit(query.message,"↩️ پخش لغو شد — هیچ پیامی ارسال نشد.",
+                            reply_markup=back_admin())
+
         elif data=="broadcast_cancel":
             global _broadcast_cancel
             _broadcast_cancel=True
@@ -1493,8 +1570,14 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     if user.id==ADMIN_ID:
         if mode=="edit_text":
             key=ctx.user_data.pop("edit_key",None); ctx.user_data.pop("mode",None)
-            if key: responses[key]=text; await save_data()
-            await update.message.reply_text("✅ ذخیره شد.",reply_markup=main_menu()); return
+            saved=True
+            if key:
+                responses[key]=text; saved=await save_data()
+            await update.message.reply_text(
+                "✅ ذخیره شد." if saved else
+                "⚠️ متن در حافظه اعمال شد ولی روی دیسک ذخیره نشد!\n"
+                "فضای دیسک یا دسترسی نوشتن سرور را بررسی کنید — با ری‌استارت از بین می‌رود.",
+                reply_markup=main_menu()); return
         if mode=="menu_rename":
             key=ctx.user_data.pop("menu_key",None); ctx.user_data.pop("mode",None)
             m=menu_item(key)
@@ -1506,8 +1589,17 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("✅ ذخیره شد.",reply_markup=main_menu())
             return
         if mode=="broadcast":
-            ctx.user_data.pop("mode",None); await update.message.reply_text("📤 در حال ارسال...")
-            await broadcast(ctx,text); return
+            ctx.user_data.pop("mode",None)
+            ctx.user_data["bc_text"]=text; ctx.user_data.pop("bc_photo",None)
+            n=len(await get_all_uids())
+            await update.message.reply_text("👁 پیش‌نمایش پیام:",reply_markup=main_menu())
+            await update.message.reply_text(text)
+            await update.message.reply_text(
+                f"📢 این پیام برای {to_fa(n)} کاربر ارسال می‌شود.\nتأیید می‌کنید؟",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ ارسال کن",callback_data="bc_go")],
+                    [InlineKeyboardButton("↩️ انصراف",callback_data="bc_no")]]))
+            return
         if mode=="admin_msg":
             target_uid=ctx.user_data.pop("admin_msg_uid",None); ctx.user_data.pop("mode",None)
             if not target_uid: await update.message.reply_text("❌ خطا.",reply_markup=main_menu()); return
@@ -1531,9 +1623,15 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             ctx.user_data.update({"btn_title":text,"mode":"btn_add_u"})
             await update.message.reply_text("🔗 لینک:",reply_markup=cancel_menu()); return
         if mode=="btn_add_u":
+            url=normalize_url(text)
+            if not url:
+                # حالت را نگه می‌داریم تا ادمین دوباره وارد کند — لینک نامعتبر
+                # کل بخش را برای همه کاربران خراب می‌کند
+                await update.message.reply_text(
+                    "❌ لینک معتبر نیست.\nمثال: https://instagram.com/stockland یا t.me/stlandd",
+                    reply_markup=cancel_menu()); return
             key=ctx.user_data.pop("btn_key",None); title=ctx.user_data.pop("btn_title","دکمه"); ctx.user_data.pop("mode",None)
-            url=text if text.startswith("http") else f"https://{text}"
-            sec=get_sec_btns(key); sec["items"].append({"id":f"b{int(time.time())}","title":title,"url":url})
+            sec=get_sec_btns(key); sec["items"].append({"id":new_btn_id(),"title":title,"url":url})
             if not sec.get("enabled"): sec["enabled"]=True
             await save_buttons()
             await update.message.reply_text(f"✅ «{title}» اضافه شد.",reply_markup=sec_btns_kb(key)); return
@@ -1550,12 +1648,23 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
                     if text!=".": it["url"]=text if text.startswith("http") else f"https://{text}"
             await save_buttons(); await update.message.reply_text("✅ ویرایش شد.",reply_markup=main_menu()); return
         if mode=="wh_shifts":
-            dk=ctx.user_data.pop("wh_day",None); ctx.user_data.pop("mode",None)
+            dk=ctx.user_data.get("wh_day")
+            bad="❌ فرمت اشتباه!\nساعت‌ها باید به شکل HH:MM باشند.\nمثال: 11:00-14:00,17:00-23:00"
             try:
-                sh=[{"from":p.split("-")[0].strip(),"to":p.split("-")[1].strip()} for p in text.split(",")]
-                workhours["schedule"][dk]["shifts"]=sh; await save_workhours()
-                await update.message.reply_text("✅ ذخیره شد.",reply_markup=main_menu())
-            except: await update.message.reply_text("❌ فرمت اشتباه!\nمثال: 11:00-14:00,17:00-23:00",reply_markup=main_menu())
+                parts=[p.strip() for p in text.translate(FA_DIGITS).split(",") if p.strip()]
+                sh=[{"from":p.split("-")[0].strip(),"to":p.split("-")[1].strip()} for p in parts]
+            except Exception:
+                await update.message.reply_text(bad,reply_markup=cancel_menu()); return
+            if not sh or not all(valid_shift(x) for x in sh):
+                # حالت را نگه می‌داریم تا ادمین بتواند دوباره تلاش کند
+                await update.message.reply_text(bad,reply_markup=cancel_menu()); return
+            if dk not in workhours.get("schedule",{}):
+                ctx.user_data.pop("mode",None); ctx.user_data.pop("wh_day",None)
+                await update.message.reply_text("❌ روز نامعتبر.",reply_markup=main_menu()); return
+            ctx.user_data.pop("mode",None); ctx.user_data.pop("wh_day",None)
+            workhours["schedule"][dk]["shifts"]=sh; await save_workhours()
+            note="\n\n🌙 شیفت نیمه‌شب‌گذر ثبت شد." if any(x["from"]>x["to"] for x in sh) else ""
+            await update.message.reply_text(f"✅ ذخیره شد.{note}",reply_markup=main_menu())
             return
         if mode=="wh_mop":
             ctx.user_data.pop("mode",None); workhours["msg_open"]=text; await save_workhours()
@@ -1657,8 +1766,14 @@ async def photo_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ بنر «{SECTION_NAMES.get(key,key)}» آپلود شد!",reply_markup=main_menu()); return
     if mode=="broadcast":
         ctx.user_data.pop("mode",None); caption=update.message.caption or""
-        await update.message.reply_text("📤 در حال ارسال...")
-        await broadcast(ctx,caption,photo=photo.file_id); return
+        ctx.user_data["bc_text"]=caption; ctx.user_data["bc_photo"]=photo.file_id
+        n=len(await get_all_uids())
+        await update.message.reply_text(
+            f"👁 این تصویر برای {to_fa(n)} کاربر ارسال می‌شود.\nتأیید می‌کنید؟",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ ارسال کن",callback_data="bc_go")],
+                [InlineKeyboardButton("↩️ انصراف",callback_data="bc_no")]]))
+        return
     if mode=="admin_msg":
         target_uid=ctx.user_data.pop("admin_msg_uid",None); ctx.user_data.pop("mode",None)
         caption=update.message.caption or""

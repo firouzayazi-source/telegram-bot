@@ -46,6 +46,7 @@ stats.json
 menu.json
 backups.json
 pre_restore.zip
+*.corrupt
 
 # ── Backup files
 backup_*.zip
