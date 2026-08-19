@@ -21,14 +21,31 @@ def _env(name):
     return v
 
 TOKEN = _env("BOT_TOKEN")
+# ADMIN_ID می‌تواند یک آیدی باشد یا چند آیدی جداشده با کاما.
+# اولین آیدی «مالک» است: تنها کسی که مدیر اضافه/کم می‌کند و بک‌آپ را
+# بازمی‌گرداند. بقیه فقط به پنل دسترسی دارند.
 try:
-    ADMIN_ID = int(_env("ADMIN_ID"))
+    _ADMIN_ENV = [int(x) for x in re.split(r"[,\s]+", _env("ADMIN_ID").strip()) if x]
 except ValueError:
-    raise SystemExit("❌ ADMIN_ID باید عدد باشد (آیدی عددی تلگرام، نه یوزرنیم).")
+    raise SystemExit("❌ ADMIN_ID باید عدد باشد (آیدی عددی تلگرام، نه یوزرنیم).\n"
+                     "   برای چند مدیر با کاما جدا کنید:  ADMIN_ID=11111111,22222222")
+if not _ADMIN_ENV:
+    raise SystemExit("❌ ADMIN_ID خالی است.")
+OWNER_ID = _ADMIN_ENV[0]
+ADMIN_ID = OWNER_ID          # مالک — مقصد بک‌آپ و گزارش خطا
+_admins: set = set(_ADMIN_ENV)
+_admins_extra: list = []     # مدیرهای افزوده‌شده از پنل (admins.json)
+
+def is_admin(uid) -> bool: return uid in _admins
+def is_owner(uid) -> bool: return uid == OWNER_ID
+def admin_ids() -> list:
+    """مالک همیشه اول فهرست."""
+    return sorted(_admins, key=lambda x: (x != OWNER_ID, x))
 DATA_FILE = "data.json"; DB_FILE = "users.db"; BANNER_FILE = "banner.json"
 WORKHOURS_FILE = "workhours.json"; BUTTONS_FILE = "buttons.json"
 MENU_FILE = "menu.json"; BACKUPS_FILE = "backups.json"; PLACES_FILE = "places.json"
 SETTINGS_FILE = "settings.json"; STATS_FILE = "stats.json"
+ADMINS_FILE = "admins.json"; BROADCAST_FILE = "broadcast.json"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -371,6 +388,40 @@ async def load_settings():
         settings=dict(DEFAULT_SETTINGS)
         await save_settings()
 async def save_settings(): await _wj(SETTINGS_FILE,settings)
+
+# ── مدیران
+async def load_admins():
+    """مدیرهای .env همیشه هستند؛ admins.json فقط مدیرهای افزوده‌شده از پنل است.
+    اگر فایل خراب شود، مالک هرگز دسترسی‌اش را از دست نمی‌دهد."""
+    global _admins_extra
+    data=await _rj(ADMINS_FILE,list)
+    _admins_extra=[int(x) for x in data
+                   if isinstance(x,(int,str)) and str(x).lstrip("-").isdigit()] if isinstance(data,list) else []
+    _admins.clear(); _admins.update(_ADMIN_ENV); _admins.update(_admins_extra)
+    logger.info(f"admins: {len(_admins)} مدیر ({len(_admins_extra)} از پنل)")
+
+async def save_admins(): return await _wj(ADMINS_FILE,_admins_extra)
+
+async def add_admin(uid:int):
+    if uid in _admins: return False
+    _admins_extra.append(uid); _admins.add(uid); await save_admins(); return True
+
+async def del_admin(uid:int):
+    """مالک و مدیرهای .env از پنل حذف نمی‌شوند — وگرنه ممکن است کسی
+    خودش را از ربات بیرون بیندازد و راه برگشتی نماند."""
+    if uid in _ADMIN_ENV: return False
+    if uid in _admins_extra: _admins_extra.remove(uid)
+    _admins.discard(uid); await save_admins(); return True
+
+async def notify_admins(bot,text,exclude=None,**kw):
+    """یک خبر به همه‌ی مدیرها. خطای یک مدیر جلوی بقیه را نمی‌گیرد."""
+    sent=0
+    for aid in admin_ids():
+        if exclude is not None and aid==exclude: continue
+        try:
+            await bot.send_message(aid,text,**kw); sent+=1
+        except Exception as e: logger.debug(f"notify_admins {aid}: {e}")
+    return sent
 async def load_stats():
     global stats; stats=await _rj(STATS_FILE,dict)
 async def save_stats(): await _wj(STATS_FILE,stats)
@@ -447,9 +498,6 @@ async def save_user(u):
         (u.id,u.username or"",u.first_name or"",now,now))
     await db.commit()
     _seen_uids[u.id]=now_ts
-
-async def get_all_uids():
-    async with db.execute("SELECT user_id FROM users WHERE is_blocked=0 AND has_left=0") as c: return[r[0] for r in await c.fetchall()]
 
 async def mark_left(uid, left=1):
     """کاربری که ربات را بلاک/حذف کرده. جدا از is_blocked (که بلاکِ ادمین است)."""
@@ -546,7 +594,7 @@ def spam_check(uid: int) -> str:
       ok    → درخواست معمولی، ادامه بده
       warn  → اولین بار اسپم شناسایی شد — popup هشدار نشان بده، ریپلای نده
       block → کاربر بعد از هشدار ادامه داد — ۱۰ ثانیه بی‌صدا بلاک"""
-    if uid == ADMIN_ID: return 'ok'
+    if is_admin(uid): return 'ok'
     now = time.time()
     # بلاک سخت فعال است؟
     if _hard_block.get(uid, 0) > now: return 'block'
@@ -679,6 +727,14 @@ async def admin_home_text():
         lines.append("🕐 امروز تعطیل است")
     lines += [sep,
               f"👥 {to_fa(t)} کاربر  ·  🆕 {to_fa(nt)} امروز  ·  📅 {to_fa(d)} فعال امروز"]
+    if _bc_job:
+        n=len(_bc_job["queue"])
+        if _bc_job["status"]=="pending" and _bc_job.get("run_at"):
+            lines.append(f"⏰ پخش زمان‌بندی‌شده برای {bc_when_text(_bc_job['run_at'])} · {to_fa(n)} نفر")
+        else:
+            lines.append(f"📢 پخش در حال اجرا — {to_fa(_bc_job['i'])}/{to_fa(n)}")
+    if len(_admins)>1:
+        lines.append(f"👮 {to_fa(len(_admins))} مدیر")
     return "\n".join(lines)
 
 def admin_home_kb():
@@ -906,16 +962,45 @@ def menu_item_kb(key):
     rows.append([InlineKeyboardButton("🔙 بازگشت",callback_data="menu_mgr")])
     return InlineKeyboardMarkup(rows)
 
-def settings_kb():
+def settings_kb(owner=False):
     notif="🟢" if get_setting("notify_new_user") else "⚫️"
     fwd="🟢" if get_setting("forward_user_msgs") else "⚫️"
     shop="🟢" if get_setting("store_open") else "🔴"
-    return InlineKeyboardMarkup(_nav(
-        [InlineKeyboardButton(f"{shop} فروشگاه باز است",callback_data="stg_store_open")],
-        [InlineKeyboardButton(f"{notif} اعلان عضو جدید",callback_data="stg_notify_new_user")],
-        [InlineKeyboardButton(f"{fwd} دریافت پیام کاربران",callback_data="stg_forward_user_msgs")],
-        [InlineKeyboardButton("💾 پشتیبان‌گیری و بازیابی",callback_data="backup")],
-    ))
+    rows=[[InlineKeyboardButton(f"{shop} فروشگاه باز است",callback_data="stg_store_open")],
+          [InlineKeyboardButton(f"{notif} اعلان عضو جدید",callback_data="stg_notify_new_user")],
+          [InlineKeyboardButton(f"{fwd} دریافت پیام کاربران",callback_data="stg_forward_user_msgs")]]
+    # مدیریت مدیرها و بازگردانی بک‌آپ فقط دستِ مالک است
+    if owner:
+        rows.append([InlineKeyboardButton(f"👮 مدیران ربات · {to_fa(len(_admins))}",
+                                          callback_data="adm_admins")])
+        rows.append([InlineKeyboardButton("💾 پشتیبان‌گیری و بازیابی",callback_data="backup")])
+    return InlineKeyboardMarkup(_nav(*rows))
+
+# ── مدیریت مدیرها (فقط مالک)
+async def user_label(uid):
+    async with db.execute("SELECT first_name,username FROM users WHERE user_id=?",(uid,)) as c:
+        r=await c.fetchone()
+    if not r: return "—"
+    return (r[0] or "—")+(f" · @{r[1]}" if r[1] else "")
+
+async def admins_text():
+    lines=["<b>👮 مدیران ربات</b>",HR]
+    for aid in admin_ids():
+        if aid==OWNER_ID:      tag="👑 مالک"
+        elif aid in _ADMIN_ENV: tag="🔒 ثابت (از فایل .env)"
+        else:                   tag="👤 مدیر"
+        lines.append(f"{tag} — {esc(await user_label(aid))}\n🆔 <code>{aid}</code>")
+    lines += [HR,
+              "هر مدیر پیام‌های مشتری‌ها را می‌گیرد و به پنل دسترسی دارد.",
+              "بک‌آپ، بازگردانی و همین صفحه فقط برای مالک باز است."]
+    return "\n".join(lines)
+
+def admins_kb():
+    rows=[[InlineKeyboardButton("➕ افزودن مدیر",callback_data="adm_add")]]
+    for aid in admin_ids():
+        if aid in _ADMIN_ENV: continue   # مالک و مدیرهای .env از پنل حذف نمی‌شوند
+        rows.append([InlineKeyboardButton(f"🗑 حذف {aid}",callback_data=f"adm_del_{aid}")])
+    return InlineKeyboardMarkup(_nav(*rows,back="settings_menu"))
 
 def users_menu_kb(): return InlineKeyboardMarkup(_nav(
     [InlineKeyboardButton("🔍 جستجوی کاربر",callback_data="users_search")],
@@ -1117,52 +1202,246 @@ async def send_banner(msg,text,key,kb=None):
     await msg.reply_text(_fit(text,TEXT_LIMIT),parse_mode="HTML",
                          reply_markup=kb,disable_web_page_preview=True)
 
-# ── broadcast
-_broadcast_active = False
-_broadcast_cancel = False   # توقف اضطراری
+# ════════════════════════════════════════════════
+#  BROADCAST — مقاوم در برابر ری‌استارت، زمان‌بندی‌شده، مخاطب‌محور
+# ════════════════════════════════════════════════
+# کار پخش روی دیسک (broadcast.json) ذخیره می‌شود و پس از هر ۲۰ ارسال
+# به‌روزرسانی می‌گردد؛ اگر ربات وسط پخش ری‌استارت شود، از همان نفر بعدی
+# ادامه می‌دهد و هیچ‌کس دو بار پیام نمی‌گیرد.
+_bc_job: dict = None     # کار جاری
+_bc_task = None          # asyncio.Task در حال ارسال
+_bc_cancel = False
 
-async def broadcast(ctx, text, photo=None):
-    global _broadcast_active, _broadcast_cancel
-    if _broadcast_active:
-        await ctx.bot.send_message(ADMIN_ID, "⚠️ یک پخش در حال اجراست — صبر کنید تا تمام شود.")
-        return
-    _broadcast_active = True; _broadcast_cancel = False
+BC_AUDIENCE = {
+    "all":      ("👥 همه‌ی کاربران",   ""),
+    "active30": ("🔥 فعال‌های ۳۰ روز",  "AND last_seen>=datetime('now','-30 days','localtime')"),
+    "new7":     ("🆕 تازه‌واردهای هفته","AND joined_at>=datetime('now','-7 days','localtime')"),
+    "cold90":   ("💤 غایب‌های ۹۰ روز+", "AND last_seen<datetime('now','-90 days','localtime')"),
+}
+
+async def bc_uids(aud):
+    """فهرست مقصد. بلاک‌شده‌ها، کسانی که ربات را حذف کرده‌اند و خودِ مدیرها
+    همیشه بیرون‌اند (مدیر پیش‌نمایش را دیده، لازم نیست دوباره بگیرد)."""
+    if aud.startswith("src:"):
+        src=aud[4:]
+        if not _SRC_RE.match(src): return []
+        async with db.execute(
+            "SELECT user_id FROM users WHERE is_blocked=0 AND has_left=0 AND source=?",(src,)) as c:
+            rows=await c.fetchall()
+    else:
+        cond=BC_AUDIENCE.get(aud,BC_AUDIENCE["all"])[1]
+        async with db.execute(
+            f"SELECT user_id FROM users WHERE is_blocked=0 AND has_left=0 {cond}") as c:
+            rows=await c.fetchall()
+    return [r[0] for r in rows if not is_admin(r[0])]
+
+def bc_label(aud):
+    if aud.startswith("src:"): return "🎯 "+SOURCE_LABELS.get(aud[4:],aud[4:])
+    return BC_AUDIENCE.get(aud,BC_AUDIENCE["all"])[0]
+
+async def bc_save():
+    if _bc_job is None:
+        try: os.unlink(BROADCAST_FILE)
+        except FileNotFoundError: pass
+        except Exception as e: logger.error(f"bc unlink: {e}")
+        return True
+    return await _wj(BROADCAST_FILE,_bc_job)
+
+async def bc_load():
+    global _bc_job
+    d=await _rj(BROADCAST_FILE,lambda:None)
+    if isinstance(d,dict) and isinstance(d.get("queue"),list) and d.get("status") in ("pending","running"):
+        _bc_job=d
+        logger.info(f"broadcast: کار نیمه‌تمام بازیابی شد — {d.get('i',0)}/{len(d['queue'])}")
+    else:
+        _bc_job=None
+
+def bc_when_text(ts):
+    t=datetime.fromtimestamp(ts,IRAN_TZ)
+    j=jdatetime.datetime.fromgregorian(datetime=t)
+    return f"{to_fa(j.day)} {MONTH_FA[j.month]} ساعت {to_fa(t.strftime('%H:%M'))}"
+
+def bc_status_text():
+    """خلاصه‌ی کار جاری برای صفحه‌ی پخش."""
+    j=_bc_job
+    if not j: return None
+    n=len(j["queue"])
+    if j["status"]=="pending" and j.get("run_at"):
+        return (f"<b>⏰ پخش زمان‌بندی‌شده</b>\n{HR}\n"
+                f"🎯 {esc(bc_label(j['audience']))} — {to_fa(n)} نفر\n"
+                f"🕐 ارسال در {esc(bc_when_text(j['run_at']))}\n\n"
+                f"{esc(_fit(j['text'] or '🖼 (تصویر)',300))}")
+    return (f"<b>📢 پخش در حال اجرا</b>\n{HR}\n"
+            f"🎯 {esc(bc_label(j['audience']))}\n"
+            f"✔️ {to_fa(j['ok'])}  ❌ {to_fa(j['fail'])}  ·  {to_fa(j['i'])}/{to_fa(n)}")
+
+def bc_status_kb():
+    j=_bc_job
+    if not j: return InlineKeyboardMarkup(_nav())
+    cb="bc_kill" if j["status"]=="pending" else "bc_stop"
+    lbl="🗑 لغو پخش زمان‌بندی‌شده" if j["status"]=="pending" else "🛑 توقف پخش"
+    return InlineKeyboardMarkup(_nav([InlineKeyboardButton(lbl,callback_data=cb)],
+                                     [InlineKeyboardButton("🔄 بروزرسانی",callback_data="broadcast")]))
+
+async def bc_aud_kb():
+    """انتخاب مخاطب — تعداد هر گروه کنار نامش."""
+    rows=[]
+    for k,(lbl,_) in BC_AUDIENCE.items():
+        rows.append([InlineKeyboardButton(f"{lbl} · {to_fa(len(await bc_uids(k)))}",
+                                          callback_data=f"bc_aud_{k}")])
+    for src,cnt in await source_stats():
+        if src and src!="—" and cnt:
+            n=len(await bc_uids("src:"+src))
+            if n: rows.append([InlineKeyboardButton(
+                f"🎯 {SOURCE_LABELS.get(src,src)} · {to_fa(n)}",callback_data=f"bc_aud_src:{src}")])
+    return InlineKeyboardMarkup(_nav(*rows))
+
+def bc_confirm_kb():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ ارسال فوری",callback_data="bc_go")],
+        [InlineKeyboardButton("⏰ زمان‌بندی",callback_data="bc_when")],
+        [InlineKeyboardButton("↩️ انصراف",callback_data="bc_no")]])
+
+def bc_when_kb():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⏰ ۱ ساعت دیگر",callback_data="bc_in_60"),
+         InlineKeyboardButton("⏰ ۳ ساعت دیگر",callback_data="bc_in_180")],
+        [InlineKeyboardButton("🌅 فردا ساعت ۱۰:۰۰",callback_data="bc_in_t10"),
+         InlineKeyboardButton("🕐 ساعت دلخواه",callback_data="bc_in_ask")],
+        [InlineKeyboardButton("↩️ انصراف",callback_data="bc_no")]])
+
+def bc_next_at(hh,mm):
+    """نزدیک‌ترین رخداد بعدیِ این ساعت به وقت تهران."""
+    now=datetime.now(IRAN_TZ)
+    t=now.replace(hour=hh,minute=mm,second=0,microsecond=0)
+    if t<=now: t+=timedelta(days=1)
+    return t.timestamp()
+
+async def bc_create(ctx,by,run_at=None):
+    """ساخت کار پخش از پیش‌نویسِ داخل user_data."""
+    global _bc_job
+    aud=ctx.user_data.get("bc_aud","all")
+    queue=await bc_uids(aud)
+    _bc_job={"id":secrets.token_hex(4),"text":ctx.user_data.get("bc_text","") or "",
+             "photo":ctx.user_data.get("bc_photo"),"audience":aud,"queue":queue,
+             "i":0,"ok":0,"fail":0,"gone":0,"by":by,"run_at":run_at,
+             "status":"pending" if run_at else "running",
+             "created":gregorian_now(),"msg_id":None}
+    for k in ("bc_aud","bc_text","bc_photo"): ctx.user_data.pop(k,None)
+    await bc_save()
+    return _bc_job
+
+def bc_start(bot):
+    global _bc_task
+    if _bc_task is None or _bc_task.done():
+        _bc_task=asyncio.ensure_future(bc_run(bot))
+
+async def bc_run(bot):
+    """ارسال از همان نفری که مانده بود. تنها جایی که _bc_job پاک می‌شود."""
+    global _bc_job,_bc_cancel
+    job=_bc_job
+    if not job: return
+    job["status"]="running"; _bc_cancel=False
+    q=job["queue"]; total=len(q)
+    kb=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 توقف پخش",callback_data="bc_stop")]])
+
+    async def status(txt,markup=kb):
+        try:
+            if job.get("msg_id"):
+                await bot.edit_message_text(txt,chat_id=job["by"],
+                                            message_id=job["msg_id"],reply_markup=markup)
+            else:
+                m=await bot.send_message(job["by"],txt,reply_markup=markup)
+                job["msg_id"]=m.message_id
+        except Exception: pass
+
+    async def send_one(uid):
+        if job["photo"]:
+            await bot.send_photo(uid,photo=job["photo"],caption=job["text"] or None)
+        else:
+            await bot.send_message(uid,job["text"])
+
+    await status(f"📢 در حال ارسال به {to_fa(total)} نفر…")
     try:
-        users = await get_all_uids(); total = len(users); ok = fail = gone = 0
-        cancel_kb=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 توقف پخش",callback_data="broadcast_cancel")]])
-        st = await ctx.bot.send_message(ADMIN_ID, f"📢 شروع پخش به {to_fa(total)} کاربر...", reply_markup=cancel_kb)
-        for i, uid in enumerate(users, 1):
-            if _broadcast_cancel:
-                await st.edit_text(f"🛑 پخش متوقف شد!\n✔️ {to_fa(ok)} | ❌ {to_fa(fail)}",reply_markup=None)
+        while job["i"]<total:
+            if _bc_cancel:
+                job["status"]="canceled"
+                _bc_job=None; _bc_cancel=False; await bc_save()
+                await status(f"🛑 پخش متوقف شد\n✔️ {to_fa(job['ok'])}  ❌ {to_fa(job['fail'])}",None)
                 return
+            uid=q[job["i"]]
             try:
-                if photo: await ctx.bot.send_photo(uid, photo=photo, caption=text)
-                else:     await ctx.bot.send_message(uid, text)
-                ok += 1
+                await send_one(uid); job["ok"]+=1
             except Forbidden:
-                # کاربر ربات را بلاک کرده یا اکانتش حذف شده — علامت بزن تا
-                # پخش‌های بعدی وقت تلف نکنند و آمار واقعی بماند
-                gone += 1; fail += 1
+                # ربات را بلاک/حذف کرده — علامت بزن تا پخش‌های بعدی وقت تلف نکنند
+                job["gone"]+=1; job["fail"]+=1
                 await mark_left(uid)
             except Exception as e:
-                retry = getattr(e, "retry_after", None)
+                retry=getattr(e,"retry_after",None)
                 if retry:
-                    await asyncio.sleep(retry + 1)
-                    try:
-                        if photo: await ctx.bot.send_photo(uid, photo=photo, caption=text)
-                        else:     await ctx.bot.send_message(uid, text)
-                        ok += 1
-                    except: fail += 1
-                else: fail += 1
-            await asyncio.sleep(0.05)   # همیشه — وگرنه زنجیره خطا API را می‌کوبد
-            if i % 20 == 0 or i == total:
-                try: await st.edit_text(f"📢 {to_fa(ok)}✔️ {to_fa(fail)}❌  {to_fa(i)}/{to_fa(total)}",reply_markup=cancel_kb if i<total else None)
-                except: pass
-        summary=f"✅ پخش تمام شد!\nموفق: {to_fa(ok)} | شکست: {to_fa(fail)}"
-        if gone: summary+=f"\n🚪 {to_fa(gone)} کاربر ربات را بلاک/حذف کرده بود — از لیست پخش کنار گذاشته شد."
-        await st.edit_text(summary, reply_markup=None)
-    finally:
-        _broadcast_active = False; _broadcast_cancel = False
+                    await asyncio.sleep(float(retry)+1)
+                    try: await send_one(uid); job["ok"]+=1
+                    except Exception: job["fail"]+=1
+                else: job["fail"]+=1
+            job["i"]+=1
+            await asyncio.sleep(0.05)   # همیشه — وگرنه زنجیره‌ی خطا API را می‌کوبد
+            if job["i"]%20==0 or job["i"]==total:
+                await bc_save()
+                await status(f"📢 {to_fa(job['ok'])}✔️ {to_fa(job['fail'])}❌  "
+                             f"{to_fa(job['i'])}/{to_fa(total)}",
+                             kb if job["i"]<total else None)
+    except asyncio.CancelledError:
+        await bc_save(); raise
+    except Exception as e:
+        # کار پاک نمی‌شود تا حلقه‌ی زمان‌بند دوباره از همین‌جا ادامه دهد
+        logger.error(f"broadcast: {e}",exc_info=True)
+        await bc_save()
+        await status(f"⚠️ پخش موقتاً متوقف شد ({to_fa(job['i'])}/{to_fa(total)}) — "
+                     f"خودکار ادامه پیدا می‌کند.",None)
+        return
+    job["status"]="done"
+    summary=(f"✅ پخش تمام شد\n"
+             f"🎯 {bc_label(job['audience'])}\n"
+             f"✔️ رسید: {to_fa(job['ok'])}   ❌ نرسید: {to_fa(job['fail'])}")
+    if job["gone"]:
+        summary+=(f"\n🚪 {to_fa(job['gone'])} نفر ربات را بلاک/حذف کرده بودند — "
+                  f"از فهرست پخش کنار گذاشته شدند.")
+    _bc_job=None; _bc_cancel=False; await bc_save()
+    await status(summary,None)
+
+_BC_MAX_TRIES = 5   # سقف تلاش برای یک کار — جلوگیری از حلقه‌ی بی‌پایان
+
+async def _bc_loop(bot):
+    """هر ۲۰ ثانیه: کارِ نیمه‌تمام را از سر بگیر، کارِ زمان‌بندی‌شده را سر وقت اجرا کن."""
+    global _bc_job
+    await asyncio.sleep(8)          # بگذار راه‌اندازی کامل شود
+    announced=set(); tries={}
+    while True:
+        try:
+            job=_bc_job
+            if job and (_bc_task is None or _bc_task.done()):
+                if not job.get("run_at") or time.time()>=job["run_at"]:
+                    n=tries[job["id"]]=tries.get(job["id"],0)+1
+                    if n>_BC_MAX_TRIES:
+                        # کاری که پشت‌سرهم می‌ترکد نباید تا ابد تلاش کند
+                        logger.error(f"broadcast {job['id']}: بعد از {n-1} تلاش رها شد")
+                        left=len(job["queue"])-job["i"]
+                        by=job["by"]; _bc_job=None; await bc_save()
+                        try: await bot.send_message(by,
+                            f"⚠️ پخش بعد از چند تلاش ناموفق رها شد — "
+                            f"{to_fa(left)} نفر باقی مانده بودند. لطفاً دوباره امتحان کنید.")
+                        except Exception: pass
+                        continue
+                    if job["i"]>0 and job["id"] not in announced:
+                        announced.add(job["id"])
+                        try: await bot.send_message(job["by"],
+                            f"♻️ پخش نیمه‌تمام از سر گرفته شد "
+                            f"({to_fa(job['i'])}/{to_fa(len(job['queue']))}).")
+                        except Exception: pass
+                    job["msg_id"]=None
+                    bc_start(bot)
+        except Exception as e: logger.error(f"bc_loop: {e}")
+        await asyncio.sleep(20)
 
 # ── backup
 _backup_registry: list = []  # [{"msg_id": int, "file_id": str, "date": str}]
@@ -1184,20 +1463,21 @@ async def send_backup(bot):
     buf=io.BytesIO()
     files=[(DATA_FILE,"data.json"),(BANNER_FILE,"banner.json"),(WORKHOURS_FILE,"workhours.json"),
            (BUTTONS_FILE,"buttons.json"),(SETTINGS_FILE,"settings.json"),(STATS_FILE,"stats.json"),
-           (MENU_FILE,"menu.json"),(PLACES_FILE,"places.json"),(DB_FILE,"users.db")]
+           (MENU_FILE,"menu.json"),(PLACES_FILE,"places.json"),(ADMINS_FILE,"admins.json"),
+           (DB_FILE,"users.db")]
     with zipfile.ZipFile(buf,"w",zipfile.ZIP_DEFLATED) as zf:
         for fp,name in files:
             try:
                 async with aiofiles.open(fp,"rb") as f: zf.writestr(name,await f.read())
             except Exception as e: logger.warning(f"backup skip {fp}: {e}")
     buf.seek(0)
-    msg=await bot.send_document(ADMIN_ID,document=buf,filename=f"backup_{ts}.zip",
+    msg=await bot.send_document(OWNER_ID,document=buf,filename=f"backup_{ts}.zip",
                                 caption=f"💾 بک‌آپ — {shamsi_now()}")
     _backup_registry.append({"msg_id":msg.message_id,"file_id":msg.document.file_id,"date":shamsi_now()})
     # اگر بیشتر از MAX_BACKUPS داریم، قدیمی‌ترین را حذف کن
     while len(_backup_registry)>MAX_BACKUPS:
         old=_backup_registry.pop(0)
-        try: await bot.delete_message(ADMIN_ID,old["msg_id"])
+        try: await bot.delete_message(OWNER_ID,old["msg_id"])
         except Exception as e: logger.debug(f"backup delete old: {e}")
     await save_backup_registry()
 
@@ -1229,7 +1509,8 @@ async def _auto_backup_loop(bot):
 
 BACKUP_MAP = {"data.json":DATA_FILE,"banner.json":BANNER_FILE,"workhours.json":WORKHOURS_FILE,
               "buttons.json":BUTTONS_FILE,"settings.json":SETTINGS_FILE,"stats.json":STATS_FILE,
-              "menu.json":MENU_FILE,"places.json":PLACES_FILE,"users.db":DB_FILE}
+              "menu.json":MENU_FILE,"places.json":PLACES_FILE,"admins.json":ADMINS_FILE,
+              "users.db":DB_FILE}
 SQLITE_MAGIC = b"SQLite format 3\x00"
 MAX_RESTORE_BYTES = 200 * 1024 * 1024   # سقف ایمنی برای فایل‌های داخل ZIP
 
@@ -1297,6 +1578,7 @@ async def restore_backup(bot,file_id):
 
         await load_data(); await load_banners(); await load_workhours()
         await load_buttons(); await load_settings(); await load_stats(); await load_menu(); await load_places()
+        await load_admins()   # فهرست مدیرها هم از فایلِ تازه دوباره خوانده شود
         # نرمال‌سازی فرمت فایل‌ها روی دیسک (جلوگیری از مشکل فرمت قدیمی بعد از restart)
         await save_banners(); await save_buttons()
         if snapshot: logger.info(f"بکاپ ایمنی پیش از بازگردانی: {snapshot}")
@@ -1320,8 +1602,9 @@ async def cmd_start(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     # t.me/<bot>?start=insta → می‌فهمیم مشتری از کجا آمده (برای خودِ کاربر نامرئی)
     if getattr(ctx,"args",None): await set_source(user.id,ctx.args[0])
     if get_setting("notify_new_user") and is_new:
-        try: await ctx.bot.send_message(ADMIN_ID,f"🆕 کاربر جدید!\n👤 {user.first_name or'—'}\n{'@'+user.username if user.username else'—'}\n🆔 {user.id}")
-        except: pass
+        await notify_admins(ctx.bot,
+            f"🆕 کاربر جدید!\n👤 {user.first_name or'—'}\n"
+            f"{'@'+user.username if user.username else'—'}\n🆔 {user.id}")
     name=(user.first_name or "").strip()
     wt=strip_button_links(responses.get("welcome","") or "","welcome")
     head=f"سلام {esc(name)} 👋" if name else "سلام 👋"
@@ -1352,7 +1635,8 @@ async def cmd_help(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML",reply_markup=main_menu(),disable_web_page_preview=True)
 
 async def cmd_admin(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id!=ADMIN_ID: return await update.message.reply_text("⛔ دسترسی ندارید")
+    if not is_admin(update.effective_user.id):
+        return await update.message.reply_text("⛔ دسترسی ندارید")
     await show_home(update.message,edit=False)
 
 # ════════════════════════════════════════════════
@@ -1380,22 +1664,23 @@ async def user_cb(query,ctx):
 _USER_CB_PREFIXES = ("wh_weekly","wh_back_today")
 
 async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
+    global _bc_job,_bc_cancel
     query=update.callback_query
     data=query.data; uid=query.from_user.id
 
     # ── محافظت اسپم
-    if uid!=ADMIN_ID:
+    if not is_admin(uid):
         _s=spam_check(uid)
         if _s=='block':
             await query.answer(); return
         if _s=='warn':
             await query.answer("🐢 لطفاً کمی آرام‌تر کلیک کنید.",show_alert=True); return
-    if uid!=ADMIN_ID:
+    if not is_admin(uid):
         if await is_blocked(uid):
             await query.answer("⛔ دسترسی شما مسدود شده است."); return
 
     # ── مسیریابی کاربران — answer یکبار اینجا فراخوانی می‌شه
-    if data.startswith(_USER_CB_PREFIXES) or uid!=ADMIN_ID:
+    if data.startswith(_USER_CB_PREFIXES) or not is_admin(uid):
         await query.answer()
         try: await user_cb(query,ctx)
         except Exception as e:
@@ -1432,8 +1717,86 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
 
         elif data=="broadcast":
             await query.answer()
-            ctx.user_data["mode"]="broadcast"
-            await query.message.reply_text("📢 پیام ارسال کنید:",reply_markup=cancel_menu())
+            if _bc_job:
+                await safe_edit(query.message,bc_status_text(),
+                                reply_markup=bc_status_kb(),parse_mode="HTML")
+            else:
+                await safe_edit(query.message,
+                    "<b>📣 پیام همگانی</b>\n"+HR+
+                    "\nاول انتخاب کنید پیام به چه کسانی برسد:",
+                    reply_markup=await bc_aud_kb(),parse_mode="HTML")
+
+        elif data.startswith("bc_aud_"):
+            aud=data[7:]
+            n=len(await bc_uids(aud))
+            if not n:
+                await query.answer("این گروه الان کاربری ندارد.",show_alert=True); return
+            await query.answer()
+            ctx.user_data.update({"mode":"broadcast","bc_aud":aud})
+            await query.message.reply_text(
+                f"🎯 مخاطب: {bc_label(aud)} — {to_fa(n)} نفر\n\n"
+                f"حالا پیام را بفرستید (متن یا عکس با کپشن):",
+                reply_markup=cancel_menu())
+
+        elif data=="bc_go":
+            await query.answer()
+            if not ctx.user_data.get("bc_text") and not ctx.user_data.get("bc_photo"):
+                await safe_edit(query.message,"⏳ این پیش‌نویس دیگر معتبر نیست. از نو شروع کنید.",
+                                reply_markup=None); return
+            if _bc_job:
+                await safe_edit(query.message,"⚠️ یک پخش دیگر در جریان است — اول آن را تمام یا لغو کنید.",
+                                reply_markup=None); return
+            job=await bc_create(ctx,uid)
+            await safe_edit(query.message,
+                f"🚀 پخش شروع شد — {to_fa(len(job['queue']))} نفر.",reply_markup=None)
+            bc_start(ctx.bot)
+
+        elif data=="bc_when":
+            await query.answer()
+            await safe_edit(query.message,"⏰ چه زمانی ارسال شود؟",reply_markup=bc_when_kb())
+
+        elif data in ("bc_in_60","bc_in_180","bc_in_t10"):
+            await query.answer()
+            if not ctx.user_data.get("bc_text") and not ctx.user_data.get("bc_photo"):
+                await safe_edit(query.message,"⏳ این پیش‌نویس دیگر معتبر نیست. از نو شروع کنید.",
+                                reply_markup=None); return
+            if _bc_job:
+                await safe_edit(query.message,"⚠️ یک پخش دیگر در جریان است.",reply_markup=None); return
+            run_at=(bc_next_at(10,0) if data=="bc_in_t10"
+                    else time.time()+(60 if data=="bc_in_60" else 180)*60)
+            job=await bc_create(ctx,uid,run_at=run_at)
+            await safe_edit(query.message,
+                f"⏰ زمان‌بندی شد — {bc_when_text(run_at)}\n"
+                f"🎯 {bc_label(job['audience'])} · {to_fa(len(job['queue']))} نفر\n\n"
+                f"تا آن لحظه می‌توانید از «📣 پیام همگانی» لغوش کنید.",reply_markup=None)
+
+        elif data=="bc_in_ask":
+            await query.answer()
+            ctx.user_data["mode"]="bc_time"
+            await query.message.reply_text(
+                "🕐 ساعت ارسال را به شکل ۲۴ساعته بنویسید — مثلاً 09:30 یا 21:00\n"
+                "(اگر از الان گذشته باشد، فردا همان ساعت ارسال می‌شود.)",
+                reply_markup=cancel_menu())
+
+        elif data=="bc_no":
+            await query.answer("انصراف داده شد.")
+            for k in ("mode","bc_aud","bc_text","bc_photo"): ctx.user_data.pop(k,None)
+            await safe_edit(query.message,"↩️ پخش لغو شد.",reply_markup=None)
+
+        elif data=="bc_stop":
+            _bc_cancel=True
+            await query.answer("🛑 در حال توقف پخش…",show_alert=True)
+
+        elif data=="bc_kill":
+            if _bc_job and _bc_job["status"]=="pending":
+                _bc_job=None; await bc_save()
+                await query.answer("🗑 پخش زمان‌بندی‌شده لغو شد.",show_alert=True)
+                await show_home(query.message)
+            else:
+                await query.answer("این پخش دیگر قابل لغو نیست.",show_alert=True)
+
+        elif data.startswith("backup") and not is_owner(uid):
+            await query.answer("⛔ بک‌آپ و بازگردانی فقط دستِ مالک ربات است.",show_alert=True)
 
         elif data=="backup":
             await query.answer()
@@ -1718,12 +2081,6 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             await query.answer("🗑 حذف شد.",show_alert=True)
             await safe_edit(query.message,f"🔘 {SECTION_NAMES.get(key,key)}",reply_markup=sec_btns_kb(key))
 
-        # ── درخواست‌ها
-        elif data=="broadcast_cancel":
-            global _broadcast_cancel
-            _broadcast_cancel=True
-            await query.answer("🛑 در حال توقف پخش...")
-
         elif data.startswith("rq_msg_"):
             target_uid=int(data[7:])
             await query.answer()
@@ -1775,7 +2132,38 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         # ── تنظیمات
         elif data=="settings_menu":
             await query.answer()
-            await safe_edit(query.message,settings_text(),reply_markup=settings_kb())
+            await safe_edit(query.message,settings_text(),reply_markup=settings_kb(is_owner(uid)))
+
+        elif data=="adm_admins":
+            if not is_owner(uid):
+                await query.answer("⛔ فقط مالک ربات به این بخش دسترسی دارد.",show_alert=True); return
+            await query.answer()
+            await safe_edit(query.message,await admins_text(),
+                            reply_markup=admins_kb(),parse_mode="HTML")
+
+        elif data=="adm_add":
+            if not is_owner(uid):
+                await query.answer("⛔ فقط مالک ربات می‌تواند مدیر اضافه کند.",show_alert=True); return
+            await query.answer()
+            ctx.user_data["mode"]="adm_add"
+            await query.message.reply_text(
+                "➕ افزودن مدیر\n"
+                "یکی از این دو کار را بکنید:\n"
+                "• آیدی عددی او را بفرستید (از @userinfobot)\n"
+                "• یا یکی از پیام‌های <b>متنی</b>‌اش را برای من فوروارد کنید\n\n"
+                "او باید حداقل یک‌بار ربات را استارت کرده باشد.",parse_mode="HTML",
+                reply_markup=cancel_menu())
+
+        elif data.startswith("adm_del_"):
+            if not is_owner(uid):
+                await query.answer("⛔ فقط مالک ربات می‌تواند مدیر حذف کند.",show_alert=True); return
+            try: tgt=int(data[8:])
+            except ValueError:
+                await query.answer("آیدی نامعتبر.",show_alert=True); return
+            ok=await del_admin(tgt)
+            await query.answer("🗑 حذف شد." if ok else "این مدیر از پنل حذف نمی‌شود.",show_alert=True)
+            await safe_edit(query.message,await admins_text(),
+                            reply_markup=admins_kb(),parse_mode="HTML")
 
         elif data.startswith("stg_"):
             key=data[4:]; settings[key]=not get_setting(key); await save_settings()
@@ -1786,7 +2174,7 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
                 await query.answer("✅ فعال شد" if on else "⚫️ غیرفعال شد",show_alert=True)
             # از هر صفحه‌ای آمده، همان‌جا بماند
             if "⚙️ تنظیمات" in (query.message.text or ""):
-                await safe_edit(query.message,settings_text(),reply_markup=settings_kb())
+                await safe_edit(query.message,settings_text(),reply_markup=settings_kb(is_owner(uid)))
             else:
                 await show_home(query.message)
 
@@ -1852,7 +2240,7 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
 async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     user=update.effective_user; text=update.message.text.strip()
     await save_user(user)
-    if user.id != ADMIN_ID:
+    if not is_admin(user.id):
         _s=spam_check(user.id)
         if _s=='block': return
         if _s=='warn': return await update.message.reply_text("🐢 لطفاً آرام‌تر پیام دهید.")
@@ -1862,7 +2250,7 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     mode=ctx.user_data.get("mode")
 
     # ════ ADMIN ════
-    if user.id==ADMIN_ID:
+    if is_admin(user.id):
         if mode=="edit_text":
             key=ctx.user_data.pop("edit_key",None); ctx.user_data.pop("mode",None)
             saved=True
@@ -1886,15 +2274,65 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         if mode=="broadcast":
             ctx.user_data.pop("mode",None)
             ctx.user_data["bc_text"]=text; ctx.user_data.pop("bc_photo",None)
-            n=len(await get_all_uids())
+            aud=ctx.user_data.get("bc_aud","all"); n=len(await bc_uids(aud))
             await update.message.reply_text("👁 پیش‌نمایش پیام:",reply_markup=main_menu())
             await update.message.reply_text(text)
             await update.message.reply_text(
-                f"📢 این پیام برای {to_fa(n)} کاربر ارسال می‌شود.\nتأیید می‌کنید؟",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("✅ ارسال کن",callback_data="bc_go")],
-                    [InlineKeyboardButton("↩️ انصراف",callback_data="bc_no")]]))
+                f"🎯 {bc_label(aud)} — {to_fa(n)} نفر\nچه کار کنم؟",
+                reply_markup=bc_confirm_kb())
             return
+        if mode=="adm_add":
+            ctx.user_data.pop("mode",None)
+            if not is_owner(user.id):
+                await update.message.reply_text("⛔ فقط مالک ربات می‌تواند مدیر اضافه کند.",
+                                                reply_markup=main_menu()); return
+            tgt=None
+            fo=getattr(update.message,"forward_origin",None)
+            su=getattr(fo,"sender_user",None) if fo else None
+            if su: tgt=su.id
+            else:
+                d=text.translate(FA_DIGITS).strip()
+                if d.isdigit(): tgt=int(d)
+            if not tgt:
+                await update.message.reply_text(
+                    "❌ آیدی عددی پیدا نشد.\n"
+                    "اگر پیام را فوروارد کردید و جواب نداد، یعنی حریم خصوصی طرف "
+                    "بسته است — آیدی عددی‌اش را دستی بفرستید.",reply_markup=main_menu()); return
+            known=await user_label(tgt)
+            if not await add_admin(tgt):
+                await update.message.reply_text("ℹ️ این شخص از قبل مدیر است.",
+                                                reply_markup=main_menu()); return
+            note="" if known!="—" else ("\n⚠️ این کاربر هنوز ربات را استارت نکرده — "
+                                        "تا وقتی /start نزند پیامی از ربات نمی‌گیرد.")
+            await update.message.reply_text(
+                f"✅ مدیر جدید اضافه شد.\n👤 {known}\n🆔 {tgt}{note}",reply_markup=main_menu())
+            try:
+                await ctx.bot.send_message(tgt,
+                    f"👮 شما به‌عنوان مدیر {SHOP_NAME} اضافه شدید.\n"
+                    f"برای باز کردن پنل، دستور /admin را بزنید.")
+            except Exception: pass
+            return
+        if mode=="bc_time":
+            ctx.user_data.pop("mode",None)
+            hhmm=text.translate(FA_DIGITS).replace(".",":").replace("،",":").strip()
+            if not HHMM_RE.match(hhmm):
+                ctx.user_data["mode"]="bc_time"
+                await update.message.reply_text(
+                    "❌ ساعت را به شکل ۲۴ساعته بنویسید — مثلاً 09:30",
+                    reply_markup=cancel_menu()); return
+            if not ctx.user_data.get("bc_text") and not ctx.user_data.get("bc_photo"):
+                await update.message.reply_text("⏳ پیش‌نویس منقضی شده. از نو شروع کنید.",
+                                                reply_markup=main_menu()); return
+            if _bc_job:
+                await update.message.reply_text("⚠️ یک پخش دیگر در جریان است.",
+                                                reply_markup=main_menu()); return
+            h,m=[int(x) for x in hhmm.split(":")]
+            run_at=bc_next_at(h,m)
+            job=await bc_create(ctx,user.id,run_at=run_at)
+            await update.message.reply_text(
+                f"⏰ زمان‌بندی شد — {bc_when_text(run_at)}\n"
+                f"🎯 {bc_label(job['audience'])} · {to_fa(len(job['queue']))} نفر",
+                reply_markup=main_menu()); return
         if mode=="admin_msg":
             target_uid=ctx.user_data.pop("admin_msg_uid",None); ctx.user_data.pop("mode",None)
             if not target_uid: await update.message.reply_text("❌ خطا.",reply_markup=main_menu()); return
@@ -2022,25 +2460,32 @@ async def forward_to_admin(update:Update,ctx:ContextTypes.DEFAULT_TYPE,kind=""):
     مخاطب. قبلاً فقط متن وصل بود و بقیه بی‌صدا دور ریخته می‌شد.
     """
     user=update.effective_user
-    if user.id==ADMIN_ID or not get_setting("forward_user_msgs"): return False
+    if is_admin(user.id) or not get_setting("forward_user_msgs"): return False
     msg=update.message
     if msg is None: return False
+    uname=f"@{user.username}" if user.username else "—"
+    card=(f"<b>💬 {esc(kind or 'پیام')} از مشتری</b>\n{HR}\n"
+          f"👤 {esc(user.first_name or '—')}  ·  {esc(uname)}\n🆔 <code>{user.id}</code>")
+    kb=InlineKeyboardMarkup([[InlineKeyboardButton("💬 پاسخ",callback_data=f"rq_msg_{user.id}")]])
+    delivered=0
+    # به همه‌ی مدیرها می‌رود تا هرکس زودتر دید جواب بدهد؛ خطای یکی
+    # نباید جلوی بقیه را بگیرد.
+    for aid in admin_ids():
+        try:
+            fwd=await ctx.bot.forward_message(aid,msg.chat_id,msg.message_id)
+            await ctx.bot.send_message(aid,card,parse_mode="HTML",
+                                       reply_to_message_id=fwd.message_id,reply_markup=kb)
+            delivered+=1
+        except Exception as e:
+            logger.error(f"forward user msg → {aid}: {e}")
+    if not delivered: return False
     try:
-        fwd=await ctx.bot.forward_message(ADMIN_ID,msg.chat_id,msg.message_id)
-        uname=f"@{user.username}" if user.username else "—"
-        await ctx.bot.send_message(ADMIN_ID,
-            f"<b>💬 {esc(kind or 'پیام')} از مشتری</b>\n{HR}\n"
-            f"👤 {esc(user.first_name or '—')}  ·  {esc(uname)}\n🆔 <code>{user.id}</code>",
-            parse_mode="HTML",reply_to_message_id=fwd.message_id,
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("💬 پاسخ",callback_data=f"rq_msg_{user.id}")]]))
         await msg.reply_text(
             "<b>✅ پیام شما دریافت شد</b>\n"+HR+"\nهمکاران ما به‌زودی پاسخ می‌دهند. 🙏",
             parse_mode="HTML",reply_markup=main_menu())
-        return True
     except Exception as e:
-        logger.error(f"forward user msg: {e}")
-        return False
+        logger.error(f"ack to user: {e}")
+    return True
 
 # نوع پیام → برچسبی که در اعلان ادمین می‌آید
 _KIND_BY_ATTR = (("voice","🎤 ویس"),("video_note","🎥 ویدیو پیام"),("video","🎬 ویدیو"),
@@ -2050,7 +2495,7 @@ _KIND_BY_ATTR = (("voice","🎤 ویس"),("video_note","🎥 ویدیو پیام
 async def user_media_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     """رسانه‌ای که مشتری می‌فرستد — عکس، ویس، ویدیو، فایل، مخاطب."""
     user=update.effective_user
-    if user.id==ADMIN_ID: return          # مسیر ادمین در هندلرهای اختصاصی است
+    if is_admin(user.id): return          # مسیر ادمین در هندلرهای اختصاصی است
     await save_user(user)
     if await is_blocked(user.id): return
     if spam_check(user.id)!='ok': return
@@ -2068,7 +2513,7 @@ async def photo_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     # PTB در هر گروه فقط اولین هندلرِ منطبق را اجرا می‌کند؛ چون این هندلر
     # زودتر ثبت شده، عکسِ مشتری باید همین‌جا به مسیر فوروارد سپرده شود
     # وگرنه بی‌صدا دور ریخته می‌شود.
-    if user.id!=ADMIN_ID:
+    if not is_admin(user.id):
         return await user_media_handler(update,ctx)
     mode=ctx.user_data.get("mode"); photo=update.message.photo[-1]
     if mode=="ban_up":
@@ -2102,12 +2547,10 @@ async def photo_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         ctx.user_data.pop("mode",None); caption=update.message.caption or""
         bc=pick_photo(update.message.photo) or photo   # سبک‌تر = ارسال سریع‌تر به همه
         ctx.user_data["bc_text"]=caption; ctx.user_data["bc_photo"]=bc.file_id
-        n=len(await get_all_uids())
+        aud=ctx.user_data.get("bc_aud","all"); n=len(await bc_uids(aud))
         await update.message.reply_text(
-            f"👁 این تصویر برای {to_fa(n)} کاربر ارسال می‌شود.\nتأیید می‌کنید؟",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ ارسال کن",callback_data="bc_go")],
-                [InlineKeyboardButton("↩️ انصراف",callback_data="bc_no")]]))
+            f"👁 پیش‌نمایش بالا.\n🎯 {bc_label(aud)} — {to_fa(n)} نفر\nچه کار کنم؟",
+            reply_markup=bc_confirm_kb())
         return
     if mode=="admin_msg":
         target_uid=ctx.user_data.pop("admin_msg_uid",None); ctx.user_data.pop("mode",None)
@@ -2130,7 +2573,7 @@ async def photo_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
 # ════════════════════════════════════════════════
 async def location_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     user=update.effective_user
-    if user.id!=ADMIN_ID: return
+    if not is_admin(user.id): return
     if ctx.user_data.get("mode")!="loc_up": return
     key=ctx.user_data.pop("loc_key",None); ctx.user_data.pop("mode",None)
     if not key:
@@ -2169,10 +2612,14 @@ async def location_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
 # ════════════════════════════════════════════════
 async def document_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     user=update.effective_user
-    if user.id!=ADMIN_ID:
+    if not is_admin(user.id):
         return await user_media_handler(update,ctx)   # فایل مشتری گم نشود
     mode=ctx.user_data.get("mode")
     if mode!="backup_restore": return
+    if not is_owner(user.id):
+        ctx.user_data.pop("mode",None)
+        return await update.message.reply_text("⛔ بازگردانی فقط دستِ مالک ربات است.",
+                                               reply_markup=main_menu())
     ctx.user_data.pop("mode",None)
     doc=update.message.document
     if not doc.file_name.endswith(".zip"):
@@ -2189,9 +2636,11 @@ async def post_init(app):
     await init_db(); await load_data(); await load_banners()
     await load_workhours(); await load_buttons(); await load_settings()
     await load_stats(); await load_menu(); await load_places(); await load_backup_registry()
+    await load_admins(); await bc_load()
     asyncio.ensure_future(_spam_cleanup_loop())
     asyncio.ensure_future(_stats_flush_loop())
     asyncio.ensure_future(_auto_backup_loop(app.bot))
+    asyncio.ensure_future(_bc_loop(app.bot))
     try:
         await app.bot.set_my_commands([BotCommand("start","شروع و نمایش منو"),
                                        BotCommand("help","راهنما")])
@@ -2234,7 +2683,7 @@ async def on_error(update:object,ctx:ContextTypes.DEFAULT_TYPE):
         who=""
         if isinstance(update,Update) and update.effective_user:
             u=update.effective_user; who=f"\n👤 {u.first_name or'—'} | 🆔 {u.id}"
-        await ctx.bot.send_message(ADMIN_ID,f"⚠️ خطای ربات{who}\n\n<pre>{html.escape(tb)}</pre>",
+        await ctx.bot.send_message(OWNER_ID,f"⚠️ خطای ربات{who}\n\n<pre>{html.escape(tb)}</pre>",
                                    parse_mode="HTML")
     except Exception as e: logger.error(f"گزارش خطا به ادمین نرسید: {e}")
 
@@ -2247,8 +2696,16 @@ async def post_shutdown(app):
     فاصله نسخه‌ی جدید با نسخه‌ی قدیمی روی getUpdates تداخل (Conflict) پیدا
     می‌کند و ربات عملاً از کار می‌افتد.
     """
-    global db
+    global db,_bc_task
     if _stats_dirty:   await save_stats();   logger.info("shutdown: stats saved")
+    # پخش نیمه‌تمام: تسک را ببند و شماره‌ی آخرین نفر را ذخیره کن تا اجرای
+    # بعدی دقیقاً از نفر بعدی ادامه دهد (نه از اول، نه با پیام تکراری).
+    if _bc_task is not None and not _bc_task.done():
+        _bc_task.cancel()
+        try: await _bc_task
+        except Exception: pass
+    if _bc_job is not None:
+        await bc_save(); logger.info(f"shutdown: پخش در {_bc_job['i']}/{len(_bc_job['queue'])} ذخیره شد")
     if db is not None:
         try:
             await db.close(); db=None

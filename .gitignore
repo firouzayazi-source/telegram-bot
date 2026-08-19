@@ -46,6 +46,8 @@ stats.json
 menu.json
 backups.json
 places.json
+admins.json
+broadcast.json
 pre_restore.zip
 *.corrupt
 
