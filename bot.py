@@ -767,6 +767,9 @@ def sec_btns_kb(key):
         btns.append([InlineKeyboardButton(f"🔗 {it['title']}",callback_data=f"btn_ed_{key}_{it['id']}"),
                      InlineKeyboardButton("🗑 حذف",callback_data=f"btn_dl_{key}_{it['id']}")])
     btns.append([InlineKeyboardButton("➕ افزودن دکمه",callback_data=f"btn_add_{key}")])
+    if extract_links(responses.get(key,"") if responses else ""):
+        btns.append([InlineKeyboardButton("✨ ساخت دکمه از لینک‌های متن",
+                                          callback_data=f"btn_auto_{key}")])
     btns.extend(_nav(back=f"sec_{key}"))
     return InlineKeyboardMarkup(btns)
 
@@ -901,36 +904,83 @@ def _rstrip_arrows(t):
         t=t[:-1]
     return t.rstrip()
 
-def strip_map_links(text):
-    """لینک نقشه و خط‌های اشاره‌گر به آن را از متن برمی‌دارد.
-
-    وقتی بخش لوکیشن فعال دارد، کارت نقشه‌ی تلگرام جای لینک را می‌گیرد؛
-    نگه داشتن لینک آبی فقط تکرار و شلوغی است. متن اصلی در data.json
-    دست‌نخورده می‌ماند — با غیرفعال‌کردن لوکیشن، لینک برمی‌گردد.
-    """
-    if not text or not _MAP_URL_RE.search(text): return text
+def _strip_urls(text,url_re):
+    """لینک‌های منطبق و خط‌هایی که فقط به آن‌ها اشاره می‌کردند را برمی‌دارد."""
+    if not text or not url_re.search(text): return text
     out=[]
     for line in text.splitlines():
-        had_url=bool(_MAP_URL_RE.search(line))
-        cleaned=_MAP_URL_RE.sub("",line).strip()
+        had_url=bool(url_re.search(line))
+        cleaned=url_re.sub("",line).strip()
         if not cleaned:
             continue                                    # خطی که فقط لینک بود
         low=cleaned.lower()
-        # «آدرس در گوگل مپ 👇» — اشاره‌گری که دیگر به چیزی اشاره نمی‌کند
         if any(a in cleaned for a in _ARROWS) and any(w in low for w in _MAP_WORDS):
-            continue
+            continue                                    # اشاره‌گرِ بی‌مرجع
         if had_url:
-            # برچسب معلقِ لینکِ حذف‌شده، مثل «نشان:» یا «مسیریابی -»
+            # خطی که بعد از حذف لینک هیچ حرف/عددی ندارد (مثل «🔗» تنها)
+            if not any(ch.isalnum() for ch in cleaned):
+                continue
             bare=cleaned.rstrip(" :：-–—»>|،,").strip()
             if not bare or (len(cleaned)<=25 and cleaned[-1] in ":：-–—»>|"):
-                continue
-        cleaned=_rstrip_arrows(cleaned)                 # فلش‌های ته خط بی‌مرجع شده‌اند
+                continue                                # برچسب معلق
+        cleaned=_rstrip_arrows(cleaned)
         if cleaned: out.append(cleaned)
     res=[]
     for line in out:
         if not line and (not res or not res[-1]): continue
         res.append(line)
     return "\n".join(res).strip()
+
+def strip_map_links(text):
+    """لینک نقشه را برمی‌دارد چون کارت نقشه جایش را گرفته.
+    غیرمخرب — متن اصلی در data.json دست‌نخورده می‌ماند."""
+    return _strip_urls(text,_MAP_URL_RE)
+
+# ── لینک‌های شبکه‌های اجتماعی → دکمه ─────────────────────
+SHOP_SITE = "stland.ir"      # دامنه‌ی خود فروشگاه — برای نام‌گذاری دکمه
+_ANY_URL_RE = re.compile(
+    r"https?://\S+"
+    r"|(?<![\w@./])(?:www\.)?[\w-]+\.(?:ir|com|net|org|me|ai|io|co)(?:/\S*)?",
+    re.IGNORECASE)
+_LINK_LABELS = (
+    ("instagram.","📸 اینستاگرام"), ("t.me","✈️ تلگرام"), ("telegram.","✈️ تلگرام"),
+    ("ble.ir","💬 بله"), ("bale.ai","💬 بله"), ("eitaa.","📱 ایتا"),
+    ("rubika.","🟣 روبیکا"), ("rubino.","🟣 روبینو"), ("wa.me","💚 واتساپ"),
+    ("whatsapp.","💚 واتساپ"), ("aparat.","🎬 آپارات"), ("youtube.","▶️ یوتیوب"),
+    ("youtu.be","▶️ یوتیوب"), ("linkedin.","💼 لینکدین"), ("twitter.","✖️ ایکس"),
+    ("x.com","✖️ ایکس"), ("facebook.","📘 فیس‌بوک"), ("divar.","🔷 دیوار"),
+)
+
+def label_for_url(url):
+    low=url.lower()
+    for frag,lbl in _LINK_LABELS:
+        if frag in low: return lbl
+    host=re.sub(r"^https?://","",low).split("/")[0].replace("www.","")
+    if host and SHOP_SITE in host: return "🌐 وب‌سایت فروشگاه"
+    return f"🔗 {host}" if host else "🔗 لینک"
+
+def extract_links(text):
+    """(عنوان، لینک) برای هر لینک متن — بدون تکرار، به ترتیب ظهور."""
+    out=[]; seen=set()
+    for m in _ANY_URL_RE.finditer(text or ""):
+        u=normalize_url(m.group(0).rstrip(".،,؛;"))
+        if not u or u in seen: continue
+        seen.add(u); out.append((label_for_url(u),u))
+    return out
+
+def strip_button_links(text,key):
+    """لینک‌هایی که برای این بخش دکمه شده‌اند از متن پنهان می‌شوند —
+    دکمه جای لینک آبی را گرفته، نگه داشتن هر دو فقط شلوغی است."""
+    sec=buttons.get(key) or {}
+    if not sec.get("enabled"): return text
+    urls=[x.get("url","") for x in sec.get("items",[]) if x.get("url")]
+    if not urls: return text
+    parts=[]
+    for u in urls:
+        parts.append(re.escape(u.rstrip("/")))
+        parts.append(re.escape(re.sub(r"^https?://(?:www\.)?","",u).rstrip("/")))
+    rx=re.compile(r"(?:https?://)?(?:www\.)?(?:"+"|".join(parts)+r")/?",re.IGNORECASE)
+    return _strip_urls(text,rx)
 
 def place_active(key):
     pl=places.get(key) or {}
@@ -1178,7 +1228,7 @@ async def cmd_start(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     if get_setting("notify_new_user") and is_new:
         try: await ctx.bot.send_message(ADMIN_ID,f"🆕 کاربر جدید!\n👤 {user.first_name or'—'}\n{'@'+user.username if user.username else'—'}\n🆔 {user.id}")
         except: pass
-    wt=responses.get("welcome","✨ خوش آمدید")
+    wt=strip_button_links(responses.get("welcome","✨ خوش آمدید"),"welcome")
     full=build_msg("خوش‌آمدگویی",wt,"welcome")
     # منوی پایین همیشه باید ست شود — تلگرام هر پیام را فقط با یک نوع کیبورد
     # می‌پذیرد، پس اگر بخش خوش‌آمد دکمه لینک داشته باشد، لینک‌ها جدا می‌روند.
@@ -1521,6 +1571,27 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             await query.answer("✅ فعال" if sec["enabled"] else"❌ غیرفعال",show_alert=True)
             await safe_edit(query.message,f"🔘 {SECTION_NAMES.get(key,key)} | {'✅' if sec['enabled'] else '❌'}",reply_markup=sec_btns_kb(key))
 
+        elif data.startswith("btn_auto_"):
+            key=data[9:]
+            sec=get_sec_btns(key)
+            have={(x.get("url") or "").rstrip("/").lower() for x in sec.get("items",[])}
+            added=[]
+            for title,url in extract_links(responses.get(key,"")):
+                if url.rstrip("/").lower() in have: continue
+                sec["items"].append({"id":new_btn_id(),"title":title,"url":url})
+                have.add(url.rstrip("/").lower()); added.append(title)
+            if not added:
+                await query.answer("همه‌ی لینک‌های این متن از قبل دکمه دارند.",show_alert=True); return
+            sec["enabled"]=True
+            await save_buttons()
+            await query.answer(f"✅ {to_fa(len(added))} دکمه ساخته شد",show_alert=True)
+            await safe_edit(query.message,
+                "✨ دکمه‌های زیر از روی لینک‌های متن ساخته شدند:\n"+"─"*20+
+                "\n"+"\n".join(f"• {t}" for t in added)+
+                "\n\n🧹 این لینک‌ها دیگر به‌صورت متن آبی نمایش داده نمی‌شوند —"
+                " دکمه جایشان را گرفته. (متن اصلی دست‌نخورده است.)",
+                reply_markup=sec_btns_kb(key))
+
         elif data.startswith("btn_add_"):
             key=data[8:]
             await query.answer()
@@ -1826,35 +1897,70 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         #  جای متن و بنر را می‌گیرد.)
         if place_active(mkey) and await send_place(update.message,mkey,kb=kb):
             return
-        content=responses.get(mkey,"تنظیم نشده")
+        content=strip_button_links(responses.get(mkey,"تنظیم نشده"),mkey)
         full=build_msg(text,content,mkey)
         await send_banner(update.message,full,mkey,kb=kb); return
 
     # پیام آزاد کاربر — به‌جای «گزینه نامعتبر»، برای ادمین فوروارد می‌شود
-    if user.id!=ADMIN_ID and get_setting("forward_user_msgs"):
-        try:
-            fwd=await ctx.bot.forward_message(ADMIN_ID,update.message.chat_id,
-                                              update.message.message_id)
-            await ctx.bot.send_message(ADMIN_ID,
-                f"💬 پیام از کاربر\n👤 {user.first_name or'—'} | "
-                f"{'@'+user.username if user.username else'—'}\n🆔 {user.id}",
-                reply_to_message_id=fwd.message_id,
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("💬 پاسخ",callback_data=f"rq_msg_{user.id}")]]))
-            await update.message.reply_text(
-                "✅ پیام شما برای پشتیبانی ارسال شد.\nبه‌زودی پاسخ می‌دهیم. 🙏",
-                reply_markup=main_menu()); return
-        except Exception as e:
-            logger.error(f"forward user msg: {e}")
+    if await forward_to_admin(update,ctx): return
     await update.message.reply_text(
         "لطفاً یکی از گزینه‌های منوی زیر را انتخاب کنید 👇",reply_markup=main_menu())
+
+async def forward_to_admin(update:Update,ctx:ContextTypes.DEFAULT_TYPE,kind=""):
+    """پیام مشتری (هر نوعی) را برای ادمین فوروارد و به مشتری تأیید می‌دهد.
+
+    فوروارد برای همه‌ی انواع پیام کار می‌کند — متن، عکس، ویس، ویدیو، فایل،
+    مخاطب. قبلاً فقط متن وصل بود و بقیه بی‌صدا دور ریخته می‌شد.
+    """
+    user=update.effective_user
+    if user.id==ADMIN_ID or not get_setting("forward_user_msgs"): return False
+    msg=update.message
+    if msg is None: return False
+    try:
+        fwd=await ctx.bot.forward_message(ADMIN_ID,msg.chat_id,msg.message_id)
+        head=f"💬 {kind or 'پیام'} از کاربر"
+        await ctx.bot.send_message(ADMIN_ID,
+            f"{head}\n👤 {user.first_name or'—'} | "
+            f"{'@'+user.username if user.username else'—'}\n🆔 {user.id}",
+            reply_to_message_id=fwd.message_id,
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("💬 پاسخ",callback_data=f"rq_msg_{user.id}")]]))
+        await msg.reply_text(
+            "✅ پیام شما برای پشتیبانی ارسال شد.\nبه‌زودی پاسخ می‌دهیم. 🙏",
+            reply_markup=main_menu())
+        return True
+    except Exception as e:
+        logger.error(f"forward user msg: {e}")
+        return False
+
+# نوع پیام → برچسبی که در اعلان ادمین می‌آید
+_KIND_BY_ATTR = (("voice","🎤 ویس"),("video_note","🎥 ویدیو پیام"),("video","🎬 ویدیو"),
+                 ("audio","🎵 صوت"),("photo","🖼 عکس"),("document","📎 فایل"),
+                 ("contact","📇 مخاطب"),("sticker","🙂 استیکر"))
+
+async def user_media_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
+    """رسانه‌ای که مشتری می‌فرستد — عکس، ویس، ویدیو، فایل، مخاطب."""
+    user=update.effective_user
+    if user.id==ADMIN_ID: return          # مسیر ادمین در هندلرهای اختصاصی است
+    await save_user(user)
+    if await is_blocked(user.id): return
+    if spam_check(user.id)!='ok': return
+    msg=update.message
+    kind=next((lbl for attr,lbl in _KIND_BY_ATTR if getattr(msg,attr,None)),"پیام")
+    if not await forward_to_admin(update,ctx,kind):
+        await msg.reply_text(
+            "لطفاً یکی از گزینه‌های منوی زیر را انتخاب کنید 👇",reply_markup=main_menu())
 
 # ════════════════════════════════════════════════
 #  PHOTO HANDLER
 # ════════════════════════════════════════════════
 async def photo_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     user=update.effective_user
-    if user.id!=ADMIN_ID: return
+    # PTB در هر گروه فقط اولین هندلرِ منطبق را اجرا می‌کند؛ چون این هندلر
+    # زودتر ثبت شده، عکسِ مشتری باید همین‌جا به مسیر فوروارد سپرده شود
+    # وگرنه بی‌صدا دور ریخته می‌شود.
+    if user.id!=ADMIN_ID:
+        return await user_media_handler(update,ctx)
     mode=ctx.user_data.get("mode"); photo=update.message.photo[-1]
     if mode=="ban_up":
         key=ctx.user_data.pop("ban_key",None); ctx.user_data.pop("mode",None)
@@ -1954,7 +2060,8 @@ async def location_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
 # ════════════════════════════════════════════════
 async def document_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     user=update.effective_user
-    if user.id!=ADMIN_ID: return
+    if user.id!=ADMIN_ID:
+        return await user_media_handler(update,ctx)   # فایل مشتری گم نشود
     mode=ctx.user_data.get("mode")
     if mode!="backup_restore": return
     ctx.user_data.pop("mode",None)
@@ -2048,6 +2155,12 @@ def main():
     app.add_handler(MessageHandler(filters.Document.ZIP & ~filters.COMMAND,document_handler))
     app.add_handler(MessageHandler(filters.LOCATION | filters.VENUE,location_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,text_handler))
+    # هر چیز دیگری که مشتری بفرستد — ویس، ویدیو، فایل، مخاطب، استیکر.
+    # بدون این، پیام مشتری بی‌صدا دور ریخته می‌شد.
+    app.add_handler(MessageHandler(
+        (filters.VOICE | filters.VIDEO | filters.VIDEO_NOTE | filters.AUDIO
+         | filters.Document.ALL | filters.CONTACT | filters.Sticker.ALL) & ~filters.COMMAND,
+        user_media_handler))
     app.add_error_handler(on_error)
     print("🚀 ربات در حال اجراست...")
     app.run_polling(drop_pending_updates=True, poll_interval=0.0, timeout=30)
