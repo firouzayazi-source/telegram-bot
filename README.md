@@ -30,6 +30,7 @@
 ├── settings.json   # تنظیمات (notify_new_user, store_open)
 ├── stats.json      # آمار بازدید بخش‌ها
 ├── menu.json       # ترتیب و label دکمه‌های منوی اصلی
+├── backups.json    # فهرست بکاپ‌های خودکار (تا ری‌استارت را دوام بیاورد)
 └── users.db        # SQLite — کاربران و درخواست‌ها
 ```
 
@@ -90,7 +91,8 @@ username TEXT
 first_name TEXT
 joined_at TEXT
 last_seen TEXT
-is_blocked INTEGER DEFAULT 0
+is_blocked INTEGER DEFAULT 0   -- ادمین کاربر را بلاک کرده
+has_left   INTEGER DEFAULT 0   -- کاربر ربات را بلاک/حذف کرده (از پخش کنار می‌رود)
 
 INDEX: idx_ls ON (last_seen)
 ```
@@ -211,6 +213,7 @@ INDEX: idx_req_st ON (status)
 |`dash`                              |داشبورد آمار (asyncio.gather)   |
 |`stats_page`                        |آمار بازدید بخش‌ها               |
 |`stats_reset`                       |صفر کردن آمار بازدید            |
+|`stg_forward_user_msgs`             |روشن/خاموش دریافت پیام کاربران  |
 |`users_menu`                        |مدیریت کاربران                  |
 |`admin_reqs` / `admin_reqs_{offset}`|لیست درخواست‌ها با pagination    |
 |`rq_{id}`                           |جزئیات درخواست                  |
@@ -253,6 +256,15 @@ INDEX: idx_req_st ON (status)
 
 -----
 
+## ۸.۱. پیام آزاد کاربران
+
+اگر کاربر چیزی بنویسد که دکمه‌ی منو نیست (مثلاً یک سؤال)، پیامش برای ادمین
+**فوروارد** می‌شود همراه با دکمه‌ی «💬 پاسخ» — و به کاربر تأیید داده می‌شود.
+با گزینه‌ی «دریافت پیام کاربران» در تنظیمات قابل خاموش‌کردن است؛ در آن حالت
+فقط راهنمای منو نمایش داده می‌شود.
+
+-----
+
 ## ۹. سیستم Anti-Spam (دو فازی)
 
 ```python
@@ -286,6 +298,9 @@ _HARD_BLOCK = 10.0 # ۱۰ ثانیه بلاک سخت
 |`_spam_cleanup_loop()`  |هر ۶ ساعت          |پاک کردن dicts anti-spam        |
 |`_stats_flush_loop()`   |هر ۳۰ ثانیه        |ذخیره stats اگر dirty           |
 |`_auto_backup_loop(bot)`|هر شب ۳ بامداد     |بکاپ خودکار به ادمین            |
+
+**مدیریت خطا:** `on_error` تمام خطاهای گرفته‌نشده را می‌گیرد — به کاربر پیام
+می‌دهد و traceback را برای ادمین می‌فرستد (حداکثر یک گزارش در دقیقه).
 
 -----
 
@@ -406,3 +421,9 @@ _broadcast_cancel = False  # توقف اضطراری
 1. **ذخیره فایل JSON:** همیشه از `_wj()` استفاده کنید (atomic write)
 1. **هیچ await در `spam_check` نباشد:** باید sync بماند
 1. **`query.answer()` فقط یک بار:** هر callback فقط یک‌بار answer می‌زند
+1. **`INSERT` همیشه با نام ستون:** `INSERT INTO users VALUES(...)` بدون نام ستون،
+   با افزودن هر ستون جدید می‌شکند
+1. **حذف یک بخش:** کلید آن را از `DEFAULT_MENU` بردارید — `load_menu()` خودش
+   دکمه‌ی منسوخ را از `menu.json` کاربران پاک می‌کند
+1. **`/start` باید همیشه `main_menu()` بفرستد:** تلگرام هر پیام را فقط با یک نوع
+   کیبورد می‌پذیرد، پس دکمه‌های inline نباید جای منوی پایین را بگیرند

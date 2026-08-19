@@ -44,6 +44,7 @@ buttons.json
 settings.json
 stats.json
 menu.json
+backups.json
 
 # ── Backup files
 backup_*.zip

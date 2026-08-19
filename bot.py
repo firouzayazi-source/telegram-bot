@@ -1,7 +1,8 @@
-import os, json, time, asyncio, logging, aiosqlite, jdatetime, pytz, zipfile, io, csv
+import os, json, time, asyncio, logging, aiosqlite, jdatetime, pytz, zipfile, io, csv, html, traceback
 from datetime import datetime, timedelta
 import aiofiles
-from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
+from telegram.error import Forbidden, BadRequest
 from telegram.ext import (ApplicationBuilder, CommandHandler, MessageHandler,
                            CallbackQueryHandler, ContextTypes, filters)
 
@@ -12,7 +13,7 @@ TOKEN = os.environ["BOT_TOKEN"].strip()
 ADMIN_ID = int(os.environ["ADMIN_ID"].strip())
 DATA_FILE = "data.json"; DB_FILE = "users.db"; BANNER_FILE = "banner.json"
 WORKHOURS_FILE = "workhours.json"; BUTTONS_FILE = "buttons.json"
-MENU_FILE = "menu.json"
+MENU_FILE = "menu.json"; BACKUPS_FILE = "backups.json"
 SETTINGS_FILE = "settings.json"; STATS_FILE = "stats.json"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -75,7 +76,7 @@ DEFAULT_WH = {"enabled":True,"schedule":{
     "5":{"open":True,"shifts":[{"from":"11:00","to":"14:00"},{"from":"17:00","to":"23:00"}]},
     "6":{"open":True,"shifts":[{"from":"17:00","to":"23:00"}]}},
     "msg_open":"✅ هم‌اکنون باز است","msg_closed":"🔴 هم‌اکنون بسته است"}
-DEFAULT_SETTINGS = {"notify_new_user":True,"store_open":True}
+DEFAULT_SETTINGS = {"notify_new_user":True,"store_open":True,"forward_user_msgs":True}
 DEFAULT_SEC_WH = {k:True for k in SECTION_NAMES}
 
 # ── helpers
@@ -128,6 +129,8 @@ def progress_bar(v,t,n=8):
     f=int(n*v/t); return "▓"*f+"░"*(n-f)
 
 _stats_dirty = False
+_last_err_report = 0.0      # زمان آخرین گزارش خطا به ادمین
+_ERR_REPORT_GAP  = 60.0     # حداقل فاصله بین دو گزارش (ثانیه)
 
 async def record_stat(k):
     global _stats_dirty
@@ -195,12 +198,20 @@ async def load_menu():
     if not menu_cfg:
         menu_cfg = [dict(m) for m in DEFAULT_MENU]; await save_menu()
     else:
+        valid = {d["key"] for d in DEFAULT_MENU}
+        # حذف کلیدهایی که دیگر وجود ندارند (مثلاً catalog از نسخه‌های قبلی)
+        # وگرنه دکمه‌ای در منو می‌ماند که هیچ هندلری ندارد.
+        dropped = [m["key"] for m in menu_cfg if m.get("key") not in valid]
+        if dropped:
+            menu_cfg = [m for m in menu_cfg if m.get("key") in valid]
+            logger.info(f"menu: دکمه‌های منسوخ حذف شدند → {dropped}")
         # اطمینان از وجود همه کلیدها (اگر نسخه قدیمی بود)
         existing = {m["key"] for m in menu_cfg}
         for d in DEFAULT_MENU:
             if d["key"] not in existing: menu_cfg.append(dict(d))
         for m in menu_cfg:
             m.setdefault("width","half")
+        if dropped: await save_menu()
 
 async def save_menu(): await _wj(MENU_FILE, menu_cfg)
 
@@ -284,7 +295,8 @@ async def init_db():
         CREATE INDEX IF NOT EXISTS idx_req_uid ON requests(user_id,product_id,created_at);
         CREATE INDEX IF NOT EXISTS idx_req_st ON requests(status);
     """)
-    for sql in ["ALTER TABLE users ADD COLUMN is_blocked INTEGER DEFAULT 0"]:
+    for sql in ["ALTER TABLE users ADD COLUMN is_blocked INTEGER DEFAULT 0",
+                "ALTER TABLE users ADD COLUMN has_left INTEGER DEFAULT 0"]:
         try: await db.execute(sql)
         except: pass
     await db.commit()
@@ -296,7 +308,10 @@ async def save_user(u):
     now_ts=time.time()
     if u.id in _seen_uids and now_ts-_seen_uids[u.id]<_SEEN_TTL: return
     now=gregorian_now()
-    await db.execute("INSERT OR IGNORE INTO users VALUES(?,?,?,?,?,0)",
+    # نام ستون‌ها صریح نوشته می‌شود تا افزودن ستون جدید این کوئری را نشکند
+    await db.execute(
+        "INSERT OR IGNORE INTO users(user_id,username,first_name,joined_at,last_seen)"
+        " VALUES(?,?,?,?,?)",
         (u.id,u.username or"",u.first_name or"",now,now))
     await db.execute("UPDATE users SET username=?,first_name=?,last_seen=? WHERE user_id=?",
         (u.username or"",u.first_name or"",now,u.id))
@@ -304,7 +319,13 @@ async def save_user(u):
     _seen_uids[u.id]=now_ts
 
 async def get_all_uids():
-    async with db.execute("SELECT user_id FROM users WHERE is_blocked=0") as c: return[r[0] for r in await c.fetchall()]
+    async with db.execute("SELECT user_id FROM users WHERE is_blocked=0 AND has_left=0") as c: return[r[0] for r in await c.fetchall()]
+
+async def mark_left(uid, left=1):
+    """کاربری که ربات را بلاک/حذف کرده. جدا از is_blocked (که بلاکِ ادمین است)."""
+    await db.execute("UPDATE users SET has_left=? WHERE user_id=?",(left,uid)); await db.commit()
+
+async def left_count(): return await _cnt("SELECT COUNT(*) FROM users WHERE has_left=1")
 
 _block_cache: dict = {}   # uid → (is_blocked: bool, expires: float)
 _BLOCK_CACHE_TTL = 60     # ثانیه — بعد از این مدت مجدداً از DB خوانده می‌شود
@@ -595,11 +616,13 @@ def menu_item_kb(key):
 
 def settings_kb():
     notif="🟢" if get_setting("notify_new_user") else "⚫️"
+    fwd="🟢" if get_setting("forward_user_msgs") else "⚫️"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🎛 مدیریت منو",callback_data="menu_mgr")],
         [InlineKeyboardButton("✏️ مدیریت بخش‌ها",callback_data="sections")],
         [InlineKeyboardButton("💾 پشتیبان‌گیری",callback_data="backup")],
         [InlineKeyboardButton(f"{notif} اعلان عضو جدید",callback_data="stg_notify_new_user")],
+        [InlineKeyboardButton(f"{fwd} دریافت پیام کاربران",callback_data="stg_forward_user_msgs")],
         [InlineKeyboardButton("🔙 پنل اصلی",callback_data="back_to_admin")],
     ])
 
@@ -660,7 +683,7 @@ async def broadcast(ctx, text, photo=None):
         return
     _broadcast_active = True; _broadcast_cancel = False
     try:
-        users = await get_all_uids(); total = len(users); ok = fail = 0
+        users = await get_all_uids(); total = len(users); ok = fail = gone = 0
         cancel_kb=InlineKeyboardMarkup([[InlineKeyboardButton("🛑 توقف پخش",callback_data="broadcast_cancel")]])
         st = await ctx.bot.send_message(ADMIN_ID, f"📢 شروع پخش به {to_fa(total)} کاربر...", reply_markup=cancel_kb)
         for i, uid in enumerate(users, 1):
@@ -672,6 +695,11 @@ async def broadcast(ctx, text, photo=None):
                 else:     await ctx.bot.send_message(uid, text)
                 ok += 1
                 await asyncio.sleep(0.05)
+            except Forbidden:
+                # کاربر ربات را بلاک کرده یا اکانتش حذف شده — علامت بزن تا
+                # پخش‌های بعدی وقت تلف نکنند و آمار واقعی بماند
+                gone += 1; fail += 1
+                await mark_left(uid)
             except Exception as e:
                 retry = getattr(e, "retry_after", None)
                 if retry:
@@ -685,13 +713,25 @@ async def broadcast(ctx, text, photo=None):
             if i % 20 == 0 or i == total:
                 try: await st.edit_text(f"📢 {to_fa(ok)}✔️ {to_fa(fail)}❌  {to_fa(i)}/{to_fa(total)}",reply_markup=cancel_kb if i<total else None)
                 except: pass
-        await st.edit_text(f"✅ پخش تمام شد!\nموفق: {to_fa(ok)} | شکست: {to_fa(fail)}", reply_markup=None)
+        summary=f"✅ پخش تمام شد!\nموفق: {to_fa(ok)} | شکست: {to_fa(fail)}"
+        if gone: summary+=f"\n🚪 {to_fa(gone)} کاربر ربات را بلاک/حذف کرده بود — از لیست پخش کنار گذاشته شد."
+        await st.edit_text(summary, reply_markup=None)
     finally:
         _broadcast_active = False; _broadcast_cancel = False
 
 # ── backup
 _backup_registry: list = []  # [{"msg_id": int, "file_id": str, "date": str}]
 MAX_BACKUPS = 5
+
+async def load_backup_registry():
+    """لیست بکاپ‌های خودکار باید ری‌استارت را دوام بیاورد — وگرنه دقیقاً وقتی
+    به بازگردانی نیاز دارید (بعد از کرش) لیست خالی است."""
+    global _backup_registry
+    data = await _rj(BACKUPS_FILE, list)
+    if isinstance(data, list): _backup_registry = data
+    logger.info(f"backups: {len(_backup_registry)} بکاپ خودکار بارگذاری شد")
+
+async def save_backup_registry(): await _wj(BACKUPS_FILE, _backup_registry)
 
 async def send_backup(bot):
     global _backup_registry
@@ -713,6 +753,7 @@ async def send_backup(bot):
         old=_backup_registry.pop(0)
         try: await bot.delete_message(ADMIN_ID,old["msg_id"])
         except Exception as e: logger.debug(f"backup delete old: {e}")
+    await save_backup_registry()
 
 async def _auto_backup_loop(bot):
     """هر شب ساعت ۳ بامداد به وقت تهران، بکاپ خودکار به ادمین می‌فرستد."""
@@ -767,13 +808,26 @@ async def cmd_start(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     user=update.effective_user; is_new=False
     async with db.execute("SELECT user_id FROM users WHERE user_id=?",(user.id,)) as c: is_new=(await c.fetchone()) is None
     await save_user(user)
+    await mark_left(user.id,0)   # اگر قبلاً ربات را بلاک کرده بود و برگشته، دوباره فعالش کن
     if get_setting("notify_new_user") and is_new:
         try: await ctx.bot.send_message(ADMIN_ID,f"🆕 کاربر جدید!\n👤 {user.first_name or'—'}\n{'@'+user.username if user.username else'—'}\n🆔 {user.id}")
         except: pass
     wt=responses.get("welcome","✨ خوش آمدید")
     full=build_msg("خوش‌آمدگویی",wt,"welcome")
-    kb=user_sec_kb("welcome")
-    await send_banner(update.message,full,"welcome",kb=kb or main_menu())
+    # منوی پایین همیشه باید ست شود — تلگرام هر پیام را فقط با یک نوع کیبورد
+    # می‌پذیرد، پس اگر بخش خوش‌آمد دکمه لینک داشته باشد، لینک‌ها جدا می‌روند.
+    await send_banner(update.message,full,"welcome",kb=main_menu())
+    links=user_sec_kb("welcome")
+    if links:
+        await update.message.reply_text("🔗 لینک‌های مفید:",reply_markup=links)
+
+async def cmd_help(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
+    txt=("ℹ️ راهنمای ربات استوک لند\n"+"─"*18+
+         "\n\n• از دکمه‌های منوی پایین استفاده کنید."
+         "\n• برای درخواست تماس، «📝 درخواست تماس» را بزنید و شماره‌تان را بگذارید."
+         "\n• هر سؤالی داشتید همین‌جا بنویسید — پیامتان مستقیم به پشتیبانی می‌رسد."
+         "\n\n/start — شروع دوباره و نمایش منو")
+    await update.message.reply_text(txt,reply_markup=main_menu())
 
 async def cmd_admin(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id!=ADMIN_ID: return await update.message.reply_text("⛔ دسترسی ندارید")
@@ -836,12 +890,13 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
 
         elif data=="dash":
             await query.answer()
-            t,d,w,m,nt,bl=await asyncio.gather(
+            t,d,w,m,nt,bl,lf=await asyncio.gather(
                 total_users(),today_users(),week_users(),
-                month_users(),new_today(),blk_count())
+                month_users(),new_today(),blk_count(),left_count())
             sep="─"*22
             dash=(f"📊 داشبورد — {shamsi_now()}\n{sep}"
                   f"\n👥 کل کاربران: {to_fa(t)}     🚫 بلاک: {to_fa(bl)}"
+                  f"\n✅ فعال: {to_fa(t-lf)}     🚪 ترک‌کرده: {to_fa(lf)}"
                   f"\n{sep}"
                   f"\n🆕 عضو امروز:   {to_fa(nt)}"
                   f"\n📅 فعال امروز:  {to_fa(d)}   {progress_bar(d,t)}"
@@ -1436,7 +1491,24 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         kb=user_sec_kb(mkey)
         await send_banner(update.message,full,mkey,kb=kb); return
 
-    await update.message.reply_text("⚠️ گزینه نامعتبر است.",reply_markup=main_menu())
+    # پیام آزاد کاربر — به‌جای «گزینه نامعتبر»، برای ادمین فوروارد می‌شود
+    if user.id!=ADMIN_ID and get_setting("forward_user_msgs"):
+        try:
+            fwd=await ctx.bot.forward_message(ADMIN_ID,update.message.chat_id,
+                                              update.message.message_id)
+            await ctx.bot.send_message(ADMIN_ID,
+                f"💬 پیام از کاربر\n👤 {user.first_name or'—'} | "
+                f"{'@'+user.username if user.username else'—'}\n🆔 {user.id}",
+                reply_to_message_id=fwd.message_id,
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("💬 پاسخ",callback_data=f"rq_msg_{user.id}")]]))
+            await update.message.reply_text(
+                "✅ پیام شما برای پشتیبانی ارسال شد.\nبه‌زودی پاسخ می‌دهیم. 🙏",
+                reply_markup=main_menu()); return
+        except Exception as e:
+            logger.error(f"forward user msg: {e}")
+    await update.message.reply_text(
+        "لطفاً یکی از گزینه‌های منوی زیر را انتخاب کنید 👇",reply_markup=main_menu())
 
 # ════════════════════════════════════════════════
 #  PHOTO HANDLER
@@ -1489,11 +1561,38 @@ async def document_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
 async def post_init(app):
     await init_db(); await load_data(); await load_banners()
     await load_workhours(); await load_buttons(); await load_settings()
-    await load_stats(); await load_menu()
+    await load_stats(); await load_menu(); await load_backup_registry()
     asyncio.ensure_future(_spam_cleanup_loop())
     asyncio.ensure_future(_stats_flush_loop())
     asyncio.ensure_future(_auto_backup_loop(app.bot))
+    try:
+        await app.bot.set_my_commands([BotCommand("start","شروع و نمایش منو"),
+                                       BotCommand("help","راهنما")])
+    except Exception as e: logger.warning(f"set_my_commands: {e}")
     logger.info("✅ ربات راه‌اندازی شد")
+
+async def on_error(update:object,ctx:ContextTypes.DEFAULT_TYPE):
+    """هر خطای گرفته‌نشده — به ادمین گزارش می‌شود و کاربر بی‌پاسخ نمی‌ماند."""
+    logger.error("خطای گرفته‌نشده:",exc_info=ctx.error)
+    # ۱) کاربر بی‌پاسخ نماند
+    try:
+        if isinstance(update,Update) and update.effective_message:
+            await update.effective_message.reply_text(
+                "❌ خطایی رخ داد. لطفاً دوباره تلاش کنید یا /start را بزنید.")
+    except Exception: pass
+    # ۲) ادمین خبردار شود (با محدودیت نرخ تا در خطای پیاپی اسپم نشود)
+    global _last_err_report
+    now=time.time()
+    if now-_last_err_report < _ERR_REPORT_GAP: return
+    _last_err_report=now
+    try:
+        tb="".join(traceback.format_exception(type(ctx.error),ctx.error,ctx.error.__traceback__))[-1200:]
+        who=""
+        if isinstance(update,Update) and update.effective_user:
+            u=update.effective_user; who=f"\n👤 {u.first_name or'—'} | 🆔 {u.id}"
+        await ctx.bot.send_message(ADMIN_ID,f"⚠️ خطای ربات{who}\n\n<pre>{html.escape(tb)}</pre>",
+                                   parse_mode="HTML")
+    except Exception as e: logger.error(f"گزارش خطا به ادمین نرسید: {e}")
 
 async def post_shutdown(app):
     """قبل از خاموش‌شدن — داده‌های in-memory را flush کن تا چیزی گم نشود."""
@@ -1503,11 +1602,13 @@ async def post_shutdown(app):
 def main():
     app=ApplicationBuilder().token(TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
     app.add_handler(CommandHandler("start",cmd_start))
+    app.add_handler(CommandHandler("help",cmd_help))
     app.add_handler(CommandHandler("admin",cmd_admin))
     app.add_handler(CallbackQueryHandler(callbacks))
     app.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND,photo_handler))
     app.add_handler(MessageHandler(filters.Document.ZIP & ~filters.COMMAND,document_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,text_handler))
+    app.add_error_handler(on_error)
     print("🚀 ربات در حال اجراست...")
     app.run_polling(drop_pending_updates=True, poll_interval=0.0, timeout=30)
 
