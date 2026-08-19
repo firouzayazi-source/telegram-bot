@@ -721,6 +721,10 @@ def place_text(key):
                 f"🏷 {pl.get('title') or SHOP_NAME}"]
         if pl.get("address"): out.append(f"🗺 {pl['address']}")
         out.append(f"🧭 {pl['lat']:.6f}, {pl['lon']:.6f}")
+        if pl.get("active") and _MAP_URL_RE.search(responses.get(key,"") or ""):
+            out += ["","🧹 لینک نقشه از متن این بخش پنهان می‌شود چون کارت نقشه"
+                       " جایش را گرفته. (متن اصلی دست‌نخورده است؛ با غیرفعال‌کردن"
+                       " لوکیشن، لینک برمی‌گردد.)"]
     return "\n".join(out)
 
 def place_kb(key):
@@ -879,6 +883,52 @@ def human_kb(n):
     return f"{to_fa(round(n/1024))} کیلوبایت" if n else "؟"
 
 SHOP_NAME = "استوک لند"
+
+# ── حذف لینک نقشه وقتی کارت لوکیشن جایگزینش می‌شود ─────────
+_MAP_URL_RE = re.compile(
+    r"https?://\S*(?:maps\.app\.goo\.gl|goo\.gl/maps|google\.[a-z.]+/maps|maps\.google"
+    r"|neshan\.org|nshn\.ir|balad\.ir|waze\.com|openstreetmap\.org|osm\.org)\S*",
+    re.IGNORECASE)
+_ARROWS = "👇⬇↓👉➡️⬅"
+# واژه‌هایی که نشان می‌دهند یک خط فقط برای اشاره به لینک نقشه نوشته شده
+_MAP_WORDS = ("گوگل","مپ","map","نقشه","لینک","link","مسیریاب","مسیر یاب",
+              "لوکیشن","موقعیت","نشان","بلد","waze","google")
+
+def _rstrip_arrows(t):
+    while t and (t[-1] in _ARROWS or t[-1] in " \u200c\ufe0f"):
+        t=t[:-1]
+    return t.rstrip()
+
+def strip_map_links(text):
+    """لینک نقشه و خط‌های اشاره‌گر به آن را از متن برمی‌دارد.
+
+    وقتی بخش لوکیشن فعال دارد، کارت نقشه‌ی تلگرام جای لینک را می‌گیرد؛
+    نگه داشتن لینک آبی فقط تکرار و شلوغی است. متن اصلی در data.json
+    دست‌نخورده می‌ماند — با غیرفعال‌کردن لوکیشن، لینک برمی‌گردد.
+    """
+    if not text or not _MAP_URL_RE.search(text): return text
+    out=[]
+    for line in text.splitlines():
+        had_url=bool(_MAP_URL_RE.search(line))
+        cleaned=_MAP_URL_RE.sub("",line).strip()
+        if not cleaned:
+            continue                                    # خطی که فقط لینک بود
+        low=cleaned.lower()
+        # «آدرس در گوگل مپ 👇» — اشاره‌گری که دیگر به چیزی اشاره نمی‌کند
+        if any(a in cleaned for a in _ARROWS) and any(w in low for w in _MAP_WORDS):
+            continue
+        if had_url:
+            # برچسب معلقِ لینکِ حذف‌شده، مثل «نشان:» یا «مسیریابی -»
+            bare=cleaned.rstrip(" :：-–—»>|،,").strip()
+            if not bare or (len(cleaned)<=25 and cleaned[-1] in ":：-–—»>|"):
+                continue
+        cleaned=_rstrip_arrows(cleaned)                 # فلش‌های ته خط بی‌مرجع شده‌اند
+        if cleaned: out.append(cleaned)
+    res=[]
+    for line in out:
+        if not line and (not res or not res[-1]): continue
+        res.append(line)
+    return "\n".join(res).strip()
 
 async def send_place(msg,key):
     """اگر برای این بخش لوکیشن ثبت شده، نقشه‌ی بومی تلگرام را می‌فرستد.
@@ -1757,6 +1807,9 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     # بخش‌های متنی (۱ تا ۵)
     if mkey and mkey in MENU_ITEMS:
         await record_stat(mkey); content=responses.get(mkey,"تنظیم نشده")
+        pl=places.get(mkey) or {}
+        if pl.get("active") and pl.get("lat") is not None:
+            content=strip_map_links(content)   # کارت نقشه جای لینک را می‌گیرد
         full=build_msg(text,content,mkey)
         kb=user_sec_kb(mkey)
         await send_banner(update.message,full,mkey,kb=kb)
