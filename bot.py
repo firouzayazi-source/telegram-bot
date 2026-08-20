@@ -3,8 +3,8 @@ from datetime import datetime, timedelta
 import aiofiles
 from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
 from telegram.error import Forbidden, BadRequest, Conflict
-from telegram.ext import (ApplicationBuilder, CommandHandler, MessageHandler,
-                           CallbackQueryHandler, ContextTypes, filters)
+from telegram.ext import (ApplicationBuilder, ApplicationHandlerStop, CommandHandler,
+                           MessageHandler, CallbackQueryHandler, ContextTypes, filters)
 
 os.environ.pop("HTTP_PROXY", None); os.environ.pop("HTTPS_PROXY", None)
 os.environ.pop("ALL_PROXY", None); os.environ["NO_PROXY"] = "*"
@@ -455,6 +455,9 @@ async def init_db():
             user_id INTEGER PRIMARY KEY,username TEXT,first_name TEXT,
             joined_at TEXT,last_seen TEXT,is_blocked INTEGER DEFAULT 0);
         CREATE INDEX IF NOT EXISTS idx_ls ON users(last_seen);
+        CREATE TABLE IF NOT EXISTS threads(
+            admin_id INTEGER,msg_id INTEGER,user_id INTEGER,ts TEXT,
+            PRIMARY KEY(admin_id,msg_id));
     """)
     for sql in ["ALTER TABLE users ADD COLUMN is_blocked INTEGER DEFAULT 0",
                 "ALTER TABLE users ADD COLUMN has_left INTEGER DEFAULT 0",
@@ -504,6 +507,25 @@ async def mark_left(uid, left=1):
     await db.execute("UPDATE users SET has_left=? WHERE user_id=?",(left,uid)); await db.commit()
 
 async def left_count(): return await _cnt("SELECT COUNT(*) FROM users WHERE has_left=1")
+
+# ── رشته‌ی گفتگو: هر پیامی که در چت مدیر مربوط به یک مشتری است ثبت می‌شود،
+# تا وقتی مدیر رویش ریپلای زد بدانیم پاسخ برای چه کسی است.
+async def link_thread(admin_id,msg_id,user_id):
+    await db.execute(
+        "INSERT OR REPLACE INTO threads(admin_id,msg_id,user_id,ts) VALUES(?,?,?,?)",
+        (admin_id,msg_id,user_id,gregorian_now()))
+    await db.commit()
+
+async def thread_user(admin_id,msg_id):
+    async with db.execute("SELECT user_id FROM threads WHERE admin_id=? AND msg_id=?",
+                          (admin_id,msg_id)) as c:
+        r=await c.fetchone()
+    return r[0] if r else None
+
+async def prune_threads(days=60):
+    """رشته‌های خیلی قدیمی به درد نمی‌خورند — کسی روی پیام دو ماه پیش ریپلای نمی‌زند."""
+    await db.execute("DELETE FROM threads WHERE ts<datetime('now',?,'localtime')",(f"-{days} days",))
+    await db.commit()
 
 # برچسب‌های خوانا برای منبع ورود (پارامتر deep-link)
 SOURCE_LABELS = {"insta":"📸 اینستاگرام","instagram":"📸 اینستاگرام","tg":"✈️ تلگرام",
@@ -587,6 +609,8 @@ async def _spam_cleanup_loop():
         for uid in [u for u,ts in list(_seen_uids.items()) if now-ts>_SEEN_TTL*3]:
             del _seen_uids[uid]
         if stale: logger.debug(f"spam_cleanup: {len(stale)} رکورد منقضی پاک شد")
+        try: await prune_threads()
+        except Exception as e: logger.error(f"prune_threads: {e}")
 
 def spam_check(uid: int) -> str:
     """کاملاً sync — بدون await، بدون DB، صفر overhead.
@@ -1018,8 +1042,9 @@ def users_list_kb(rows,off,ft,total):
     if nav: btns.append(nav)
     btns.append([InlineKeyboardButton("🔙",callback_data="users_menu")]); return InlineKeyboardMarkup(btns)
 
+# پاسخ به مشتری فقط از راه چت خود تلگرام است (ریپلای روی پیام فوروارد‌شده)،
+# پس اینجا دکمه‌ی «پیام به کاربر» نداریم.
 def udetail_kb(uid,is_bl): return InlineKeyboardMarkup([
-    [InlineKeyboardButton("💬 پیام به کاربر",callback_data=f"rq_msg_{uid}")],
     [InlineKeyboardButton("✅ رفع بلاک" if is_bl else "🚫 بلاک",callback_data=f"utog_{uid}")],
     [InlineKeyboardButton("🔙",callback_data="users_menu")]])
 
@@ -2081,14 +2106,6 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             await query.answer("🗑 حذف شد.",show_alert=True)
             await safe_edit(query.message,f"🔘 {SECTION_NAMES.get(key,key)}",reply_markup=sec_btns_kb(key))
 
-        elif data.startswith("rq_msg_"):
-            target_uid=int(data[7:])
-            await query.answer()
-            ctx.user_data.update({"mode":"admin_msg","admin_msg_uid":target_uid})
-            await query.message.reply_text(
-                f"💬 پیام برای کاربر 🆔{target_uid}\nمتن یا تصویر را ارسال کنید:",
-                reply_markup=cancel_menu())
-
         elif data=="noop": await query.answer()
 
         # ── ساعت کاری
@@ -2333,22 +2350,6 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
                 f"⏰ زمان‌بندی شد — {bc_when_text(run_at)}\n"
                 f"🎯 {bc_label(job['audience'])} · {to_fa(len(job['queue']))} نفر",
                 reply_markup=main_menu()); return
-        if mode=="admin_msg":
-            target_uid=ctx.user_data.pop("admin_msg_uid",None); ctx.user_data.pop("mode",None)
-            if not target_uid: await update.message.reply_text("❌ خطا.",reply_markup=main_menu()); return
-            try:
-                await ctx.bot.send_message(target_uid,
-                    f"<b>📩 پیام از {esc(SHOP_NAME)}</b>\n{HR}\n{esc(text)}",
-                    parse_mode="HTML")
-                await update.message.reply_text("✅ پیام ارسال شد.",reply_markup=main_menu())
-            except Forbidden:
-                await mark_left(target_uid)
-                await update.message.reply_text(
-                    "🚪 این کاربر ربات را بلاک یا حذف کرده — پیام به او نمی‌رسد.\n"
-                    "از فهرست پخش همگانی کنار گذاشته شد.",reply_markup=main_menu())
-            except Exception as e:
-                await update.message.reply_text(f"❌ خطا در ارسال: {e}",reply_markup=main_menu())
-            return
         if mode=="users_search":
             ctx.user_data.pop("mode",None); rows=await search_users(text)
             if not rows: await update.message.reply_text("❌ یافت نشد.",reply_markup=main_menu()); return
@@ -2465,16 +2466,19 @@ async def forward_to_admin(update:Update,ctx:ContextTypes.DEFAULT_TYPE,kind=""):
     if msg is None: return False
     uname=f"@{user.username}" if user.username else "—"
     card=(f"<b>💬 {esc(kind or 'پیام')} از مشتری</b>\n{HR}\n"
-          f"👤 {esc(user.first_name or '—')}  ·  {esc(uname)}\n🆔 <code>{user.id}</code>")
-    kb=InlineKeyboardMarkup([[InlineKeyboardButton("💬 پاسخ",callback_data=f"rq_msg_{user.id}")]])
+          f"👤 {esc(user.first_name or '—')}  ·  {esc(uname)}\n🆔 <code>{user.id}</code>\n"
+          f"↩️ برای پاسخ، روی همین پیام ریپلای کنید.")
     delivered=0
     # به همه‌ی مدیرها می‌رود تا هرکس زودتر دید جواب بدهد؛ خطای یکی
     # نباید جلوی بقیه را بگیرد.
     for aid in admin_ids():
         try:
             fwd=await ctx.bot.forward_message(aid,msg.chat_id,msg.message_id)
-            await ctx.bot.send_message(aid,card,parse_mode="HTML",
-                                       reply_to_message_id=fwd.message_id,reply_markup=kb)
+            note=await ctx.bot.send_message(aid,card,parse_mode="HTML",
+                                            reply_to_message_id=fwd.message_id)
+            # ریپلای روی هرکدام از این دو پیام باید کار کند
+            await link_thread(aid,fwd.message_id,user.id)
+            await link_thread(aid,note.message_id,user.id)
             delivered+=1
         except Exception as e:
             logger.error(f"forward user msg → {aid}: {e}")
@@ -2486,6 +2490,43 @@ async def forward_to_admin(update:Update,ctx:ContextTypes.DEFAULT_TYPE,kind=""):
     except Exception as e:
         logger.error(f"ack to user: {e}")
     return True
+
+async def reply_relay(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
+    """پاسخ مدیر با همان کار طبیعی تلگرام: ریپلای روی پیام مشتری.
+
+    هیچ پنل یا حالت جداگانه‌ای در کار نیست — مدیر در چت خودش با ربات
+    روی پیام فوروارد‌شده ریپلای می‌زند و همان پیام (متن، عکس، ویس، فایل…)
+    عیناً برای مشتری می‌رود. اگر ریپلای به رشته‌ی شناخته‌شده‌ای نباشد،
+    این هندلر کاری نمی‌کند و پیام مسیر عادی خودش را می‌رود.
+    """
+    msg=update.message; user=update.effective_user
+    if msg is None or user is None or not is_admin(user.id): return
+    src=msg.reply_to_message
+    if src is None: return
+    target=await thread_user(user.id,src.message_id)
+    if target is None: return          # ریپلای بی‌ربط — بگذار بقیه رسیدگی کنند
+    try:
+        # copy_message یعنی پیام بدون برچسب «فوروارد از» می‌رسد — انگار
+        # خودِ فروشگاه نوشته. همه‌ی انواع پیام را هم پشتیبانی می‌کند.
+        await ctx.bot.copy_message(chat_id=target,from_chat_id=msg.chat_id,
+                                   message_id=msg.message_id)
+    except Forbidden:
+        await mark_left(target)
+        await msg.reply_text("🚪 این مشتری ربات را بلاک یا حذف کرده — پیام به او نمی‌رسد.")
+        raise ApplicationHandlerStop
+    except Exception as e:
+        logger.error(f"relay → {target}: {e}")
+        await msg.reply_text(f"❌ ارسال نشد: {e}")
+        raise ApplicationHandlerStop
+    # پاسخ خودِ مدیر هم به همین مشتری گره می‌خورد تا رشته ادامه پیدا کند
+    await link_thread(user.id,msg.message_id,target)
+    try:
+        await ctx.bot.set_message_reaction(chat_id=msg.chat_id,message_id=msg.message_id,
+                                           reaction="👍")
+    except Exception:
+        try: await msg.reply_text("✅ ارسال شد")
+        except Exception: pass
+    raise ApplicationHandlerStop
 
 # نوع پیام → برچسبی که در اعلان ادمین می‌آید
 _KIND_BY_ATTR = (("voice","🎤 ویس"),("video_note","🎥 ویدیو پیام"),("video","🎬 ویدیو"),
@@ -2552,22 +2593,6 @@ async def photo_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             f"👁 پیش‌نمایش بالا.\n🎯 {bc_label(aud)} — {to_fa(n)} نفر\nچه کار کنم؟",
             reply_markup=bc_confirm_kb())
         return
-    if mode=="admin_msg":
-        target_uid=ctx.user_data.pop("admin_msg_uid",None); ctx.user_data.pop("mode",None)
-        caption=update.message.caption or""
-        if not target_uid: await update.message.reply_text("❌ خطا.",reply_markup=main_menu()); return
-        try:
-            await ctx.bot.send_photo(target_uid,photo=photo.file_id,
-                caption=f"📩 پیام از فروشگاه:\n\n{caption}" if caption else "📩 پیام از فروشگاه")
-            await update.message.reply_text("✅ تصویر ارسال شد.",reply_markup=main_menu())
-        except Forbidden:
-            await mark_left(target_uid)
-            await update.message.reply_text(
-                "🚪 این کاربر ربات را بلاک یا حذف کرده — پیام به او نمی‌رسد.",reply_markup=main_menu())
-        except Exception as e:
-            await update.message.reply_text(f"❌ خطا در ارسال: {e}",reply_markup=main_menu())
-        return
-
 # ════════════════════════════════════════════════
 #  LOCATION HANDLER — ثبت لوکیشن بخش‌ها
 # ════════════════════════════════════════════════
@@ -2725,6 +2750,10 @@ def main():
          .connect_timeout(10.0).read_timeout(20.0).write_timeout(20.0)
          .get_updates_read_timeout(35.0)
          .build())
+    # گروه ۱- : ریپلای مدیر روی پیام مشتری زودتر از هر هندلر دیگری دیده می‌شود.
+    # اگر واقعاً پاسخ بود، ApplicationHandlerStop جلوی پردازش دوباره را می‌گیرد؛
+    # وگرنه پیام مسیر عادی خودش را ادامه می‌دهد.
+    app.add_handler(MessageHandler(filters.REPLY & ~filters.COMMAND,reply_relay),group=-1)
     app.add_handler(CommandHandler("start",cmd_start))
     app.add_handler(CommandHandler("help",cmd_help))
     app.add_handler(CommandHandler("admin",cmd_admin))
