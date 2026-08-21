@@ -45,6 +45,7 @@ WORKHOURS_FILE = "workhours.json"; BUTTONS_FILE = "buttons.json"
 MENU_FILE = "menu.json"; BACKUPS_FILE = "backups.json"; PLACES_FILE = "places.json"
 SETTINGS_FILE = "settings.json"; STATS_FILE = "stats.json"
 ADMINS_FILE = "admins.json"; BROADCAST_FILE = "broadcast.json"
+FAQ_FILE = "faq.json"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -143,6 +144,22 @@ def is_open():
         for sh in dd.get("shifts",[]):
             if sh.get("from","") > sh.get("to","") and in_shift(ns,sh): return True
     return False
+
+def next_open_text():
+    """«فردا از ۱۱:۰۰» یا «شنبه از ۱۷:۰۰» — نزدیک‌ترین شیفتی که هنوز نیامده."""
+    if not workhours.get("enabled",True): return ""
+    now=datetime.now(IRAN_TZ); sched=workhours.get("schedule",{})
+    for off in range(0,8):
+        d=now+timedelta(days=off)
+        j=jdatetime.datetime.fromgregorian(datetime=d)
+        day=sched.get(str(j.weekday()),{})
+        if not day.get("open",False): continue
+        starts=sorted(sh["from"] for sh in day.get("shifts",[]) if valid_shift(sh))
+        for st in starts:
+            if off==0 and st<=now.strftime("%H:%M"): continue
+            when=("امروز" if off==0 else "فردا" if off==1 else DAY_FA.get(str(j.weekday()),""))
+            return f"{when} از ساعت {to_fa(st)}"
+    return ""
 
 def wh_today_block():
     if not workhours.get("enabled",True): return None
@@ -460,7 +477,9 @@ async def init_db():
     """)
     for sql in ["ALTER TABLE users ADD COLUMN is_blocked INTEGER DEFAULT 0",
                 "ALTER TABLE users ADD COLUMN has_left INTEGER DEFAULT 0",
-                "ALTER TABLE users ADD COLUMN source TEXT DEFAULT ''"]:
+                "ALTER TABLE users ADD COLUMN source TEXT DEFAULT ''",
+                "ALTER TABLE users ADD COLUMN open_msg_at TEXT DEFAULT ''",
+                "ALTER TABLE users ADD COLUMN reminded INTEGER DEFAULT 0"]:
         try: await db.execute(sql)
         except Exception as e:
             # «ستون تکراری» یعنی مهاجرت قبلاً انجام شده — بقیه خطاها واقعی‌اند
@@ -520,6 +539,54 @@ async def thread_user(admin_id,msg_id):
                           (admin_id,msg_id)) as c:
         r=await c.fetchone()
     return r[0] if r else None
+
+async def thread_last_msg(admin_id,user_id):
+    """تازه‌ترین پیام مربوط به این مشتری در چت این مدیر — برای اینکه
+    یادآوری به‌صورت ریپلای برود و با یک تپ به همان پیام بپرد."""
+    async with db.execute(
+        "SELECT msg_id FROM threads WHERE admin_id=? AND user_id=? ORDER BY msg_id DESC LIMIT 1",
+        (admin_id,user_id)) as c:
+        r=await c.fetchone()
+    return r[0] if r else None
+
+# ── پیام‌های بی‌جواب
+async def mark_open(uid):
+    """اولین پیام بی‌جواب زمانش ثبت می‌شود و تا پاسخ دست‌نخورده می‌ماند،
+    وگرنه هر پیام تازه سن انتظار را صفر می‌کرد."""
+    await db.execute(
+        "UPDATE users SET open_msg_at=? WHERE user_id=? AND COALESCE(open_msg_at,'')=''",
+        (gregorian_now(),uid))
+    await db.commit()
+
+async def mark_answered(uid):
+    await db.execute("UPDATE users SET open_msg_at='',reminded=0 WHERE user_id=?",(uid,))
+    await db.commit()
+
+async def open_count():
+    return await _cnt("SELECT COUNT(*) FROM users WHERE COALESCE(open_msg_at,'')<>''")
+
+async def open_list(limit=15):
+    async with db.execute(
+        "SELECT user_id,first_name,username,open_msg_at FROM users "
+        "WHERE COALESCE(open_msg_at,'')<>'' ORDER BY open_msg_at LIMIT ?",(limit,)) as c:
+        return await c.fetchall()
+
+async def open_stale(hours=2):
+    """بی‌جواب‌هایی که وقتشان گذشته و هنوز یادآوری نشده‌اند."""
+    async with db.execute(
+        "SELECT user_id,first_name FROM users WHERE COALESCE(open_msg_at,'')<>'' "
+        "AND reminded=0 AND open_msg_at<datetime('now',?,'localtime')",(f"-{hours} hours",)) as c:
+        return await c.fetchall()
+
+def ago_text(ts):
+    """«۳ ساعت پیش» — بدون تاریخ کامل، چون فقط سنِ انتظار مهم است."""
+    try: t=datetime.strptime(ts,"%Y-%m-%d %H:%M:%S")
+    except Exception: return "—"
+    mins=int((datetime.now(IRAN_TZ).replace(tzinfo=None)-t).total_seconds()//60)
+    if mins<1:  return "همین الان"
+    if mins<60: return f"{to_fa(mins)} دقیقه پیش"
+    if mins<1440: return f"{to_fa(mins//60)} ساعت پیش"
+    return f"{to_fa(mins//1440)} روز پیش"
 
 async def prune_threads(days=60):
     """رشته‌های خیلی قدیمی به درد نمی‌خورند — کسی روی پیام دو ماه پیش ریپلای نمی‌زند."""
@@ -731,7 +798,7 @@ def _nav(*extra, home=True, back=None):
 
 async def admin_home_text():
     """وضعیت لحظه‌ای فروشگاه — مهم‌ترین اعداد بدون نیاز به باز کردن چیزی."""
-    t,d,nt = await asyncio.gather(total_users(), today_users(), new_today())
+    t,d,nt,op = await asyncio.gather(total_users(), today_users(), new_today(), open_count())
     opened=is_open()
     sep="─"*20
     lines=[f"👑 پنل مدیریت — {shamsi_now()}", sep]
@@ -748,6 +815,8 @@ async def admin_home_text():
         lines.append("🕐 امروز تعطیل است")
     lines += [sep,
               f"👥 {to_fa(t)} کاربر  ·  🆕 {to_fa(nt)} امروز  ·  📅 {to_fa(d)} فعال امروز"]
+    if op:
+        lines.append(f"💬 {to_fa(op)} پیام بی‌جواب — برای پاسخ در همین چت ریپلای بزنید")
     if _bc_job:
         n=len(_bc_job["queue"])
         if _bc_job["status"]=="pending" and _bc_job.get("run_at"):
@@ -758,9 +827,13 @@ async def admin_home_text():
         lines.append(f"👮 {to_fa(len(_admins))} مدیر")
     return "\n".join(lines)
 
-def admin_home_kb():
+def admin_home_kb(open_msgs=0):
     shop=("🔴 بستن فروشگاه" if get_setting("store_open") else "🟢 باز کردن فروشگاه")
-    return InlineKeyboardMarkup([
+    rows=[]
+    if open_msgs:
+        rows.append([InlineKeyboardButton(f"💬 {to_fa(open_msgs)} پیام بی‌جواب",
+                                          callback_data="pending")])
+    return InlineKeyboardMarkup(rows+[
         [InlineKeyboardButton("👥 کاربران",callback_data="users_menu"),
          InlineKeyboardButton("📊 آمار",callback_data="adm_stats")],
         [InlineKeyboardButton("✏️ محتوای ربات",callback_data="adm_content"),
@@ -771,7 +844,7 @@ def admin_home_kb():
     ])
 
 async def show_home(msg, edit=True):
-    txt=await admin_home_text(); kb=admin_home_kb()
+    txt=await admin_home_text(); kb=admin_home_kb(await open_count())
     if edit: await safe_edit(msg,txt,reply_markup=kb)
     else:    await msg.reply_text(txt,reply_markup=kb)
 
@@ -819,7 +892,95 @@ def content_kb():
     return InlineKeyboardMarkup(_nav(
         [InlineKeyboardButton("🧩 دکمه‌های منوی اصلی",callback_data="menu_mgr")],
         [InlineKeyboardButton("📝 متن، بنر و لینک بخش‌ها",callback_data="sections")],
+        [InlineKeyboardButton(f"💡 سؤال‌های آماده · {to_fa(len(faq))}",callback_data="faq_menu")],
     ))
+
+# ── سؤال‌های آماده
+def faq_menu_text():
+    on=sum(1 for x in faq if x.get("enabled",True))
+    hits=sum(x.get("hits",0) for x in faq)
+    return ("<b>💡 سؤال‌های آماده</b>\n"+HR+
+            "\nوقتی پیام مشتری یکی از کلیدواژه‌ها را داشته باشد، همان لحظه "
+            "پاسخ می‌گیرد — و پیامش باز هم برای شما فوروارد می‌شود.\n"
+            f"\n📊 {to_fa(on)} فعال از {to_fa(len(faq))}  ·  {to_fa(hits)} بار پاسخ خودکار")
+
+def faq_menu_kb():
+    rows=[[InlineKeyboardButton("➕ سؤال جدید",callback_data="faq_add")]]
+    for it in faq:
+        mark="🟢" if it.get("enabled",True) else "⚫️"
+        h=it.get("hits",0)
+        rows.append([InlineKeyboardButton(
+            f"{mark} {_fit(faq_title(it),24)}"+(f" · {to_fa(h)}" if h else ""),
+            callback_data=f"faq_v_{it['id']}")])
+    return InlineKeyboardMarkup(_nav(*rows,back="adm_content"))
+
+def faq_view_text(it):
+    return _fit("<b>💡 سؤال آماده</b>\n"+HR+
+                "\n🔑 کلیدواژه‌ها: "+esc("، ".join(it.get("keys",[]) or ["—"]))+
+                f"\n📊 {to_fa(it.get('hits',0))} بار پاسخ داده\n{HR}\n"+
+                esc(it.get("answer","")),TEXT_LIMIT)
+
+def faq_view_kb(it):
+    return InlineKeyboardMarkup(_nav(
+        [InlineKeyboardButton("🔑 کلیدواژه‌ها",callback_data=f"faq_ek_{it['id']}"),
+         InlineKeyboardButton("📝 پاسخ",callback_data=f"faq_ea_{it['id']}")],
+        [InlineKeyboardButton("⚫️ غیرفعال کن" if it.get("enabled",True) else "🟢 فعال کن",
+                              callback_data=f"faq_tg_{it['id']}"),
+         InlineKeyboardButton("🗑 حذف",callback_data=f"faq_dl_{it['id']}")],
+        back="faq_menu"))
+
+# ── پیام‌های بی‌جواب
+async def pending_text():
+    rows=await open_list()
+    if not rows:
+        return "<b>💬 پیام‌های بی‌جواب</b>\n"+HR+"\n✅ همه‌ی پیام‌ها جواب داده شده‌اند."
+    out=["<b>💬 پیام‌های بی‌جواب</b>",HR]
+    for uid,fn,un,ts in rows:
+        out.append(f"• {esc(fn or '—')}"+(f" · @{esc(un)}" if un else "")+
+                   f"\n  🆔 <code>{uid}</code> · {esc(ago_text(ts))}")
+    out += [HR,"برای پاسخ، در همین چت روی پیام مشتری ریپلای بزنید.",
+            "دکمه‌ی زیر پیام‌ها را برایتان بالا می‌آورد."]
+    return _fit("\n".join(out),TEXT_LIMIT)
+
+def pending_kb(has_rows=True):
+    rows=[]
+    if has_rows: rows.append([InlineKeyboardButton("🔔 نشانم بده در چت",callback_data="pend_ping")])
+    rows.append([InlineKeyboardButton("🔄 بروزرسانی",callback_data="pending")])
+    return InlineKeyboardMarkup(_nav(*rows))
+
+async def ping_open(bot,admin_id):
+    """هر پیام بی‌جواب را به‌صورت ریپلای بالا می‌آورد — یک تپ و مدیر
+    دقیقاً روی همان پیام مشتری است و همان‌جا جواب می‌دهد."""
+    sent=0
+    for uid,fn,un,ts in await open_list():
+        mid=await thread_last_msg(admin_id,uid)
+        try:
+            await bot.send_message(admin_id,
+                f"⏳ بی‌جواب از {ago_text(ts)} — {fn or uid}",
+                reply_to_message_id=mid)
+            sent+=1
+        except Exception as e:
+            logger.debug(f"ping_open {admin_id}/{uid}: {e}")
+    return sent
+
+async def _pending_loop(bot):
+    """هر نیم‌ساعت: پیامی که بیش از ۲ ساعت بی‌جواب مانده یک‌بار یادآوری می‌شود."""
+    await asyncio.sleep(120)
+    while True:
+        try:
+            for uid,fn in await open_stale(2):
+                for aid in admin_ids():
+                    mid=await thread_last_msg(aid,uid)
+                    if mid is None: continue
+                    try:
+                        await bot.send_message(aid,
+                            f"⏰ پیام {fn or uid} بیش از ۲ ساعت بی‌جواب مانده.",
+                            reply_to_message_id=mid)
+                    except Exception as e: logger.debug(f"reminder {aid}: {e}")
+                await db.execute("UPDATE users SET reminded=1 WHERE user_id=?",(uid,))
+            await db.commit()
+        except Exception as e: logger.error(f"pending_loop: {e}")
+        await asyncio.sleep(1800)
 
 # ترتیب نمایش بخش‌ها — دقیقاً مطابق منوی کاربر
 SECTION_ORDER = ["welcome","1","2","3","4","5","workhours","6","7"]
@@ -1157,12 +1318,94 @@ def extract_links(text):
         seen.add(u); out.append((label_for_url(u),u))
     return out
 
+# ════════════════════════════════════════════════
+#  FAQ — پاسخ خودکار به سؤال‌های تکراری
+# ════════════════════════════════════════════════
+# هیچ دکمه‌ای به منوی مشتری اضافه نمی‌شود: مشتری سؤالش را مثل همیشه
+# می‌نویسد، اگر با کلیدواژه‌های ادمین جور بود همان‌جا جواب می‌گیرد، و
+# پیامش باز هم برای مدیرها فوروارد می‌شود تا اگر ناقص بود کاملش کنند.
+faq: list = []
+
+# ی/ك عربی → فارسی، حذف نیم‌فاصله و علائم، تا نوشتار مشتری مانع تطبیق نشود
+_AR_FIX = str.maketrans("يكةۀأإآؤ", "یکههاااو")
+_PUNCT_RE = re.compile(r"[\u200c\u200f\u200e?؟!.,،؛;:\-_()\[\]{}\"'«»]+")
+
+def faq_norm(t):
+    t=(t or "").translate(_AR_FIX).translate(FA_DIGITS).lower()
+    t=_PUNCT_RE.sub(" ",t)
+    return " "+re.sub(r"\s+"," ",t).strip()+" "
+
+def faq_match(text):
+    """اولین سؤال آماده‌ای که کلیدواژه‌اش در متن مشتری هست.
+
+    تطبیق فقط با کلیدواژه‌های خودِ ادمین است — هیچ حدسی در کار نیست.
+    اگر مطمئن نباشیم چیزی نمی‌گوییم؛ جواب غلط از جواب ندادن بدتر است.
+    بلندترین کلیدواژه برنده است تا «گارانتی طلایی» بر «گارانتی» بچربد.
+    """
+    if not text: return None
+    n=faq_norm(text)
+    best=None; best_len=0
+    for item in faq:
+        if not item.get("enabled",True) or not item.get("answer"): continue
+        for k in item.get("keys",[]):
+            kn=faq_norm(k).strip()
+            if len(kn)<2 or kn not in n: continue
+            if len(kn)>best_len: best,best_len=item,len(kn)
+    return best
+
+def faq_title(item):
+    """نام خوانا برای فهرست پنل — اولین کلیدواژه یا ابتدای پاسخ."""
+    ks=item.get("keys") or []
+    return ks[0] if ks else _fit(item.get("answer",""),30)
+
+def faq_kb_for(item):
+    """لینک‌های داخل پاسخ → دکمه، مثل بقیه‌ی بخش‌ها."""
+    links=extract_links(item.get("answer",""))
+    btns=[]; row=[]
+    for i,(title,url) in enumerate(links):
+        row.append(InlineKeyboardButton(title,url=url))
+        if len(row)==2 or len(title)>18 or i==len(links)-1:
+            btns.append(row); row=[]
+    if row: btns.append(row)
+    return InlineKeyboardMarkup(btns) if btns else None
+
+# نمونه‌های اولیه — همه خاموش‌اند تا تا وقتی ادمین متن را با کلمات خودش
+# ننوشته، جواب نادرست به مشتری نرود.
+SAMPLE_FAQ = [
+    (["گارانتی","ضمانت","وارانتی"], "متن گارانتی را اینجا بنویسید."),
+    (["اقساط","قسطی","قسط"],        "شرایط خرید اقساطی را اینجا بنویسید."),
+    (["ارسال","پست","تیپاکس"],      "شرایط ارسال را اینجا بنویسید."),
+    (["آدرس","کجایید","نشانی"],     "آدرس فروشگاه را اینجا بنویسید."),
+]
+
+async def load_faq():
+    global faq
+    data=await _rj(FAQ_FILE,lambda:None)
+    if data is None:
+        faq=[{"id":new_btn_id(),"keys":k,"answer":a,"enabled":False,"hits":0}
+             for k,a in SAMPLE_FAQ]
+        await save_faq()
+        logger.info("faq: نمونه‌های اولیه ساخته شد (همه خاموش)")
+        return
+    faq=[x for x in data if isinstance(x,dict) and x.get("answer")] if isinstance(data,list) else []
+    logger.info(f"faq: {len(faq)} سؤال آماده")
+
+async def save_faq(): return await _wj(FAQ_FILE,faq)
+
+def faq_item(fid): return next((x for x in faq if x.get("id")==fid),None)
+
 def strip_button_links(text,key):
     """هر لینکی که دکمه شده از متن پنهان می‌شود — دکمه جای لینک آبی را
     گرفته و نگه داشتن هر دو فقط شلوغی است. غیرمخرب: متن اصلی می‌ماند."""
-    urls=[u for _,u in section_links(key)]
+    return _strip_link_list(text,[u for _,u in section_links(key)])
+
+def strip_text_links(text):
+    """فقط لینک‌های خودِ متن — برای جاهایی که بخش (key) در کار نیست، مثل FAQ."""
+    return _strip_link_list(text,[])
+
+def _strip_link_list(text,urls):
     # لینک‌هایی که در خود متن بودند هم باید بروند حتی اگر شکل کوتاه نوشته شده‌اند
-    urls+= [m.group(0) for m in _ANY_URL_RE.finditer(text or "")]
+    urls=list(urls)+[m.group(0) for m in _ANY_URL_RE.finditer(text or "")]
     if not urls: return text
     parts=[]
     for u in urls:
@@ -1486,7 +1729,7 @@ async def send_backup(bot):
     files=[(DATA_FILE,"data.json"),(BANNER_FILE,"banner.json"),(WORKHOURS_FILE,"workhours.json"),
            (BUTTONS_FILE,"buttons.json"),(SETTINGS_FILE,"settings.json"),(STATS_FILE,"stats.json"),
            (MENU_FILE,"menu.json"),(PLACES_FILE,"places.json"),(ADMINS_FILE,"admins.json"),
-           (DB_FILE,"users.db")]
+           (FAQ_FILE,"faq.json"),(DB_FILE,"users.db")]
     with zipfile.ZipFile(buf,"w",zipfile.ZIP_DEFLATED) as zf:
         for fp,name in files:
             try:
@@ -1532,7 +1775,7 @@ async def _auto_backup_loop(bot):
 BACKUP_MAP = {"data.json":DATA_FILE,"banner.json":BANNER_FILE,"workhours.json":WORKHOURS_FILE,
               "buttons.json":BUTTONS_FILE,"settings.json":SETTINGS_FILE,"stats.json":STATS_FILE,
               "menu.json":MENU_FILE,"places.json":PLACES_FILE,"admins.json":ADMINS_FILE,
-              "users.db":DB_FILE}
+              "faq.json":FAQ_FILE,"users.db":DB_FILE}
 SQLITE_MAGIC = b"SQLite format 3\x00"
 MAX_RESTORE_BYTES = 200 * 1024 * 1024   # سقف ایمنی برای فایل‌های داخل ZIP
 
@@ -1600,7 +1843,7 @@ async def restore_backup(bot,file_id):
 
         await load_data(); await load_banners(); await load_workhours()
         await load_buttons(); await load_settings(); await load_stats(); await load_menu(); await load_places()
-        await load_admins()   # فهرست مدیرها هم از فایلِ تازه دوباره خوانده شود
+        await load_admins(); await load_faq()   # از فایل‌های تازه دوباره خوانده شوند
         # نرمال‌سازی فرمت فایل‌ها روی دیسک (جلوگیری از مشکل فرمت قدیمی بعد از restart)
         await save_banners(); await save_buttons()
         if snapshot: logger.info(f"بکاپ ایمنی پیش از بازگردانی: {snapshot}")
@@ -1716,6 +1959,68 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         if data in (HOME_CB,"back_to_admin"):
             await query.answer()
             await show_home(query.message)
+
+        elif data=="pending":
+            await query.answer()
+            rows=await open_list()
+            await safe_edit(query.message,await pending_text(),
+                            reply_markup=pending_kb(bool(rows)),parse_mode="HTML")
+
+        elif data=="pend_ping":
+            n=await ping_open(ctx.bot,uid)
+            await query.answer(f"{to_fa(n)} پیام در چت بالا آمد." if n
+                               else "پیام بی‌جوابی نیست.",show_alert=True)
+
+        elif data=="faq_menu":
+            await query.answer()
+            await safe_edit(query.message,faq_menu_text(),
+                            reply_markup=faq_menu_kb(),parse_mode="HTML")
+
+        elif data=="faq_add":
+            await query.answer()
+            ctx.user_data.update({"mode":"faq_keys","faq_id":None})
+            await query.message.reply_text(
+                "🔑 کلیدواژه‌ها را با کاما بنویسید — هر کدام در پیام مشتری باشد، "
+                "این پاسخ می‌رود.\n\nمثال:  گارانتی، ضمانت، وارانتی",
+                reply_markup=cancel_menu())
+
+        elif data.startswith("faq_v_"):
+            it=faq_item(data[6:])
+            if not it: await query.answer("یافت نشد!",show_alert=True); return
+            await query.answer()
+            await safe_edit(query.message,faq_view_text(it),
+                            reply_markup=faq_view_kb(it),parse_mode="HTML")
+
+        elif data.startswith("faq_ek_"):
+            it=faq_item(data[7:])
+            if not it: await query.answer("یافت نشد!",show_alert=True); return
+            await query.answer()
+            ctx.user_data.update({"mode":"faq_keys","faq_id":it["id"]})
+            await query.message.reply_text(
+                f"🔑 کلیدواژه‌های فعلی: {'، '.join(it.get('keys',[]))}\n\nکلیدواژه‌های جدید:",
+                reply_markup=cancel_menu())
+
+        elif data.startswith("faq_ea_"):
+            it=faq_item(data[7:])
+            if not it: await query.answer("یافت نشد!",show_alert=True); return
+            await query.answer()
+            ctx.user_data.update({"mode":"faq_ans","faq_id":it["id"]})
+            await query.message.reply_text("📝 پاسخ جدید:",reply_markup=cancel_menu())
+
+        elif data.startswith("faq_tg_"):
+            it=faq_item(data[7:])
+            if not it: await query.answer("یافت نشد!",show_alert=True); return
+            it["enabled"]=not it.get("enabled",True); await save_faq()
+            await query.answer("🟢 فعال شد" if it["enabled"] else "⚫️ غیرفعال شد",show_alert=True)
+            await safe_edit(query.message,faq_view_text(it),
+                            reply_markup=faq_view_kb(it),parse_mode="HTML")
+
+        elif data.startswith("faq_dl_"):
+            fid=data[7:]
+            faq[:] = [x for x in faq if x.get("id")!=fid]; await save_faq()
+            await query.answer("🗑 حذف شد.",show_alert=True)
+            await safe_edit(query.message,faq_menu_text(),
+                            reply_markup=faq_menu_kb(),parse_mode="HTML")
 
         elif data=="adm_content":
             await query.answer()
@@ -2295,6 +2600,45 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
                 f"🎯 {bc_label(aud)} — {to_fa(n)} نفر\nچه کار کنم؟",
                 reply_markup=bc_confirm_kb())
             return
+        if mode=="faq_keys":
+            fid=ctx.user_data.get("faq_id")
+            keys=[k.strip() for k in text.replace("،",",").split(",") if k.strip()]
+            keys=[k for k in keys if len(faq_norm(k).strip())>=2]
+            if not keys:
+                await update.message.reply_text(
+                    "❌ حداقل یک کلیدواژه‌ی ۲ حرفی یا بیشتر لازم است.\n"
+                    "مثال:  گارانتی، ضمانت",reply_markup=cancel_menu()); return
+            if fid:
+                it=faq_item(fid); ctx.user_data.pop("mode",None); ctx.user_data.pop("faq_id",None)
+                if not it:
+                    await update.message.reply_text("❌ یافت نشد.",reply_markup=main_menu()); return
+                it["keys"]=keys; await save_faq()
+                await update.message.reply_text("✅ کلیدواژه‌ها ذخیره شد.",reply_markup=main_menu())
+                await update.message.reply_text(faq_view_text(it),parse_mode="HTML",
+                                                reply_markup=faq_view_kb(it)); return
+            # سؤال جدید — حالا نوبت پاسخ
+            ctx.user_data.update({"mode":"faq_ans","faq_keys":keys})
+            await update.message.reply_text(
+                f"🔑 {'، '.join(keys)}\n\n📝 حالا پاسخ را بنویسید.\n"
+                f"لینک بنویسید، خودش دکمه می‌شود.",reply_markup=cancel_menu()); return
+
+        if mode=="faq_ans":
+            fid=ctx.user_data.pop("faq_id",None)
+            keys=ctx.user_data.pop("faq_keys",None)
+            ctx.user_data.pop("mode",None)
+            if fid:
+                it=faq_item(fid)
+                if not it:
+                    await update.message.reply_text("❌ یافت نشد.",reply_markup=main_menu()); return
+                it["answer"]=text
+            else:
+                it={"id":new_btn_id(),"keys":keys or [],"answer":text,"enabled":True,"hits":0}
+                faq.append(it)
+            await save_faq()
+            await update.message.reply_text("✅ ذخیره شد.",reply_markup=main_menu())
+            await update.message.reply_text(faq_view_text(it),parse_mode="HTML",
+                                            reply_markup=faq_view_kb(it)); return
+
         if mode=="adm_add":
             ctx.user_data.pop("mode",None)
             if not is_owner(user.id):
@@ -2446,12 +2790,24 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         full=build_msg(text,content,mkey)
         await send_banner(update.message,full,mkey,kb=kb); return
 
-    # پیام آزاد کاربر — به‌جای «گزینه نامعتبر»، برای ادمین فوروارد می‌شود
+    # پیام آزاد کاربر — اول ببینیم سؤال آماده‌ای جوابش را دارد یا نه
+    hit=faq_match(text)
+    if hit:
+        hit["hits"]=hit.get("hits",0)+1; await save_faq()
+        body=strip_text_links(hit["answer"]) if faq_kb_for(hit) else hit["answer"]
+        await update.message.reply_text(
+            _fit(f"<b>💡 {esc(faq_title(hit))}</b>\n{HR}\n{esc(body)}\n\n"
+                 f"<i>اگر پاسخ کامل نبود نگران نباشید — همکاران ما هم پیام شما را "
+                 f"دیدند و جواب می‌دهند.</i>",TEXT_LIMIT),
+            parse_mode="HTML",reply_markup=faq_kb_for(hit) or main_menu(),
+            disable_web_page_preview=True)
+        await forward_to_admin(update,ctx,auto=hit)
+        return
     if await forward_to_admin(update,ctx): return
     await update.message.reply_text(
         "لطفاً یکی از گزینه‌های منوی زیر را انتخاب کنید 👇",reply_markup=main_menu())
 
-async def forward_to_admin(update:Update,ctx:ContextTypes.DEFAULT_TYPE,kind=""):
+async def forward_to_admin(update:Update,ctx:ContextTypes.DEFAULT_TYPE,kind="",auto=None):
     """پیام مشتری (هر نوعی) را برای ادمین فوروارد و به مشتری تأیید می‌دهد.
 
     فوروارد برای همه‌ی انواع پیام کار می‌کند — متن، عکس، ویس، ویدیو، فایل،
@@ -2463,8 +2819,11 @@ async def forward_to_admin(update:Update,ctx:ContextTypes.DEFAULT_TYPE,kind=""):
     if msg is None: return False
     uname=f"@{user.username}" if user.username else "—"
     card=(f"<b>💬 {esc(kind or 'پیام')} از مشتری</b>\n{HR}\n"
-          f"👤 {esc(user.first_name or '—')}  ·  {esc(uname)}\n🆔 <code>{user.id}</code>\n"
-          f"↩️ برای پاسخ، روی همین پیام ریپلای کنید.")
+          f"👤 {esc(user.first_name or '—')}  ·  {esc(uname)}\n🆔 <code>{user.id}</code>")
+    if auto:
+        # مدیر باید بداند مشتری همین حالا یک جواب گرفته — تا جواب تکراری ندهد
+        card += f"\n✅ پاسخ خودکار داده شد: «{esc(faq_title(auto))}»"
+    card += "\n↩️ برای پاسخ، روی همین پیام ریپلای کنید."
     delivered=0
     # به همه‌ی مدیرها می‌رود تا هرکس زودتر دید جواب بدهد؛ خطای یکی
     # نباید جلوی بقیه را بگیرد.
@@ -2480,10 +2839,19 @@ async def forward_to_admin(update:Update,ctx:ContextTypes.DEFAULT_TYPE,kind=""):
         except Exception as e:
             logger.error(f"forward user msg → {aid}: {e}")
     if not delivered: return False
+    await mark_open(user.id)
+    if auto: return True          # مشتری همین الان پاسخ گرفت، تأیید اضافه لازم نیست
+    # تأیید آگاه از ساعت کاری — «به‌زودی پاسخ می‌دهیم» ساعت ۳ بامداد دروغ است
+    if is_open():
+        body="همکاران ما به‌زودی پاسخ می‌دهند. 🙏"
+    else:
+        nx=next_open_text()
+        body=("🔴 الان خارج از ساعت کاری هستیم.\n"
+              + (f"پاسخ شما {nx} ارسال می‌شود. 🙏" if nx
+                 else "به‌محض شروع ساعت کاری پاسخ می‌دهیم. 🙏"))
     try:
-        await msg.reply_text(
-            "<b>✅ پیام شما دریافت شد</b>\n"+HR+"\nهمکاران ما به‌زودی پاسخ می‌دهند. 🙏",
-            parse_mode="HTML",reply_markup=main_menu())
+        await msg.reply_text(f"<b>✅ پیام شما دریافت شد</b>\n{HR}\n{body}",
+                             parse_mode="HTML",reply_markup=main_menu())
     except Exception as e:
         logger.error(f"ack to user: {e}")
     return True
@@ -2517,6 +2885,7 @@ async def reply_relay(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         raise ApplicationHandlerStop
     # پاسخ خودِ مدیر هم به همین مشتری گره می‌خورد تا رشته ادامه پیدا کند
     await link_thread(user.id,msg.message_id,target)
+    await mark_answered(target)
     try:
         await ctx.bot.set_message_reaction(chat_id=msg.chat_id,message_id=msg.message_id,
                                            reaction="👍")
@@ -2658,11 +3027,12 @@ async def post_init(app):
     await init_db(); await load_data(); await load_banners()
     await load_workhours(); await load_buttons(); await load_settings()
     await load_stats(); await load_menu(); await load_places(); await load_backup_registry()
-    await load_admins(); await bc_load()
+    await load_admins(); await bc_load(); await load_faq()
     asyncio.ensure_future(_spam_cleanup_loop())
     asyncio.ensure_future(_stats_flush_loop())
     asyncio.ensure_future(_auto_backup_loop(app.bot))
     asyncio.ensure_future(_bc_loop(app.bot))
+    asyncio.ensure_future(_pending_loop(app.bot))
     try:
         await app.bot.set_my_commands([BotCommand("start","شروع و نمایش منو"),
                                        BotCommand("help","راهنما")])

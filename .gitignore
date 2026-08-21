@@ -48,6 +48,7 @@ backups.json
 places.json
 admins.json
 broadcast.json
+faq.json
 pre_restore.zip
 *.corrupt
 
