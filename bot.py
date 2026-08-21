@@ -31,8 +31,7 @@ except ValueError:
                      "   برای چند مدیر با کاما جدا کنید:  ADMIN_ID=11111111,22222222")
 if not _ADMIN_ENV:
     raise SystemExit("❌ ADMIN_ID خالی است.")
-OWNER_ID = _ADMIN_ENV[0]
-ADMIN_ID = OWNER_ID          # مالک — مقصد بک‌آپ و گزارش خطا
+OWNER_ID = _ADMIN_ENV[0]     # مالک — مقصد بک‌آپ و گزارش خطا
 _admins: set = set(_ADMIN_ENV)
 _admins_extra: list = []     # مدیرهای افزوده‌شده از پنل (admins.json)
 
@@ -704,8 +703,6 @@ def user_sec_kb(key,home=False):
     return InlineKeyboardMarkup(btns) if btns else None
 
 # ── admin keyboards
-def back_admin(): return InlineKeyboardMarkup(_nav())
-
 def backup_kb():
     rows=[
         [InlineKeyboardButton("💾 دریافت پشتیبان",callback_data="backup_get"),
@@ -1843,7 +1840,7 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             await query.answer()
             await safe_edit(query.message,
                 f"⚠️ بازگردانی از بکاپ {entry['date']}\n"+"─"*18+
-                "\n\nتمام کاربران، درخواست‌ها، متن‌ها و تنظیمات فعلی با نسخه‌ی این "
+                "\n\nتمام کاربران، متن‌ها و تنظیمات فعلی با نسخه‌ی این "
                 "بکاپ جایگزین می‌شوند.\n\n"
                 "(از وضعیت فعلی یک نسخه‌ی ایمنی در pre_restore.zip نگه داشته می‌شود.)",
                 reply_markup=InlineKeyboardMarkup([
@@ -1869,7 +1866,7 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             ctx.user_data["mode"]="backup_restore"
             await query.message.reply_text(
                 "📥 فایل ZIP بک‌آپ را ارسال کنید.\n\n"
-                "⚠️ محتوای فایل جایگزین کاربران، درخواست‌ها و تنظیمات فعلی می‌شود.",
+                "⚠️ محتوای فایل جایگزین کاربران، متن‌ها و تنظیمات فعلی می‌شود.",
                 reply_markup=cancel_menu())
 
         # ── مدیریت بخش‌ها — یکپارچه برای تمام بخش‌ها
