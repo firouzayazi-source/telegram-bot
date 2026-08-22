@@ -45,7 +45,7 @@ WORKHOURS_FILE = "workhours.json"; BUTTONS_FILE = "buttons.json"
 MENU_FILE = "menu.json"; BACKUPS_FILE = "backups.json"; PLACES_FILE = "places.json"
 SETTINGS_FILE = "settings.json"; STATS_FILE = "stats.json"
 ADMINS_FILE = "admins.json"; BROADCAST_FILE = "broadcast.json"
-FAQ_FILE = "faq.json"
+FAQ_FILE = "faq.json"; UNMATCHED_FILE = "unmatched.json"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -104,7 +104,10 @@ DEFAULT_WH = {"enabled":True,"schedule":{
     "5":{"open":True,"shifts":[{"from":"11:00","to":"14:00"},{"from":"17:00","to":"23:00"}]},
     "6":{"open":True,"shifts":[{"from":"17:00","to":"23:00"}]}},
     "msg_open":"✅ هم‌اکنون باز است","msg_closed":"🔴 هم‌اکنون بسته است"}
-DEFAULT_SETTINGS = {"notify_new_user":True,"store_open":True,"forward_user_msgs":True}
+DEFAULT_SETTINGS = {"notify_new_user":True,"store_open":True,"forward_user_msgs":True,
+                    "faq_auto":True,        # پاسخ خودکار به سؤال‌های آماده
+                    "faq_shortcut":True,    # میان‌بر #کلیدواژه هنگام پاسخ مدیر
+                    "log_unmatched":True}   # ثبت سؤال‌هایی که جوابی نداشتند
 
 # ── helpers
 def get_banner(k): banners.setdefault(k,{"file_id":None,"active":False}); return banners[k]
@@ -850,7 +853,10 @@ async def show_home(msg, edit=True):
 
 def settings_text():
     return ("⚙️ تنظیمات\n"+"─"*20+
-            "\nبا زدن هر گزینه، روشن/خاموش می‌شود.")
+            "\nبا زدن هر گزینه، روشن/خاموش می‌شود."
+            "\n\n💡 پاسخ خودکار: سؤال آماده‌ای که کلیدواژه‌اش در پیام مشتری باشد"
+            "\n#️⃣ میان‌بر: هنگام پاسخ، #کلیدواژه را می‌نویسید و جواب آماده می‌رود"
+            "\n❓ سؤال‌های بی‌پاسخ: پرسش‌هایی که هیچ جوابی برایشان نبود")
 
 def stats_kb():
     return InlineKeyboardMarkup(_nav(
@@ -906,6 +912,9 @@ def faq_menu_text():
 
 def faq_menu_kb():
     rows=[[InlineKeyboardButton("➕ سؤال جدید",callback_data="faq_add")]]
+    if get_setting("log_unmatched") and unmatched:
+        rows.append([InlineKeyboardButton(
+            f"❓ سؤال‌های بی‌پاسخ · {to_fa(len(unmatched))}",callback_data="unm_menu")])
     for it in faq:
         mark="🟢" if it.get("enabled",True) else "⚫️"
         h=it.get("hits",0)
@@ -915,19 +924,38 @@ def faq_menu_kb():
     return InlineKeyboardMarkup(_nav(*rows,back="adm_content"))
 
 def faq_view_text(it):
+    pic=""
+    if it.get("photo"):
+        pic=f"\n🖼 عکس دارد  ·  {faq_photo_stamp(it) or '—'}"
+    k1=(it.get("keys") or [None])[0]
     return _fit("<b>💡 سؤال آماده</b>\n"+HR+
                 "\n🔑 کلیدواژه‌ها: "+esc("، ".join(it.get("keys",[]) or ["—"]))+
-                f"\n📊 {to_fa(it.get('hits',0))} بار پاسخ داده\n{HR}\n"+
-                esc(it.get("answer","")),TEXT_LIMIT)
+                f"\n📊 {to_fa(it.get('hits',0))} بار پاسخ داده"+pic+
+                (f"\n\n♻️ برای عوض‌کردن سریع عکس، همین‌جا عکس را با کپشن "
+                 f"<code>#{esc(k1)}</code> بفرستید." if k1 else "")+
+                f"\n{HR}\n"+esc(it.get("answer","")),TEXT_LIMIT)
 
 def faq_view_kb(it):
+    pic=([InlineKeyboardButton("🖼 تغییر عکس",callback_data=f"faq_ep_{it['id']}"),
+          InlineKeyboardButton("🗑 حذف عکس",callback_data=f"faq_dp_{it['id']}")]
+         if it.get("photo") else
+         [InlineKeyboardButton("🖼 افزودن عکس",callback_data=f"faq_ep_{it['id']}")])
     return InlineKeyboardMarkup(_nav(
         [InlineKeyboardButton("🔑 کلیدواژه‌ها",callback_data=f"faq_ek_{it['id']}"),
          InlineKeyboardButton("📝 پاسخ",callback_data=f"faq_ea_{it['id']}")],
+        pic,
         [InlineKeyboardButton("⚫️ غیرفعال کن" if it.get("enabled",True) else "🟢 فعال کن",
                               callback_data=f"faq_tg_{it['id']}"),
          InlineKeyboardButton("🗑 حذف",callback_data=f"faq_dl_{it['id']}")],
         back="faq_menu"))
+
+def faq_by_key(word):
+    """پیدا کردن سؤال آماده از روی یک کلیدواژه‌ی دقیق — برای میان‌بر #."""
+    w=faq_norm(word).strip()
+    if len(w)<2: return None
+    for it in faq:
+        if any(faq_norm(k).strip()==w for k in it.get("keys",[])): return it
+    return None
 
 # ── پیام‌های بی‌جواب
 async def pending_text():
@@ -1148,9 +1176,15 @@ def settings_kb(owner=False):
     notif="🟢" if get_setting("notify_new_user") else "⚫️"
     fwd="🟢" if get_setting("forward_user_msgs") else "⚫️"
     shop="🟢" if get_setting("store_open") else "🔴"
+    auto="🟢" if get_setting("faq_auto") else "⚫️"
+    scut="🟢" if get_setting("faq_shortcut") else "⚫️"
+    unm ="🟢" if get_setting("log_unmatched") else "⚫️"
     rows=[[InlineKeyboardButton(f"{shop} فروشگاه باز است",callback_data="stg_store_open")],
           [InlineKeyboardButton(f"{notif} اعلان عضو جدید",callback_data="stg_notify_new_user")],
-          [InlineKeyboardButton(f"{fwd} دریافت پیام کاربران",callback_data="stg_forward_user_msgs")]]
+          [InlineKeyboardButton(f"{fwd} دریافت پیام کاربران",callback_data="stg_forward_user_msgs")],
+          [InlineKeyboardButton(f"{auto} پاسخ خودکار سؤال‌ها",callback_data="stg_faq_auto")],
+          [InlineKeyboardButton(f"{scut} میان‌بر #کلیدواژه",callback_data="stg_faq_shortcut")],
+          [InlineKeyboardButton(f"{unm} ثبت سؤال‌های بی‌پاسخ",callback_data="stg_log_unmatched")]]
     # مدیریت مدیرها و بازگردانی بک‌آپ فقط دستِ مالک است
     if owner:
         rows.append([InlineKeyboardButton(f"👮 مدیران ربات · {to_fa(len(_admins))}",
@@ -1358,6 +1392,33 @@ def faq_title(item):
     ks=item.get("keys") or []
     return ks[0] if ks else _fit(item.get("answer",""),30)
 
+def faq_photo_stamp(item):
+    """«لیست ۲۱ مرداد» — تاریخِ عکس روی خودِ جواب، تا اگر روزی آپدیت
+    نشد مشتری خودش بفهمد و بپرسد."""
+    ts=item.get("photo_at")
+    if not ts: return ""
+    try: d=datetime.strptime(ts,"%Y-%m-%d %H:%M:%S")
+    except Exception: return ""
+    j=jdatetime.datetime.fromgregorian(datetime=d)
+    return f"🗓 {to_fa(j.day)} {MONTH_FA[j.month]}"
+
+async def send_faq(msg,item,footer=True):
+    """پاسخ آماده — اگر عکس داشته باشد با عکس، وگرنه متنی."""
+    kb=faq_kb_for(item)
+    body=strip_text_links(item.get("answer","")) if kb else item.get("answer","")
+    head=f"<b>💡 {esc(faq_title(item))}</b>"
+    stamp=faq_photo_stamp(item)
+    if stamp: head += f"  ·  {esc(stamp)}"
+    tail=("\n\n<i>اگر پاسخ کامل نبود نگران نباشید — همکاران ما هم پیام شما را "
+          "دیدند و جواب می‌دهند.</i>") if footer else ""
+    txt=f"{head}\n{HR}\n{esc(body)}{tail}"
+    if item.get("photo"):
+        await msg.reply_photo(photo=item["photo"],caption=_fit(txt,CAP_LIMIT),
+                              parse_mode="HTML",reply_markup=kb)
+    else:
+        await msg.reply_text(_fit(txt,TEXT_LIMIT),parse_mode="HTML",
+                             reply_markup=kb or main_menu(),disable_web_page_preview=True)
+
 def faq_kb_for(item):
     """لینک‌های داخل پاسخ → دکمه، مثل بقیه‌ی بخش‌ها."""
     links=extract_links(item.get("answer",""))
@@ -1377,6 +1438,67 @@ SAMPLE_FAQ = [
     (["ارسال","پست","تیپاکس"],      "شرایط ارسال را اینجا بنویسید."),
     (["آدرس","کجایید","نشانی"],     "آدرس فروشگاه را اینجا بنویسید."),
 ]
+
+# ── سؤال‌های بی‌پاسخ: چیزی که مشتری پرسید و هیچ جوابی برایش نبود.
+# فهرستِ سؤال‌های آماده را به‌جای حدسِ ادمین، از خودِ مشتری‌ها می‌سازد.
+unmatched: list = []      # [{"text","count","last","uid"}]
+UNMATCHED_MAX = 200
+_UNM_MIN, _UNM_MAX = 3, 200   # کوتاه‌تر از این حرف نیست، بلندتر از این متن است
+
+async def log_unmatched(text,user=None):
+    if not get_setting("log_unmatched"): return
+    t=(text or "").strip()
+    if not (_UNM_MIN <= len(t) <= _UNM_MAX): return
+    n=faq_norm(t)
+    for it in unmatched:
+        if faq_norm(it["text"])==n:
+            it["count"]=it.get("count",1)+1; it["last"]=gregorian_now()
+            break
+    else:
+        unmatched.insert(0,{"text":t,"count":1,"last":gregorian_now(),
+                            "uid":getattr(user,"id",None)})
+        del unmatched[UNMATCHED_MAX:]
+    await save_unmatched()
+
+async def load_unmatched():
+    global unmatched
+    d=await _rj(UNMATCHED_FILE,list)
+    unmatched=[x for x in d if isinstance(x,dict) and x.get("text")][:UNMATCHED_MAX] \
+              if isinstance(d,list) else []
+
+async def save_unmatched(): return await _wj(UNMATCHED_FILE,unmatched)
+
+def unmatched_text():
+    if not get_setting("log_unmatched"):
+        return ("<b>❓ سؤال‌های بی‌پاسخ</b>\n"+HR+
+                "\n⚫️ این قابلیت از «تنظیمات» خاموش شده است.")
+    if not unmatched:
+        return ("<b>❓ سؤال‌های بی‌پاسخ</b>\n"+HR+
+                "\nهنوز سؤالی بدون جواب نمانده.")
+    top=sorted(unmatched,key=lambda x:(-x.get("count",1),x.get("last","")))
+    out=["<b>❓ سؤال‌های بی‌پاسخ</b>",HR,
+         "پرسش‌هایی که هیچ سؤال آماده‌ای جوابشان را نداشت — "
+         "پرتکرارها اول. روی هرکدام بزنید تا از رویش سؤال آماده بسازید.",HR]
+    for it in top[:20]:
+        c=it.get("count",1)
+        out.append(f"• {esc(_fit(it['text'],70))}"+(f"  ×{to_fa(c)}" if c>1 else ""))
+    return _fit("\n".join(out),TEXT_LIMIT)
+
+def unmatched_kb():
+    top=sorted(unmatched,key=lambda x:(-x.get("count",1),x.get("last","")))
+    rows=[]
+    for i,it in enumerate(top[:10]):
+        c=it.get("count",1)
+        rows.append([InlineKeyboardButton(
+            f"➕ {_fit(it['text'],28)}"+(f" ×{to_fa(c)}" if c>1 else ""),
+            callback_data=f"unm_{i}")])
+    if unmatched:
+        rows.append([InlineKeyboardButton("🗑 پاک کردن فهرست",callback_data="unm_clear")])
+    return InlineKeyboardMarkup(_nav(*rows,back="faq_menu"))
+
+def unmatched_at(i):
+    top=sorted(unmatched,key=lambda x:(-x.get("count",1),x.get("last","")))
+    return top[i] if 0<=i<len(top) else None
 
 async def load_faq():
     global faq
@@ -1729,7 +1851,7 @@ async def send_backup(bot):
     files=[(DATA_FILE,"data.json"),(BANNER_FILE,"banner.json"),(WORKHOURS_FILE,"workhours.json"),
            (BUTTONS_FILE,"buttons.json"),(SETTINGS_FILE,"settings.json"),(STATS_FILE,"stats.json"),
            (MENU_FILE,"menu.json"),(PLACES_FILE,"places.json"),(ADMINS_FILE,"admins.json"),
-           (FAQ_FILE,"faq.json"),(DB_FILE,"users.db")]
+           (FAQ_FILE,"faq.json"),(UNMATCHED_FILE,"unmatched.json"),(DB_FILE,"users.db")]
     with zipfile.ZipFile(buf,"w",zipfile.ZIP_DEFLATED) as zf:
         for fp,name in files:
             try:
@@ -1775,7 +1897,7 @@ async def _auto_backup_loop(bot):
 BACKUP_MAP = {"data.json":DATA_FILE,"banner.json":BANNER_FILE,"workhours.json":WORKHOURS_FILE,
               "buttons.json":BUTTONS_FILE,"settings.json":SETTINGS_FILE,"stats.json":STATS_FILE,
               "menu.json":MENU_FILE,"places.json":PLACES_FILE,"admins.json":ADMINS_FILE,
-              "faq.json":FAQ_FILE,"users.db":DB_FILE}
+              "faq.json":FAQ_FILE,"unmatched.json":UNMATCHED_FILE,"users.db":DB_FILE}
 SQLITE_MAGIC = b"SQLite format 3\x00"
 MAX_RESTORE_BYTES = 200 * 1024 * 1024   # سقف ایمنی برای فایل‌های داخل ZIP
 
@@ -1843,7 +1965,8 @@ async def restore_backup(bot,file_id):
 
         await load_data(); await load_banners(); await load_workhours()
         await load_buttons(); await load_settings(); await load_stats(); await load_menu(); await load_places()
-        await load_admins(); await load_faq()   # از فایل‌های تازه دوباره خوانده شوند
+        # از فایل‌های تازه دوباره خوانده شوند
+        await load_admins(); await load_faq(); await load_unmatched()
         # نرمال‌سازی فرمت فایل‌ها روی دیسک (جلوگیری از مشکل فرمت قدیمی بعد از restart)
         await save_banners(); await save_buttons()
         if snapshot: logger.info(f"بکاپ ایمنی پیش از بازگردانی: {snapshot}")
@@ -2006,6 +2129,47 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             await query.answer()
             ctx.user_data.update({"mode":"faq_ans","faq_id":it["id"]})
             await query.message.reply_text("📝 پاسخ جدید:",reply_markup=cancel_menu())
+
+        elif data.startswith("faq_ep_"):
+            it=faq_item(data[7:])
+            if not it: await query.answer("یافت نشد!",show_alert=True); return
+            await query.answer()
+            ctx.user_data.update({"mode":"faq_photo","faq_id":it["id"]})
+            k1=(it.get("keys") or [None])[0]
+            await query.message.reply_text(
+                "🖼 عکس را بفرستید (مثلاً لیست قیمت امروز).\n"
+                + (f"\n♻️ دفعه‌ی بعد لازم نیست از پنل بیایید — کافی است عکس را با "
+                   f"کپشن #{k1} بفرستید." if k1 else ""),
+                reply_markup=cancel_menu())
+
+        elif data.startswith("faq_dp_"):
+            it=faq_item(data[7:])
+            if not it: await query.answer("یافت نشد!",show_alert=True); return
+            it.pop("photo",None); it.pop("photo_at",None); await save_faq()
+            await query.answer("🗑 عکس حذف شد.",show_alert=True)
+            await safe_edit(query.message,faq_view_text(it),
+                            reply_markup=faq_view_kb(it),parse_mode="HTML")
+
+        elif data=="unm_menu":
+            await query.answer()
+            await safe_edit(query.message,unmatched_text(),
+                            reply_markup=unmatched_kb(),parse_mode="HTML")
+
+        elif data=="unm_clear":
+            unmatched.clear(); await save_unmatched()
+            await query.answer("🗑 فهرست پاک شد.",show_alert=True)
+            await safe_edit(query.message,unmatched_text(),
+                            reply_markup=unmatched_kb(),parse_mode="HTML")
+
+        elif data.startswith("unm_"):
+            it=unmatched_at(int(data[4:])) if data[4:].isdigit() else None
+            if not it: await query.answer("یافت نشد!",show_alert=True); return
+            await query.answer()
+            ctx.user_data.update({"mode":"faq_keys","faq_id":None})
+            await query.message.reply_text(
+                f"❓ سؤال مشتری:\n«{it['text']}»\n\n"
+                f"🔑 حالا کلیدواژه‌ها را با کاما بنویسید — کلمه‌هایی که در پیام‌های "
+                f"مشابه تکرار می‌شوند:",reply_markup=cancel_menu())
 
         elif data.startswith("faq_tg_"):
             it=faq_item(data[7:])
@@ -2791,18 +2955,13 @@ async def text_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
         await send_banner(update.message,full,mkey,kb=kb); return
 
     # پیام آزاد کاربر — اول ببینیم سؤال آماده‌ای جوابش را دارد یا نه
-    hit=faq_match(text)
+    hit=faq_match(text) if get_setting("faq_auto") else None
     if hit:
         hit["hits"]=hit.get("hits",0)+1; await save_faq()
-        body=strip_text_links(hit["answer"]) if faq_kb_for(hit) else hit["answer"]
-        await update.message.reply_text(
-            _fit(f"<b>💡 {esc(faq_title(hit))}</b>\n{HR}\n{esc(body)}\n\n"
-                 f"<i>اگر پاسخ کامل نبود نگران نباشید — همکاران ما هم پیام شما را "
-                 f"دیدند و جواب می‌دهند.</i>",TEXT_LIMIT),
-            parse_mode="HTML",reply_markup=faq_kb_for(hit) or main_menu(),
-            disable_web_page_preview=True)
+        await send_faq(update.message,hit)
         await forward_to_admin(update,ctx,auto=hit)
         return
+    await log_unmatched(text,user)
     if await forward_to_admin(update,ctx): return
     await update.message.reply_text(
         "لطفاً یکی از گزینه‌های منوی زیر را انتخاب کنید 👇",reply_markup=main_menu())
@@ -2856,6 +3015,22 @@ async def forward_to_admin(update:Update,ctx:ContextTypes.DEFAULT_TYPE,kind="",a
         logger.error(f"ack to user: {e}")
     return True
 
+class _ProxyChat:
+    """کمترین چیزی که send_faq لازم دارد تا به‌جای «پاسخ در همین چت»،
+    برای چتِ مشتری بفرستد."""
+    def __init__(self,bot,chat_id): self.bot=bot; self.chat_id=chat_id
+    async def reply_text(self,text,**kw):  return await self.bot.send_message(self.chat_id,text,**kw)
+    async def reply_photo(self,photo,**kw): return await self.bot.send_photo(self.chat_id,photo=photo,**kw)
+
+async def _ok_mark(bot,msg,fallback="✅ ارسال شد"):
+    """تأیید بی‌سروصدا با ری‌اکشن؛ اگر نشد، یک پیام کوتاه."""
+    try:
+        await bot.set_message_reaction(chat_id=msg.chat_id,message_id=msg.message_id,
+                                       reaction="👍")
+    except Exception:
+        try: await msg.reply_text(fallback)
+        except Exception: pass
+
 async def reply_relay(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     """پاسخ مدیر با همان کار طبیعی تلگرام: ریپلای روی پیام مشتری.
 
@@ -2870,6 +3045,30 @@ async def reply_relay(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     if src is None: return
     target=await thread_user(user.id,src.message_id)
     if target is None: return          # ریپلای بی‌ربط — بگذار بقیه رسیدگی کنند
+    # میان‌بر: به‌جای تایپ دوباره‌ی متن، فقط #کلیدواژه — همان جواب آماده می‌رود.
+    # با دو مدیر یعنی جواب‌ها یکدست هم می‌مانند.
+    body=(msg.text or msg.caption or "").strip()
+    if get_setting("faq_shortcut") and body.startswith("#") and len(body.split())==1:
+        it=faq_by_key(body[1:])
+        if not it:
+            await msg.reply_text(
+                f"❌ سؤال آماده‌ای با کلیدواژه‌ی «{body[1:]}» نیست. "
+                f"فهرست: پنل ← محتوای ربات ← سؤال‌های آماده")
+            raise ApplicationHandlerStop
+        try:
+            await send_faq(_ProxyChat(ctx.bot,target),it,footer=False)
+        except Forbidden:
+            await mark_left(target)
+            await msg.reply_text("🚪 این مشتری ربات را بلاک یا حذف کرده — پیام به او نمی‌رسد.")
+            raise ApplicationHandlerStop
+        except Exception as e:
+            logger.error(f"faq shortcut → {target}: {e}")
+            await msg.reply_text(f"❌ ارسال نشد: {e}"); raise ApplicationHandlerStop
+        it["hits"]=it.get("hits",0)+1; await save_faq()
+        await link_thread(user.id,msg.message_id,target)
+        await mark_answered(target)
+        await _ok_mark(ctx.bot,msg,f"✅ «{faq_title(it)}» ارسال شد")
+        raise ApplicationHandlerStop
     try:
         # copy_message یعنی پیام بدون برچسب «فوروارد از» می‌رسد — انگار
         # خودِ فروشگاه نوشته. همه‌ی انواع پیام را هم پشتیبانی می‌کند.
@@ -2886,12 +3085,7 @@ async def reply_relay(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
     # پاسخ خودِ مدیر هم به همین مشتری گره می‌خورد تا رشته ادامه پیدا کند
     await link_thread(user.id,msg.message_id,target)
     await mark_answered(target)
-    try:
-        await ctx.bot.set_message_reaction(chat_id=msg.chat_id,message_id=msg.message_id,
-                                           reaction="👍")
-    except Exception:
-        try: await msg.reply_text("✅ ارسال شد")
-        except Exception: pass
+    await _ok_mark(ctx.bot,msg)
     raise ApplicationHandlerStop
 
 # نوع پیام → برچسبی که در اعلان ادمین می‌آید
@@ -2950,6 +3144,13 @@ async def photo_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             f"{saved}\n\n♻️ این تصویر فقط یک‌بار آپلود می‌شود و از این پس بدون "
             f"آپلود مجدد برای کاربران ارسال می‌گردد.",
             reply_markup=main_menu()); return
+    if mode=="faq_photo":
+        fid=ctx.user_data.pop("faq_id",None); ctx.user_data.pop("mode",None)
+        it=faq_item(fid)
+        if not it:
+            await update.message.reply_text("❌ یافت نشد.",reply_markup=main_menu()); return
+        await faq_set_photo(update.message,it)
+        return
     if mode=="broadcast":
         ctx.user_data.pop("mode",None); caption=update.message.caption or""
         bc=pick_photo(update.message.photo) or photo   # سبک‌تر = ارسال سریع‌تر به همه
@@ -2959,6 +3160,34 @@ async def photo_handler(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
             f"👁 پیش‌نمایش بالا.\n🎯 {bc_label(aud)} — {to_fa(n)} نفر\nچه کار کنم؟",
             reply_markup=bc_confirm_kb())
         return
+    # میان‌بر: عکس با کپشن #کلیدواژه → عکسِ همان سؤال آماده عوض می‌شود.
+    # کارِ روزانه‌ی «لیست قیمت امروز» را یک‌مرحله‌ای می‌کند.
+    cap=(update.message.caption or "").strip()
+    if cap.startswith("#"):
+        it=faq_by_key(cap[1:].strip())
+        if it:
+            await faq_set_photo(update.message,it); return
+        await update.message.reply_text(
+            f"❌ سؤال آماده‌ای با کلیدواژه‌ی «{cap[1:].strip()}» پیدا نشد.",
+            reply_markup=main_menu()); return
+async def faq_set_photo(msg,it):
+    """عکس سؤال آماده.
+
+    برخلاف بنرها اینجا بزرگ‌ترین نسخه را برمی‌داریم: پای لیست قیمت،
+    خوانا بودن متنِ داخل عکس از چند کیلوبایت صرفه‌جویی مهم‌تر است.
+    """
+    pic=msg.photo[-1]
+    it["photo"]=pic.file_id; it["photo_at"]=gregorian_now()
+    if not it.get("enabled",True):
+        it["enabled"]=True            # عکس گذاشتی یعنی می‌خواهی استفاده شود
+    await save_faq()
+    size=f"  ·  {human_kb(pic.file_size)}" if getattr(pic,"file_size",0) else ""
+    await msg.reply_text(
+        f"✅ عکس «{faq_title(it)}» ثبت شد — {faq_photo_stamp(it)}{size}\n"
+        f"📐 {to_fa(getattr(pic,'width',0))}×{to_fa(getattr(pic,'height',0))}\n"
+        f"♻️ فقط یک‌بار آپلود می‌شود و از این پس بدون آپلود دوباره ارسال می‌گردد.",
+        reply_markup=main_menu())
+
 # ════════════════════════════════════════════════
 #  LOCATION HANDLER — ثبت لوکیشن بخش‌ها
 # ════════════════════════════════════════════════
@@ -3027,7 +3256,7 @@ async def post_init(app):
     await init_db(); await load_data(); await load_banners()
     await load_workhours(); await load_buttons(); await load_settings()
     await load_stats(); await load_menu(); await load_places(); await load_backup_registry()
-    await load_admins(); await bc_load(); await load_faq()
+    await load_admins(); await bc_load(); await load_faq(); await load_unmatched()
     asyncio.ensure_future(_spam_cleanup_loop())
     asyncio.ensure_future(_stats_flush_loop())
     asyncio.ensure_future(_auto_backup_loop(app.bot))

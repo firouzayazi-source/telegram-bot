@@ -49,6 +49,7 @@ places.json
 admins.json
 broadcast.json
 faq.json
+unmatched.json
 pre_restore.zip
 *.corrupt
 
