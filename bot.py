@@ -773,13 +773,26 @@ def user_sec_kb(key,home=False):
     return InlineKeyboardMarkup(btns) if btns else None
 
 # ── admin keyboards
+def backup_text():
+    last=settings.get("last_auto_backup") or ""
+    if last:
+        try:
+            j=jdatetime.date.fromgregorian(date=datetime.strptime(last,"%Y-%m-%d").date())
+            last=f"{to_fa(j.day)} {MONTH_FA[j.month]}"
+        except Exception: pass
+    return ("💾 پشتیبان‌گیری و بازیابی\n"+"─"*20+
+            "\n🗓 بکاپ خودکار: هفته‌ای یک‌بار، جمعه ۳ بامداد"+
+            (f"\n✅ آخرین بکاپ خودکار: {last}" if last else "\n⏳ هنوز بکاپ خودکاری نرفته")+
+            f"\n📦 {to_fa(len(_backup_registry))} نسخه‌ی اخیر نگه داشته می‌شود"
+            "\n\nهر وقت خواستید، «دریافت پشتیبان» فوری هم می‌گیرد.")
+
 def backup_kb():
     rows=[
         [InlineKeyboardButton("💾 دریافت پشتیبان",callback_data="backup_get"),
          InlineKeyboardButton("📥 بارگذاری فایل",callback_data="backup_import")]
     ]
     if _backup_registry:
-        rows.append([InlineKeyboardButton("──── بکاپ‌های خودکار ────",callback_data="noop")])
+        rows.append([InlineKeyboardButton("──── بکاپ‌های هفتگی ────",callback_data="noop")])
         for i,b in enumerate(reversed(_backup_registry)):
             rows.append([InlineKeyboardButton(f"♻️ {b['date']}",callback_data=f"backup_auto_{i}")])
     rows.extend(_nav(back="settings_menu"))
@@ -1844,7 +1857,7 @@ async def load_backup_registry():
 
 async def save_backup_registry(): await _wj(BACKUPS_FILE, _backup_registry)
 
-async def send_backup(bot):
+async def send_backup(bot,label="بک‌آپ"):
     global _backup_registry
     ts=shamsi_now().replace(" ","_").replace("—","-").replace(":","-")
     buf=io.BytesIO()
@@ -1859,7 +1872,7 @@ async def send_backup(bot):
             except Exception as e: logger.warning(f"backup skip {fp}: {e}")
     buf.seek(0)
     msg=await bot.send_document(OWNER_ID,document=buf,filename=f"backup_{ts}.zip",
-                                caption=f"💾 بک‌آپ — {shamsi_now()}")
+                                caption=f"💾 {label} — {shamsi_now()}")
     _backup_registry.append({"msg_id":msg.message_id,"file_id":msg.document.file_id,"date":shamsi_now()})
     # اگر بیشتر از MAX_BACKUPS داریم، قدیمی‌ترین را حذف کن
     while len(_backup_registry)>MAX_BACKUPS:
@@ -1868,31 +1881,44 @@ async def send_backup(bot):
         except Exception as e: logger.debug(f"backup delete old: {e}")
     await save_backup_registry()
 
+BACKUP_WEEKDAY = 6       # جمعه (در jdatetime: ۰=شنبه … ۶=جمعه)
+BACKUP_HOUR    = 3       # ۳ بامداد به وقت تهران
+BACKUP_MAX_GAP = 7       # اگر ربات جمعه خاموش بود، بیشتر از این تعداد روز نگذرد
+
+def _backup_due(now):
+    """آیا وقت بکاپ هفتگی است؟
+
+    تاریخِ آخرین بکاپ در settings.json می‌ماند، پس ری‌استارت باعث نمی‌شود
+    دوباره بکاپ بیاید — قبلاً این حالت در حافظه بود و هر ری‌استارت بعد از
+    ساعت هدف، یک بکاپ تکراری می‌فرستاد.
+    """
+    today=now.strftime("%Y-%m-%d")
+    last=settings.get("last_auto_backup") or ""
+    if last==today: return False,today
+    j=jdatetime.datetime.fromgregorian(datetime=now)
+    if j.weekday()==BACKUP_WEEKDAY and now.hour>=BACKUP_HOUR: return True,today
+    # اگر ربات روز مقرر خاموش بوده، بکاپ نباید بی‌نهایت عقب بیفتد
+    try:
+        if not last: return True,today
+        gap=(now.date()-datetime.strptime(last,"%Y-%m-%d").date()).days
+        if gap>=BACKUP_MAX_GAP: return True,today
+    except Exception:
+        return True,today
+    return False,today
+
 async def _auto_backup_loop(bot):
-    """هر شب ساعت ۳ بامداد به وقت تهران، بکاپ خودکار به ادمین می‌فرستد."""
-    _tz = pytz.timezone("Asia/Tehran")
-    last_backup_date = None   # جلوگیری از backup تکراری در همان روز
+    """هفته‌ای یک‌بار — جمعه ساعت ۳ بامداد به وقت تهران."""
+    await asyncio.sleep(60)          # بگذار راه‌اندازی تمام شود
     while True:
         try:
-            now = datetime.now(_tz)
-            today = now.date()
-            target = now.replace(hour=3, minute=0, second=0, microsecond=0)
-            if now >= target and last_backup_date != today:
-                await send_backup(bot)
-                last_backup_date = today
-                logger.info("✅ بکاپ خودکار ارسال شد")
-                await asyncio.sleep(3600)   # یک ساعت صبر کن تا دوباره چک نشود
-                continue
-            if now < target:
-                wait = (target - now).total_seconds()
-            else:
-                target += timedelta(days=1)
-                wait = (target - now).total_seconds()
-            logger.info(f"auto_backup: بعد از {int(wait//3600)}h {int((wait%3600)//60)}m")
-            await asyncio.sleep(wait)
+            due,today=_backup_due(datetime.now(IRAN_TZ))
+            if due:
+                await send_backup(bot,label="بک‌آپ هفتگی")
+                settings["last_auto_backup"]=today; await save_settings()
+                logger.info("✅ بکاپ هفتگی ارسال شد")
         except Exception as e:
             logger.error(f"auto_backup: {e}")
-            await asyncio.sleep(3600)
+        await asyncio.sleep(1800)
 
 BACKUP_MAP = {"data.json":DATA_FILE,"banner.json":BANNER_FILE,"workhours.json":WORKHOURS_FILE,
               "buttons.json":BUTTONS_FILE,"settings.json":SETTINGS_FILE,"stats.json":STATS_FILE,
@@ -2291,13 +2317,14 @@ async def callbacks(update:Update,ctx:ContextTypes.DEFAULT_TYPE):
 
         elif data=="backup":
             await query.answer()
-            await safe_edit(query.message,"💾 مدیریت بک‌آپ:",reply_markup=backup_kb())
+            await safe_edit(query.message,backup_text(),reply_markup=backup_kb())
 
         elif data=="backup_get":
             await query.answer()
             await safe_edit(query.message,"💾 در حال تهیه...",reply_markup=None)
             await send_backup(ctx.bot)
-            await safe_edit(query.message,"✅ بک‌آپ ارسال شد.",reply_markup=backup_kb())
+            await safe_edit(query.message,"✅ بک‌آپ ارسال شد.\n\n"+backup_text(),
+                            reply_markup=backup_kb())
 
         elif data.startswith("backup_auto_"):
             # فقط تأیید — بازگردانی کل کاربران و تنظیمات را جایگزین می‌کند
